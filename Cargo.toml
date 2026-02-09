@@ -1,0 +1,108 @@
+[package]
+name = "polyalpha"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88.0"
+description = "Polymarket quantitative arbitrage trading bot"
+
+[workspace]
+members = [
+    "crates/pa-core",
+    "crates/pa-market-data",
+    "crates/pa-strategy",
+    "crates/pa-execution",
+    "crates/pa-risk",
+    "crates/pa-storage",
+    "crates/pa-backtest",
+    "crates/pa-monitor",
+]
+
+[workspace.dependencies]
+# Internal crates
+pa-core = { path = "crates/pa-core" }
+pa-market-data = { path = "crates/pa-market-data" }
+pa-strategy = { path = "crates/pa-strategy" }
+pa-execution = { path = "crates/pa-execution" }
+pa-risk = { path = "crates/pa-risk" }
+pa-storage = { path = "crates/pa-storage" }
+pa-backtest = { path = "crates/pa-backtest" }
+pa-monitor = { path = "crates/pa-monitor" }
+
+# Polymarket SDK
+polymarket-client-sdk = { version = "0.4", features = [
+    "clob", "ws", "ctf", "gamma", "tracing",
+] }
+
+# Blockchain
+alloy = { version = "1.5", default-features = false, features = [
+    "signer-local", "providers", "contract", "reqwest",
+    "reqwest-rustls-tls", "serde", "sol-types",
+] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# Database
+sqlx = { version = "0.8", features = [
+    "runtime-tokio", "postgres", "chrono", "uuid", "rust_decimal",
+] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Configuration
+config = "0.14"
+dotenvy = "0.15"
+
+# Logging / Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Monitoring
+prometheus = "0.13"
+axum = "0.8"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Data structures
+dashmap = "6"
+rust_decimal = { version = "1.40", features = ["serde"] }
+rust_decimal_macros = "1.40"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+
+# Async utilities
+tokio-util = "0.7"
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+# Crypto
+hmac = "0.12"
+sha2 = "0.10"
+
+[dependencies]
+pa-core = { workspace = true }
+pa-market-data = { workspace = true }
+pa-strategy = { workspace = true }
+pa-execution = { workspace = true }
+pa-risk = { workspace = true }
+pa-storage = { workspace = true }
+pa-monitor = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+config = { workspace = true }
+dotenvy = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

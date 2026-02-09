@@ -1,0 +1,19 @@
+[package]
+name = "pa-execution"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pa-core = { workspace = true }
+polymarket-client-sdk = { workspace = true }
+alloy = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }

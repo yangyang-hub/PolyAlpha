@@ -1,0 +1,44 @@
+[chain]
+chain_id = 137
+rpc_url = "https://polygon-rpc.com"
+rpc_fallbacks = [
+    "https://rpc.ankr.com/polygon",
+]
+
+[clob]
+host = "https://clob.polymarket.com"
+ws_host = "wss://ws-subscriptions-clob.polymarket.com"
+
+[gamma]
+host = "https://gamma-api.polymarket.com"
+
+[strategy]
+enabled = ["yes_no"]
+scan_interval_ms = 100
+min_spread_bps = 300
+min_profit_usdc = 0.50
+max_trade_size_usdc = 500.0
+order_type = "FOK"
+
+[risk]
+max_position_per_market = 2000.0
+max_total_exposure = 10000.0
+max_daily_loss = 500.0
+circuit_breaker_loss = 1000.0
+circuit_breaker_consecutive_losses = 5
+max_slippage_bps = 50
+
+[database]
+url = "postgresql://polyalpha:polyalpha@localhost:5432/polyalpha"
+max_connections = 10
+
+[monitor]
+prometheus_port = 9090
+health_port = 8080
+alert_webhook = ""
+
+[market_filter]
+min_liquidity = 1000.0
+min_volume_24h = 5000.0
+max_markets = 200
+ws_max_instruments = 450
