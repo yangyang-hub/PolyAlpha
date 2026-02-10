@@ -5,8 +5,11 @@ edition = "2024"
 
 [dependencies]
 pa-core = { workspace = true }
+pa-market-data = { workspace = true }
+pa-monitor = { workspace = true }
 alloy = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 async-trait = { workspace = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }

@@ -1,4 +1,4 @@
-use alloy::primitives::U256;
+use alloy::primitives::{B256, U256};
 use alloy::providers::Provider;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use pa_core::traits::Executor;
 use pa_core::types::{
-    ArbitrageOpportunity, ExecutionPlan, ExecutionResult, ExecutionStatus,
-    TradeRecord, TradeSide, TxType,
+    ArbitrageOpportunity, CrossMarketLeg, CrossMarketOp, ExecutionPlan, ExecutionResult,
+    ExecutionStatus, NegRiskLeg, TradeRecord, TradeSide, TxType,
 };
 use pa_core::Result;
 
@@ -244,6 +244,185 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
             executed_at: Utc::now(),
         })
     }
+
+    /// Execute a cross-market arbitrage by running both legs concurrently.
+    /// Each leg delegates to either BuyAndMerge or SplitAndSell on its respective market.
+    async fn execute_cross_market(
+        &self,
+        leg_a: &CrossMarketLeg,
+        leg_b: &CrossMarketLeg,
+        amount: Decimal,
+        opportunity_id: Uuid,
+    ) -> Result<ExecutionResult> {
+        tracing::info!(
+            id = %opportunity_id,
+            op_a = ?leg_a.operation,
+            op_b = ?leg_b.operation,
+            amount = %amount,
+            "Executing CrossMarket arbitrage"
+        );
+
+        let (result_a, result_b) = tokio::join!(
+            self.execute_single_leg(leg_a, amount, opportunity_id),
+            self.execute_single_leg(leg_b, amount, opportunity_id),
+        );
+
+        let exec_a = result_a?;
+        let exec_b = result_b?;
+
+        let mut trades = exec_a.trades;
+        trades.extend(exec_b.trades);
+
+        let realized_profit = exec_a.realized_profit + exec_b.realized_profit;
+        let total_fees = exec_a.total_fees + exec_b.total_fees;
+        let total_gas = exec_a.total_gas + exec_b.total_gas;
+
+        let status = match (exec_a.status, exec_b.status) {
+            (ExecutionStatus::Success, ExecutionStatus::Success) => ExecutionStatus::Success,
+            (ExecutionStatus::NoFill, _) | (_, ExecutionStatus::NoFill) => {
+                ExecutionStatus::NoFill
+            }
+            _ => ExecutionStatus::PartialFill,
+        };
+
+        Ok(ExecutionResult {
+            opportunity_id,
+            status,
+            trades,
+            realized_profit,
+            total_fees,
+            total_gas,
+            executed_at: Utc::now(),
+        })
+    }
+
+    /// Execute a single cross-market leg.
+    async fn execute_single_leg(
+        &self,
+        leg: &CrossMarketLeg,
+        amount: Decimal,
+        opportunity_id: Uuid,
+    ) -> Result<ExecutionResult> {
+        match leg.operation {
+            CrossMarketOp::BuyAndMerge => {
+                self.execute_buy_and_merge(
+                    leg.yes_token_id,
+                    leg.no_token_id,
+                    leg.yes_price,
+                    leg.no_price,
+                    amount,
+                    leg.condition_id,
+                    opportunity_id,
+                )
+                .await
+            }
+            CrossMarketOp::SplitAndSell => {
+                self.execute_split_and_sell(
+                    leg.yes_token_id,
+                    leg.no_token_id,
+                    leg.yes_price,
+                    leg.no_price,
+                    amount,
+                    leg.condition_id,
+                    opportunity_id,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Execute a NegRisk multi-outcome arbitrage:
+    /// 1. Concurrently buy YES tokens for all outcomes via CLOB (FOK)
+    /// 2. The "complete set" of all YES tokens = $1.00
+    ///
+    /// Note: NegRisk markets use the NegRiskExchange for CLOB order signing,
+    /// which the SDK handles automatically via the `neg_risk` flag per token.
+    /// On-chain merge is not needed because the CLOB settlement handles it.
+    async fn execute_neg_risk(
+        &self,
+        legs: &[NegRiskLeg],
+        amount: Decimal,
+        _neg_risk_market_id: B256,
+        opportunity_id: Uuid,
+    ) -> Result<ExecutionResult> {
+        tracing::info!(
+            id = %opportunity_id,
+            legs = legs.len(),
+            amount = %amount,
+            "Executing NegRisk arbitrage"
+        );
+
+        // Step 1: Concurrently buy all YES tokens via CLOB FOK
+        let buy_futures: Vec<_> = legs
+            .iter()
+            .map(|leg| self.clob.buy_fok(leg.token_id, leg.price, amount))
+            .collect();
+
+        let results = futures::future::join_all(buy_futures).await;
+
+        let mut trades = Vec::with_capacity(legs.len());
+        let mut min_filled = amount;
+        let mut all_filled = true;
+
+        for (i, result) in results.into_iter().enumerate() {
+            let leg = &legs[i];
+            match result {
+                Ok(order) => {
+                    min_filled = min_filled.min(order.filled_size);
+                    if order.filled_size < amount {
+                        all_filled = false;
+                    }
+                    trades.push(TradeRecord {
+                        id: Uuid::now_v7(),
+                        token_id: leg.token_id,
+                        side: TradeSide::Buy,
+                        price: leg.price,
+                        size: amount,
+                        filled_size: order.filled_size,
+                        fee: Decimal::ZERO,
+                        tx_type: TxType::ClobOrder,
+                        tx_hash: None,
+                    });
+                }
+                Err(e) => {
+                    tracing::error!(
+                        leg = i,
+                        token_id = %leg.token_id,
+                        error = %e,
+                        "NegRisk leg failed"
+                    );
+                    min_filled = Decimal::ZERO;
+                    all_filled = false;
+                }
+            }
+        }
+
+        // Calculate profit based on minimum filled across all legs
+        let total_cost_per_unit: Decimal = legs.iter().map(|l| l.price).sum();
+        let realized_profit = if min_filled > Decimal::ZERO {
+            (Decimal::ONE - total_cost_per_unit) * min_filled
+        } else {
+            Decimal::ZERO
+        };
+
+        let status = if min_filled == amount && all_filled {
+            ExecutionStatus::Success
+        } else if min_filled > Decimal::ZERO {
+            ExecutionStatus::PartialFill
+        } else {
+            ExecutionStatus::NoFill
+        };
+
+        Ok(ExecutionResult {
+            opportunity_id,
+            status,
+            trades,
+            realized_profit,
+            total_fees: Decimal::ZERO,
+            total_gas: Decimal::ZERO,
+            executed_at: Utc::now(),
+        })
+    }
 }
 
 #[async_trait]
@@ -288,9 +467,22 @@ impl<P: Provider + Clone + Send + Sync> Executor for HybridOrchestrator<P> {
                 )
                 .await
             }
-            ExecutionPlan::NegRiskArbitrage { .. } => {
-                // TODO: Phase 2
-                Err(pa_core::Error::Execution("NegRisk not yet implemented".into()))
+            ExecutionPlan::NegRiskArbitrage {
+                neg_risk_market_id,
+                legs,
+                amount,
+            } => {
+                self.execute_neg_risk(legs, *amount, *neg_risk_market_id, opp.id)
+                    .await
+            }
+            ExecutionPlan::CrossMarket {
+                leg_a,
+                leg_b,
+                amount,
+                ..
+            } => {
+                self.execute_cross_market(leg_a, leg_b, *amount, opp.id)
+                    .await
             }
         }
     }

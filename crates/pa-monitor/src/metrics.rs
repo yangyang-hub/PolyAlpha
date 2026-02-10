@@ -11,24 +11,31 @@ pub static OPPORTUNITIES_DETECTED: LazyLock<IntCounter> = LazyLock::new(|| {
     counter
 });
 
+/// Number of opportunities rejected by risk manager.
+pub static OPPORTUNITIES_REJECTED: LazyLock<IntCounter> = LazyLock::new(|| {
+    let counter = IntCounter::new("opportunities_rejected_total", "Opportunities rejected by risk checks").unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
 /// Number of arbitrage opportunities executed.
-pub static OPPORTUNITIES_EXECUTED: LazyLock<IntCounter> = LazyLock::new(|| {
-    let counter = IntCounter::new("opportunities_executed_total", "Total opportunities executed").unwrap();
+pub static EXECUTIONS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
+    let counter = IntCounter::new("executions_total", "Total executions attempted").unwrap();
     REGISTRY.register(Box::new(counter.clone())).unwrap();
     counter
 });
 
-/// Number of opportunities skipped (risk/insufficient).
-pub static OPPORTUNITIES_SKIPPED: LazyLock<IntCounter> = LazyLock::new(|| {
-    let counter = IntCounter::new("opportunities_skipped_total", "Total opportunities skipped").unwrap();
+/// Number of execution errors.
+pub static EXECUTION_ERRORS: LazyLock<IntCounter> = LazyLock::new(|| {
+    let counter = IntCounter::new("execution_errors_total", "Total execution errors").unwrap();
     REGISTRY.register(Box::new(counter.clone())).unwrap();
     counter
 });
 
-/// Trade execution latency (detection to completion).
-pub static TRADE_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
+/// Execution latency (order submission to confirmation).
+pub static EXECUTION_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
     let hist = Histogram::with_opts(
-        histogram_opts!("trade_latency_seconds", "Trade execution latency",
+        histogram_opts!("execution_latency_seconds", "Execution latency",
             vec![0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0])
     ).unwrap();
     REGISTRY.register(Box::new(hist.clone())).unwrap();
@@ -54,4 +61,47 @@ pub static MONITORED_MARKETS: LazyLock<Gauge> = LazyLock::new(|| {
     let gauge = Gauge::new("monitored_markets", "Number of actively monitored markets").unwrap();
     REGISTRY.register(Box::new(gauge.clone())).unwrap();
     gauge
+});
+
+/// WebSocket reconnection attempts.
+pub static WS_RECONNECT_COUNT: LazyLock<IntCounter> = LazyLock::new(|| {
+    let counter = IntCounter::new("ws_reconnect_total", "WebSocket reconnection attempts").unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
+/// Number of order book snapshots recorded to database.
+pub static SNAPSHOTS_RECORDED: LazyLock<IntCounter> = LazyLock::new(|| {
+    let counter =
+        IntCounter::new("snapshots_recorded_total", "Order book snapshots saved to database")
+            .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
+/// Whether the circuit breaker is currently active (1=triggered, 0=ok).
+pub static CIRCUIT_BREAKER_ACTIVE: LazyLock<Gauge> = LazyLock::new(|| {
+    let gauge =
+        Gauge::new("circuit_breaker_active", "Circuit breaker status (1=triggered, 0=ok)").unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});
+
+/// Current total exposure in USD.
+pub static TOTAL_EXPOSURE: LazyLock<Gauge> = LazyLock::new(|| {
+    let gauge = Gauge::new("total_exposure_usd", "Total position exposure in USD").unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});
+
+/// Strategy scan cycle latency.
+pub static SCAN_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
+    let hist = Histogram::with_opts(histogram_opts!(
+        "scan_latency_seconds",
+        "Strategy scan cycle latency",
+        vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
+    ))
+    .unwrap();
+    REGISTRY.register(Box::new(hist.clone())).unwrap();
+    hist
 });

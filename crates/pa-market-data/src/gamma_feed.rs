@@ -1,8 +1,9 @@
 use alloy::primitives::{B256, U256};
 use futures::{StreamExt, pin_mut};
 use pa_core::config::Settings;
-use pa_core::types::{MarketInfo, Outcome, TokenInfo};
+use pa_core::types::{MarketInfo, NegRiskEvent, Outcome, TokenInfo};
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 
 /// Discovers markets from the Polymarket Gamma API and filters candidates.
 pub struct GammaFeed {
@@ -176,6 +177,53 @@ impl GammaFeed {
             fee_rate_bps,
             active,
         })
+    }
+
+    /// Discover NegRisk multi-outcome events from Gamma API.
+    ///
+    /// Groups all markets sharing the same `neg_risk_market_id` into `NegRiskEvent`s.
+    /// Only returns events with at least 2 outcome markets.
+    pub fn group_neg_risk_events(markets: &[MarketInfo]) -> Vec<NegRiskEvent> {
+        let mut groups: HashMap<B256, Vec<MarketInfo>> = HashMap::new();
+
+        for market in markets {
+            if !market.neg_risk {
+                continue;
+            }
+            if let Some(nr_id) = market.neg_risk_market_id {
+                groups.entry(nr_id).or_default().push(market.clone());
+            }
+        }
+
+        let events: Vec<NegRiskEvent> = groups
+            .into_iter()
+            .filter(|(_, ms)| ms.len() >= 2)
+            .map(|(nr_id, ms)| {
+                let fee_rate_bps = ms.first().map(|m| m.fee_rate_bps).unwrap_or(0);
+                NegRiskEvent {
+                    neg_risk_market_id: nr_id,
+                    markets: ms,
+                    fee_rate_bps,
+                }
+            })
+            .collect();
+
+        tracing::info!(
+            neg_risk_events = events.len(),
+            total_outcomes = events.iter().map(|e| e.markets.len()).sum::<usize>(),
+            "NegRisk events grouped"
+        );
+
+        events
+    }
+
+    /// Get all token IDs from NegRisk events (for WebSocket subscription).
+    pub fn extract_neg_risk_token_ids(events: &[NegRiskEvent]) -> Vec<U256> {
+        events
+            .iter()
+            .flat_map(|e| e.markets.iter())
+            .flat_map(|m| m.tokens.iter().map(|t| t.token_id))
+            .collect()
     }
 
     /// Fetch a single market by its condition ID.

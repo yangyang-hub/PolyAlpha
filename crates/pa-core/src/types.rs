@@ -21,6 +21,50 @@ pub struct MarketInfo {
     pub active: bool,
 }
 
+/// A NegRisk event containing multiple outcome markets.
+///
+/// In Polymarket, NegRisk events (e.g. "Who will win the election?") have N outcomes,
+/// each represented as a binary market with YES/NO tokens. The NegRiskAdapter enforces
+/// that the sum of all YES prices should equal $1.00.
+///
+/// Arbitrage opportunity: if `sum(YES_ask[i]) < $1.00`, buy all YES tokens and merge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NegRiskEvent {
+    /// The NegRisk market ID that groups all outcomes.
+    pub neg_risk_market_id: B256,
+    /// All outcome markets within this event.
+    pub markets: Vec<MarketInfo>,
+    /// Fee rate from any constituent market (they share the same rate).
+    pub fee_rate_bps: u32,
+}
+
+/// A pair of correlated binary markets suitable for cross-market arbitrage.
+///
+/// Example: "Will X happen by June?" and "Will X happen by December?"
+/// If the prices of correlated outcomes deviate from their expected sum,
+/// an arbitrage opportunity exists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrossMarketPair {
+    /// Unique identifier for this pair (deterministic from condition_ids).
+    pub pair_id: B256,
+    /// First market in the pair.
+    pub market_a: MarketInfo,
+    /// Second market in the pair.
+    pub market_b: MarketInfo,
+    /// The theoretical sum constraint (typically $1.00 for complementary outcomes).
+    pub expected_sum: Decimal,
+    /// How the markets are correlated.
+    pub correlation: CrossMarketCorrelation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CrossMarketCorrelation {
+    /// market_a YES + market_b YES = expected_sum
+    ComplementaryYes,
+    /// market_a YES + market_b NO = expected_sum
+    InverseYesNo,
+}
+
 /// YES or NO token information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenInfo {
@@ -96,7 +140,7 @@ pub struct ArbitrageOpportunity {
     pub execution_plan: ExecutionPlan,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StrategyType {
     /// YES+NO < $1.00 → buy both, merge to USDC
     YesNoMerge,
@@ -129,15 +173,31 @@ pub enum ExecutionPlan {
         split_amount: Decimal,
         condition_id: B256,
     },
-    /// NegRisk multi-outcome conversion.
+    /// NegRisk multi-outcome: buy YES tokens across all outcomes, merge.
     NegRiskArbitrage {
+        /// The NegRisk market ID for the event.
+        neg_risk_market_id: B256,
+        /// One leg per outcome: buy YES at ask price.
         legs: Vec<NegRiskLeg>,
+        /// Total amount to buy per outcome (min of all leg sizes).
+        amount: Decimal,
+    },
+    /// Cross-market arbitrage: execute paired trades on two independent markets.
+    CrossMarket {
+        pair_id: B256,
+        /// Leg on market A.
+        leg_a: CrossMarketLeg,
+        /// Leg on market B.
+        leg_b: CrossMarketLeg,
+        /// Total size to trade (min of both legs).
+        amount: Decimal,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NegRiskLeg {
     pub token_id: U256,
+    pub condition_id: B256,
     pub outcome: Outcome,
     pub side: TradeSide,
     pub price: Decimal,
@@ -148,6 +208,29 @@ pub struct NegRiskLeg {
 pub enum TradeSide {
     Buy,
     Sell,
+}
+
+/// A single leg of a cross-market arbitrage trade.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrossMarketLeg {
+    pub condition_id: B256,
+    pub yes_token_id: U256,
+    pub no_token_id: U256,
+    /// The operation on this market.
+    pub operation: CrossMarketOp,
+    /// Price for the YES token (ask if buying, bid if selling).
+    pub yes_price: Decimal,
+    /// Price for the NO token.
+    pub no_price: Decimal,
+    pub size: Decimal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CrossMarketOp {
+    /// Buy YES+NO, merge for $1.00 (when YES_ask + NO_ask < 1.00).
+    BuyAndMerge,
+    /// Split $1.00, sell YES+NO (when YES_bid + NO_bid > 1.00).
+    SplitAndSell,
 }
 
 // ──── Execution Result Types ────

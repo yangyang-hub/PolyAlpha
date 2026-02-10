@@ -4,8 +4,10 @@ use futures::StreamExt;
 use pa_core::config::Settings;
 use pa_core::types::{OrderBook, PriceLevel};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
+use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::cache::OrderBookCache;
@@ -25,6 +27,7 @@ pub struct WebSocketFeed {
     update_tx: broadcast::Sender<OrderBookUpdate>,
     cancel_token: CancellationToken,
     tasks: Vec<JoinHandle<()>>,
+    ws_connected: Arc<AtomicBool>,
 }
 
 impl WebSocketFeed {
@@ -43,6 +46,7 @@ impl WebSocketFeed {
             update_tx,
             cancel_token: CancellationToken::new(),
             tasks: Vec::new(),
+            ws_connected: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -57,12 +61,18 @@ impl WebSocketFeed {
             update_tx,
             cancel_token: CancellationToken::new(),
             tasks: Vec::new(),
+            ws_connected: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Get a receiver for order book update notifications.
     pub fn subscribe_updates(&self) -> broadcast::Receiver<OrderBookUpdate> {
         self.update_tx.subscribe()
+    }
+
+    /// Get the WebSocket connected status flag.
+    pub fn ws_connected(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.ws_connected)
     }
 
     /// Subscribe to order book updates for the given token IDs.
@@ -94,74 +104,103 @@ impl WebSocketFeed {
         let cache = Arc::clone(&self.cache);
         let update_tx = self.update_tx.clone();
         let cancel = self.cancel_token.clone();
+        let ws_connected = Arc::clone(&self.ws_connected);
 
         let handle = tokio::spawn(async move {
-            let stream = match ws_client.subscribe_orderbook(subscribe_ids) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to subscribe to order book");
-                    return;
-                }
-            };
-            let mut stream = Box::pin(stream);
+            let mut backoff = Duration::from_secs(1);
+            let max_backoff = Duration::from_secs(60);
 
             loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => {
-                        tracing::info!("WebSocket feed task cancelled");
-                        break;
+                let stream = match ws_client.subscribe_orderbook(subscribe_ids.clone()) {
+                    Ok(s) => {
+                        backoff = Duration::from_secs(1); // Reset on success
+                        ws_connected.store(true, Ordering::Relaxed);
+                        tracing::info!("WebSocket stream connected");
+                        s
                     }
-                    item = stream.next() => {
-                        match item {
-                            Some(Ok(book_update)) => {
-                                let token_id = book_update.asset_id;
-                                let timestamp = timestamp_ms_to_datetime(book_update.timestamp);
+                    Err(e) => {
+                        ws_connected.store(false, Ordering::Relaxed);
+                        tracing::error!(error = %e, backoff_ms = backoff.as_millis(), "Failed to subscribe, retrying");
+                        pa_monitor::metrics::WS_RECONNECT_COUNT.inc();
+                        tokio::select! {
+                            _ = cancel.cancelled() => break,
+                            _ = tokio::time::sleep(backoff) => {}
+                        }
+                        backoff = (backoff * 2).min(max_backoff);
+                        continue;
+                    }
+                };
+                let mut stream = Box::pin(stream);
 
-                                // Convert SDK OrderBookLevel to our PriceLevel
-                                let bids: Vec<PriceLevel> = book_update
-                                    .bids
-                                    .into_iter()
-                                    .map(|level| PriceLevel {
-                                        price: level.price,
-                                        size: level.size,
-                                    })
-                                    .collect();
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            tracing::info!("WebSocket feed task cancelled");
+                            ws_connected.store(false, Ordering::Relaxed);
+                            return;
+                        }
+                        item = stream.next() => {
+                            match item {
+                                Some(Ok(book_update)) => {
+                                    let token_id = book_update.asset_id;
+                                    let timestamp = timestamp_ms_to_datetime(book_update.timestamp);
 
-                                let asks: Vec<PriceLevel> = book_update
-                                    .asks
-                                    .into_iter()
-                                    .map(|level| PriceLevel {
-                                        price: level.price,
-                                        size: level.size,
-                                    })
-                                    .collect();
+                                    let bids: Vec<PriceLevel> = book_update
+                                        .bids
+                                        .into_iter()
+                                        .map(|level| PriceLevel {
+                                            price: level.price,
+                                            size: level.size,
+                                        })
+                                        .collect();
 
-                                let orderbook = OrderBook {
-                                    token_id,
-                                    bids,
-                                    asks,
-                                    timestamp,
-                                };
+                                    let asks: Vec<PriceLevel> = book_update
+                                        .asks
+                                        .into_iter()
+                                        .map(|level| PriceLevel {
+                                            price: level.price,
+                                            size: level.size,
+                                        })
+                                        .collect();
 
-                                // Update cache
-                                cache.update(token_id, orderbook);
+                                    let orderbook = OrderBook {
+                                        token_id,
+                                        bids,
+                                        asks,
+                                        timestamp,
+                                    };
 
-                                // Notify subscribers (ignore send errors - no receivers)
-                                let _ = update_tx.send(OrderBookUpdate {
-                                    token_id,
-                                    timestamp,
-                                });
-                            }
-                            Some(Err(e)) => {
-                                tracing::warn!(error = %e, "WebSocket order book stream error");
-                            }
-                            None => {
-                                tracing::info!("WebSocket order book stream ended");
-                                break;
+                                    cache.update(token_id, orderbook);
+
+                                    let _ = update_tx.send(OrderBookUpdate {
+                                        token_id,
+                                        timestamp,
+                                    });
+                                }
+                                Some(Err(e)) => {
+                                    tracing::warn!(error = %e, "WebSocket stream error, reconnecting");
+                                    ws_connected.store(false, Ordering::Relaxed);
+                                    pa_monitor::metrics::WS_RECONNECT_COUNT.inc();
+                                    break; // Break inner loop to reconnect
+                                }
+                                None => {
+                                    tracing::warn!("WebSocket stream ended, reconnecting");
+                                    ws_connected.store(false, Ordering::Relaxed);
+                                    pa_monitor::metrics::WS_RECONNECT_COUNT.inc();
+                                    break; // Break inner loop to reconnect
+                                }
                             }
                         }
                     }
                 }
+
+                // Wait before reconnecting
+                tracing::info!(backoff_ms = backoff.as_millis(), "Reconnecting WebSocket");
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = tokio::time::sleep(backoff) => {}
+                }
+                backoff = (backoff * 2).min(max_backoff);
             }
         });
 

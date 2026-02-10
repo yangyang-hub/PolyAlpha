@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 pa-core = { workspace = true }
+pa-monitor = { workspace = true }
 polymarket-client-sdk = { workspace = true }
 alloy = { workspace = true }
 tokio = { workspace = true }

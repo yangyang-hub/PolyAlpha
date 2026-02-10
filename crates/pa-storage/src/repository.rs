@@ -1,8 +1,10 @@
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-use crate::models::{OpportunityRow, TradeRow, OrderBookSnapshotRow};
+use crate::models::{MarketRow, OpportunityRow, OrderBookSnapshotRow, TokenRow, TradeRow};
 
 /// Repository for database operations.
+#[derive(Clone)]
 pub struct Repository {
     pool: PgPool,
 }
@@ -101,5 +103,101 @@ impl Repository {
     /// Get a reference to the connection pool.
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Load order book snapshots for given tokens within a time range.
+    ///
+    /// Results are ordered by timestamp ascending for chronological replay.
+    pub async fn load_snapshots(
+        &self,
+        token_ids: &[String],
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<OrderBookSnapshotRow>> {
+        let rows = sqlx::query_as::<_, OrderBookSnapshotRow>(
+            r#"SELECT id, token_id, timestamp, bids, asks, best_bid, best_ask, midpoint
+            FROM orderbook_snapshots
+            WHERE token_id = ANY($1) AND timestamp >= $2 AND timestamp <= $3
+            ORDER BY timestamp ASC"#,
+        )
+        .bind(token_ids)
+        .bind(from)
+        .bind(to)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Load market metadata for given condition IDs.
+    pub async fn load_markets(
+        &self,
+        condition_ids: &[Vec<u8>],
+    ) -> anyhow::Result<Vec<MarketRow>> {
+        let rows = sqlx::query_as::<_, MarketRow>(
+            r#"SELECT condition_id, question_id, question, neg_risk, neg_risk_market_id,
+                      tick_size, fee_rate_bps, active, created_at, updated_at
+            FROM markets
+            WHERE condition_id = ANY($1)"#,
+        )
+        .bind(condition_ids)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Load token info for given condition IDs.
+    pub async fn load_tokens(
+        &self,
+        condition_ids: &[Vec<u8>],
+    ) -> anyhow::Result<Vec<TokenRow>> {
+        let rows = sqlx::query_as::<_, TokenRow>(
+            r#"SELECT token_id, condition_id, outcome, complement_id
+            FROM tokens
+            WHERE condition_id = ANY($1)"#,
+        )
+        .bind(condition_ids)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Load all markets from the database.
+    pub async fn load_all_markets(&self) -> anyhow::Result<Vec<MarketRow>> {
+        let rows = sqlx::query_as::<_, MarketRow>(
+            r#"SELECT condition_id, question_id, question, neg_risk, neg_risk_market_id,
+                      tick_size, fee_rate_bps, active, created_at, updated_at
+            FROM markets WHERE active = true"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Load all tokens from the database.
+    pub async fn load_all_tokens(&self) -> anyhow::Result<Vec<TokenRow>> {
+        let rows = sqlx::query_as::<_, TokenRow>(
+            r#"SELECT token_id, condition_id, outcome, complement_id
+            FROM tokens"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Get all distinct token IDs that have snapshots in the given time range.
+    pub async fn snapshot_token_ids(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            r#"SELECT DISTINCT token_id FROM orderbook_snapshots
+            WHERE timestamp >= $1 AND timestamp <= $2"#,
+        )
+        .bind(from)
+        .bind(to)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 }
