@@ -3,6 +3,7 @@ name = "polyalpha"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88.0"
+default-run = "polyalpha"
 description = "Polymarket quantitative arbitrage trading bot"
 
 [workspace]

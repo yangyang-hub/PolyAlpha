@@ -96,7 +96,8 @@ impl Settings {
             .add_source(
                 config::Environment::with_prefix("PA")
                     .separator("__")
-                    .try_parsing(true),
+                    .try_parsing(true)
+                    .convert_case(config::Case::Snake),
             )
             .build()?;
 

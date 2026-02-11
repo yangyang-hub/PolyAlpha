@@ -57,7 +57,14 @@ async fn main() -> Result<()> {
     tracing::info!(address = %signer.address(), "Wallet loaded");
 
     // --- Initialize database ---
-    let repo = Repository::connect(&settings.database.url, settings.database.max_connections)
+    let db_url = std::env::var("PA_DATABASE__URL")
+        .unwrap_or_else(|_| settings.database.url.clone());
+    tracing::info!(
+        db_host = db_url.split('@').last().unwrap_or("?"),
+        from_env = std::env::var("PA_DATABASE__URL").is_ok(),
+        "Connecting to database"
+    );
+    let repo = Repository::connect(&db_url, settings.database.max_connections)
         .await
         .context("Failed to connect to database")?;
     repo.migrate().await.context("Failed to run database migrations")?;
