@@ -49,7 +49,7 @@ WORKDIR /app
 COPY --from=release /app/target/release/polyalpha /app/polyalpha
 COPY config/ /app/config/
 
-ENV RUST_LOG=info
+ENV RUST_LOG=info,polymarket_client_sdk::serde_helpers=error
 ENV RUN_MODE=production
 
 EXPOSE 18381
