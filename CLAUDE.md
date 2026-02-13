@@ -136,7 +136,7 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 - Gauges: realized_pnl_usd, active_ws_subscriptions, monitored_markets, circuit_breaker_active, total_exposure_usd
 - Histograms: execution_latency_seconds, scan_latency_seconds
 
-HTTP 端点（Axum, health_port 8080）:
+HTTP 端点（Axum, health_port 18381）:
 - `GET /health` → JSON 含 status + checks + uptime
 - `GET /ready` → 200 或 503（K8s readiness probe）
 - `GET /metrics` → Prometheus text format
@@ -150,7 +150,7 @@ docker/
 ├── Dockerfile              # 多阶段构建（依赖缓存层）
 ├── docker-compose.yml      # bot + postgres + prometheus + grafana
 ├── init.sql                # DDL
-├── prometheus.yml          # scrape polyalpha:8080/metrics
+├── prometheus.yml          # scrape localhost:18381/metrics
 └── grafana/
     ├── provisioning/       # 自动配置 datasource + dashboard provider
     └── dashboards/         # polyalpha-overview.json (11 面板)

@@ -52,6 +52,6 @@ COPY config/ /app/config/
 ENV RUST_LOG=info
 ENV RUN_MODE=production
 
-EXPOSE 8080 9090
+EXPOSE 18381
 
 CMD ["/app/polyalpha"]

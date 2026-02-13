@@ -4,5 +4,5 @@ global:
 scrape_configs:
   - job_name: 'polyalpha'
     static_configs:
-      - targets: ['polyalpha:8080']
+      - targets: ['localhost:18381']
     metrics_path: '/metrics'

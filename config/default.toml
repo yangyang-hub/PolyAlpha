@@ -34,7 +34,7 @@ max_connections = 10
 
 [monitor]
 prometheus_port = 9090
-health_port = 8080
+health_port = 18381
 alert_webhook = ""
 
 [market_filter]

@@ -218,7 +218,7 @@ docker compose up -d
 docker compose logs -f polyalpha
 
 # 健康检查
-curl http://localhost:8080/health
+curl http://localhost:18381/health
 ```
 
 ## 配置说明
@@ -266,7 +266,7 @@ max_connections = 10                        # 连接池大小
 
 [monitor]
 prometheus_port = 9090                      # 已废弃，metrics 通过 health_port 暴露
-health_port = 8080                          # 健康检查 + Metrics 端口
+health_port = 18381                         # 健康检查 + Metrics 端口
 alert_webhook = ""                          # Webhook 告警地址（可选）
 
 [market_filter]
@@ -321,7 +321,7 @@ cd docker && docker compose up -d
 ### 数据流
 
 ```
-PolyAlpha (:8080/metrics)  →  Prometheus (:9090)  →  Grafana (:3000)
+PolyAlpha (:18381/metrics)  →  Prometheus (:9090)  →  Grafana (:3000)
        暴露指标                    采集+存储               可视化
 ```
 
@@ -343,10 +343,10 @@ scrape_configs:
     scrape_interval: 15s
     metrics_path: '/metrics'
     static_configs:
-      - targets: ['localhost:8080']  # 机器人的 health_port
+      - targets: ['localhost:18381']  # 机器人的 health_port
 ```
 
-> 如果机器人运行在远程机器（如 `192.168.31.8`），将 `localhost:8080` 替换为 `192.168.31.8:8080`。
+> 如果机器人运行在远程机器（如 `192.168.31.8`），将 `localhost:18381` 替换为 `192.168.31.8:18381`。
 
 启动并验证：
 
@@ -390,7 +390,7 @@ sudo systemctl start grafana-server
 
 ```bash
 # 1. 确认机器人在暴露指标
-curl http://localhost:8080/metrics
+curl http://localhost:18381/metrics
 
 # 应看到类似输出:
 # opportunities_detected_total 0

@@ -23,12 +23,6 @@
 //      - --group-add           : 添加 docker 组权限
 //      - --network host        : 使用宿主机网络（bot 也用 host 网络，健康检查直接 localhost）
 //
-//    然后在 Jenkins 容器内安装 docker compose:
-//      docker exec -u root jenkins bash -c \
-//        "curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
-//         -o /usr/local/bin/docker-compose && chmod +x /usr/local/bin/docker-compose && \
-//         ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose"
-//
 // 2. Jenkins 安装插件: Pipeline, Git, Docker Pipeline
 //
 // 3. Jenkins 凭据中添加:
@@ -46,7 +40,6 @@ pipeline {
 
     environment {
         PROJECT        = 'polyalpha'
-        COMPOSE_DIR    = 'docker'
         BOT_CONTAINER  = 'polyalpha-bot'
 
         // ====== 修改这里 ======
@@ -89,7 +82,7 @@ pipeline {
             steps {
                 sh """
                     docker build \
-                        -f ${COMPOSE_DIR}/Dockerfile \
+                        -f docker/Dockerfile \
                         --target test \
                         -t ${PROJECT}-test:${IMAGE_TAG} \
                         .
@@ -105,7 +98,7 @@ pipeline {
             steps {
                 sh """
                     docker build \
-                        -f ${COMPOSE_DIR}/Dockerfile \
+                        -f docker/Dockerfile \
                         -t ${PROJECT}:${IMAGE_TAG} \
                         -t ${PROJECT}:latest \
                         .
@@ -123,14 +116,18 @@ pipeline {
             steps {
                 withCredentials([file(credentialsId: 'polyalpha-env', variable: 'ENV_FILE')]) {
                     sh """
-                        # 注入 .env
-                        cp "\$ENV_FILE" .env
+                        # 停止并移除旧容器
+                        docker stop ${BOT_CONTAINER} 2>/dev/null || true
+                        docker rm ${BOT_CONTAINER} 2>/dev/null || true
 
-                        cd ${COMPOSE_DIR}
-
-                        # 停止旧 bot → 启动新 bot
-                        docker compose down || true
-                        docker compose up -d --build
+                        # 启动新容器（host 网络，直接访问宿主机 PostgreSQL/Prometheus）
+                        docker run -d \
+                            --name ${BOT_CONTAINER} \
+                            --restart unless-stopped \
+                            --network host \
+                            --env-file "\$ENV_FILE" \
+                            -e RUN_MODE=production \
+                            ${PROJECT}:${IMAGE_TAG}
 
                         # 清理悬空镜像
                         docker image prune -f 2>/dev/null || true
@@ -141,7 +138,7 @@ pipeline {
 
         // ============================================================
         // Stage 5: 健康检查
-        // bot 使用 network_mode: host，直接通过 localhost:8080 访问
+        // bot 使用 network_mode: host，直接通过 localhost:18381 访问
         // ============================================================
         stage('Health Check') {
             steps {
@@ -157,7 +154,7 @@ pipeline {
                     fi
 
                     # 健康端点探测（bot 用 host 网络，直接 localhost）
-                    HEALTH_URL="http://localhost:8080/health"
+                    HEALTH_URL="http://localhost:18381/health"
 
                     for i in \$(seq 1 12); do
                         HTTP_CODE=\$(curl -sf -o /dev/null -w "%{http_code}" "\$HEALTH_URL" 2>/dev/null || echo "000")
