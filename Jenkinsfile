@@ -144,7 +144,7 @@ pipeline {
             steps {
                 sh """
                     echo "Waiting for bot to start..."
-                    sleep 8
+                    sleep 15
 
                     # 检查容器运行状态
                     if ! docker ps --filter "name=${BOT_CONTAINER}" --filter "status=running" -q | grep -q .; then
@@ -153,22 +153,39 @@ pipeline {
                         exit 1
                     fi
 
-                    # 健康端点探测（bot 用 host 网络，直接 localhost）
-                    HEALTH_URL="http://localhost:18381/health"
+                    # 诊断: 显示 bot 启动日志（前30行，含健康服务启动信息）
+                    echo "=== Bot startup logs (first 30 lines) ==="
+                    docker logs ${BOT_CONTAINER} 2>&1 | head -30
+                    echo "=== End startup logs ==="
 
-                    for i in \$(seq 1 12); do
-                        HTTP_CODE=\$(curl -sf -o /dev/null -w "%{http_code}" "\$HEALTH_URL" 2>/dev/null || echo "000")
+                    # 诊断: 检查 bot 环境变量中是否有端口覆盖
+                    echo "=== Checking health port config ==="
+                    docker exec ${BOT_CONTAINER} sh -c 'echo "PA_MONITOR vars: "; env | grep -i "PA_MONITOR" || echo "(none)"' 2>/dev/null || true
+
+                    # 诊断: 检查端口监听状态
+                    echo "=== Checking listening ports ==="
+                    docker exec ${BOT_CONTAINER} sh -c 'cat /proc/net/tcp 2>/dev/null | head -5' || true
+
+                    # 诊断: 尝试从容器内部 curl
+                    echo "=== Trying curl from inside container ==="
+                    docker exec ${BOT_CONTAINER} sh -c 'curl -sf http://192.168.31.8:18381/health 2>&1 || echo "18381 failed"' 2>/dev/null || true
+
+                    # 健康端点探测（bot 用 host 网络，直接 localhost）
+                    HEALTH_URL="http://192.168.31.8:18381/health"
+
+                    for i in \$(seq 1 15); do
+                        HTTP_CODE=\$(curl -so /dev/null -w "%{http_code}" "\$HEALTH_URL" 2>/dev/null) || HTTP_CODE="000"
                         if [ "\$HTTP_CODE" = "200" ]; then
                             echo "Health check PASSED (HTTP 200)"
                             curl -sf "\$HEALTH_URL" 2>/dev/null || true
                             exit 0
                         fi
-                        echo "Attempt \$i/12: HTTP \$HTTP_CODE, retrying in 5s..."
+                        echo "Attempt \$i/15: HTTP \$HTTP_CODE, retrying in 5s..."
                         sleep 5
                     done
 
-                    echo "ERROR: Health check failed after 60s"
-                    docker logs ${BOT_CONTAINER} --tail 100 2>/dev/null || true
+                    echo "ERROR: Health check failed after 75s"
+                    docker logs ${BOT_CONTAINER} --tail 50 2>/dev/null || true
                     exit 1
                 """
             }
