@@ -29,7 +29,12 @@ COPY . .
 # Touch source files to invalidate the cache for our code only
 RUN find src crates -name "*.rs" -exec touch {} +
 
+# Test stage (used by CI: docker build --target test)
+FROM builder AS test
+RUN cargo test --workspace
+
 # Build the real binary
+FROM builder AS release
 RUN cargo build --release
 
 # Runtime stage
@@ -41,7 +46,7 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/polyalpha /app/polyalpha
+COPY --from=release /app/target/release/polyalpha /app/polyalpha
 COPY config/ /app/config/
 
 ENV RUST_LOG=info

@@ -204,21 +204,21 @@ cargo test --workspace
 cargo run --release
 ```
 
-### Docker 一键部署
+### Docker 部署
+
+> **注意**: docker-compose 仅管理 PolyAlpha bot 容器。PostgreSQL、Prometheus、Grafana 需独立部署（参考下方「独立安装 Grafana + Prometheus」章节）。
 
 ```bash
 cd docker
 
-# 启动所有服务（bot + postgres + prometheus + grafana）
+# 启动 bot（使用 host 网络，直接访问宿主机上的 PostgreSQL 等服务）
 docker compose up -d
 
 # 查看日志
 docker compose logs -f polyalpha
 
-# 访问监控面板
-# Grafana:     http://localhost:3000  (admin/admin)
-# Prometheus:  http://localhost:9090
-# Health:      http://localhost:8080/health
+# 健康检查
+curl http://localhost:8080/health
 ```
 
 ## 配置说明
@@ -288,18 +288,17 @@ ws_max_instruments = 450                    # WS 最大订阅数（上限 500）
 
 ## Docker 部署
 
-### 服务组件
+docker-compose 仅管理 PolyAlpha bot 容器，使用 `network_mode: host` 直接访问宿主机上的 PostgreSQL、Prometheus 等服务。
 
-| 服务 | 镜像 | 端口 | 说明 |
-|------|------|------|------|
-| `polyalpha` | 自构建 (Rust) | 8080 | 交易机器人 + 健康检查 |
-| `postgres` | postgres:16-alpine | 5432 | 数据库（持久化卷） |
-| `prometheus` | prom/prometheus | 9090 | 指标采集 |
-| `grafana` | grafana/grafana | 3000 | 可视化仪表盘 |
+```bash
+cd docker && docker compose up -d
+```
+
+确保 `.env` 中的 `PA_DATABASE__URL` 指向正确的 PostgreSQL 地址。
 
 ### Grafana 仪表盘
 
-Docker 启动后 Grafana 自动加载预配置的仪表盘（无需手动导入），包含 11 个面板：
+包含 11 个面板：
 
 | 面板 | 类型 | 指标 |
 |------|------|------|
@@ -314,6 +313,96 @@ Docker 启动后 Grafana 自动加载预配置的仪表盘（无需手动导入�
 | Execution Latency | 时序图 | `histogram_quantile(0.5/0.95, execution_latency_seconds)` |
 | Scan Latency | 热力图 | `scan_latency_seconds_bucket` |
 | WS Reconnections | 柱状图 | `rate(ws_reconnect_total[5m])` |
+
+## 独立安装 Grafana + Prometheus
+
+如果不使用 Docker 全栈部署，可以单独安装 Prometheus 和 Grafana 接入机器人的监控指标。
+
+### 数据流
+
+```
+PolyAlpha (:8080/metrics)  →  Prometheus (:9090)  →  Grafana (:3000)
+       暴露指标                    采集+存储               可视化
+```
+
+### 第一步：安装 Prometheus
+
+```bash
+# Ubuntu/Debian
+sudo apt install prometheus
+
+# 或手动下载: https://prometheus.io/download/
+```
+
+编辑 Prometheus 配置，添加 PolyAlpha 采集目标：
+
+```yaml
+# /etc/prometheus/prometheus.yml — 在 scrape_configs 下追加
+scrape_configs:
+  - job_name: 'polyalpha'
+    scrape_interval: 15s
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['localhost:8080']  # 机器人的 health_port
+```
+
+> 如果机器人运行在远程机器（如 `192.168.31.8`），将 `localhost:8080` 替换为 `192.168.31.8:8080`。
+
+启动并验证：
+
+```bash
+sudo systemctl restart prometheus
+# 访问 http://localhost:9090/targets — polyalpha 状态应为 UP
+```
+
+### 第二步：安装 Grafana
+
+```bash
+# Ubuntu/Debian
+sudo apt install -y adduser libfontconfig1 musl
+wget https://dl.grafana.com/oss/release/grafana_11.5.2_amd64.deb
+sudo dpkg -i grafana_11.5.2_amd64.deb
+sudo systemctl enable grafana-server
+sudo systemctl start grafana-server
+```
+
+### 第三步：配置数据源
+
+1. 浏览器打开 `http://localhost:3000`（默认账号 `admin` / `admin`）
+2. 左侧菜单 → **Connections** → **Data sources** → **Add data source**
+3. 选择 **Prometheus**
+4. URL 填写 `http://localhost:9090`
+5. 点击 **Save & Test**，显示绿色 ✓ 即成功
+
+### 第四步：导入仪表盘
+
+1. 左侧菜单 → **Dashboards** → **Import**
+2. 点击 **Upload JSON file**，选择项目中的：
+   ```
+   docker/grafana/dashboards/polyalpha-overview.json
+   ```
+3. 在 **DS_PROMETHEUS** 下拉框中选择上一步添加的 Prometheus 数据源
+4. 点击 **Import**
+
+完成后即可看到 11 个面板的实时监控仪表盘。
+
+### 验证数据链路
+
+```bash
+# 1. 确认机器人在暴露指标
+curl http://localhost:8080/metrics
+
+# 应看到类似输出:
+# opportunities_detected_total 0
+# realized_pnl_usd 0
+# monitored_markets 200
+
+# 2. 确认 Prometheus 能采集
+# 访问 http://localhost:9090/targets — polyalpha 应显示 UP
+
+# 3. 在 Grafana 中查看仪表盘
+# 访问 http://localhost:3000 → Dashboards → PolyAlpha Overview
+```
 
 ## 回测系统
 
