@@ -19,6 +19,9 @@ pub struct MarketInfo {
     pub tick_size: Decimal,
     pub fee_rate_bps: u32,
     pub active: bool,
+    /// Market liquidity in USD (from Gamma API). Used for prioritizing subscriptions.
+    #[serde(default)]
+    pub liquidity: Decimal,
 }
 
 /// A NegRisk event containing multiple outcome markets.

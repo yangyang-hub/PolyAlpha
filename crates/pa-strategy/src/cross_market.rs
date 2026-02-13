@@ -448,6 +448,7 @@ mod tests {
             tick_size: dec!(0.01),
             fee_rate_bps: 200,
             active: true,
+            liquidity: dec!(1000),
         }
     }
 

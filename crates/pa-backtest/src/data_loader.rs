@@ -103,6 +103,7 @@ impl DataLoader {
                 tick_size: m.tick_size,
                 fee_rate_bps: m.fee_rate_bps as u32,
                 active: m.active,
+                liquidity: Decimal::ZERO,
             });
         }
 

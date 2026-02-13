@@ -89,14 +89,13 @@ impl GammaFeed {
             "Raw market discovery complete"
         );
 
-        // Filter and sort
+        // Filter and sort by liquidity descending (keep best markets when truncating)
         let mut filtered: Vec<MarketInfo> = all_markets
             .into_iter()
             .filter(|m| m.active)
             .collect();
 
-        // Sort by a rough priority: active markets first, then we could extend
-        // For now just truncate to max_markets
+        filtered.sort_by(|a, b| b.liquidity.cmp(&a.liquidity));
         filtered.truncate(self.max_markets);
 
         tracing::info!(
@@ -176,6 +175,7 @@ impl GammaFeed {
             tick_size,
             fee_rate_bps,
             active,
+            liquidity,
         })
     }
 

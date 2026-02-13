@@ -15,8 +15,8 @@ host = "https://gamma-api.polymarket.com"
 [strategy]
 enabled = ["yes_no"]
 scan_interval_ms = 100
-min_spread_bps = 300
-min_profit_usdc = 0.50
+min_spread_bps = 200
+min_profit_usdc = 0.20
 max_trade_size_usdc = 500.0
 order_type = "FOK"
 
@@ -38,7 +38,7 @@ health_port = 18381
 alert_webhook = ""
 
 [market_filter]
-min_liquidity = 1000.0
-min_volume_24h = 5000.0
-max_markets = 200
+min_liquidity = 300.0
+min_volume_24h = 1000.0
+max_markets = 225
 ws_max_instruments = 450

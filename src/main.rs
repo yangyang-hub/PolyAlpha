@@ -8,6 +8,7 @@ use alloy::signers::local::PrivateKeySigner;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -178,6 +179,146 @@ async fn main() -> Result<()> {
                     if recorded > 0 {
                         pa_monitor::metrics::SNAPSHOTS_RECORDED.inc_by(recorded);
                         tracing::debug!(count = recorded, "Snapshots recorded");
+                    }
+                }
+            }
+        }
+    });
+
+    // --- Market spread observer (observation mode) ---
+    // Every 60s, scans all binary markets and logs spread distribution.
+    // Helps evaluate arbitrage opportunity density without executing trades.
+    let observer_cache = market_data.cache().clone();
+    let observer_markets = markets.clone();
+    let observer_cancel = cancel.clone();
+    let observer_settings = settings.strategy.clone();
+    tokio::spawn(async move {
+        // Wait 30s for order books to populate
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        let profit_calc = pa_strategy::profitability::ProfitCalculator::new(dec!(0.01));
+        loop {
+            tokio::select! {
+                _ = observer_cancel.cancelled() => break,
+                _ = interval.tick() => {
+                    let mut total_checked = 0u32;
+                    let mut has_book = 0u32;
+                    // BuyAndMerge observations
+                    let mut bm_any_spread = 0u32;       // YES+NO ask < 1.00
+                    let mut bm_above_min_bps = 0u32;    // spread >= min_spread_bps
+                    let mut bm_above_min_profit = 0u32;  // net_profit >= min_profit
+                    let mut bm_best_spread = Decimal::ZERO;
+                    let mut bm_best_profit = Decimal::ZERO;
+                    let mut bm_best_question = String::new();
+                    // SplitAndSell observations
+                    let mut ss_any_spread = 0u32;
+                    let mut ss_above_min_bps = 0u32;
+                    let mut ss_above_min_profit = 0u32;
+                    let mut ss_best_spread = Decimal::ZERO;
+                    let mut ss_best_profit = Decimal::ZERO;
+                    let mut ss_best_question = String::new();
+
+                    for market in &observer_markets {
+                        if market.neg_risk || market.tokens.len() != 2 || !market.active {
+                            continue;
+                        }
+                        total_checked += 1;
+
+                        let yes_book = match observer_cache.get(&market.tokens[0].token_id) {
+                            Some(b) => b,
+                            None => continue,
+                        };
+                        let no_book = match observer_cache.get(&market.tokens[1].token_id) {
+                            Some(b) => b,
+                            None => continue,
+                        };
+                        has_book += 1;
+
+                        // --- BuyAndMerge check ---
+                        if let (Some(yes_ask), Some(no_ask)) = (yes_book.best_ask(), no_book.best_ask()) {
+                            let total_cost = yes_ask.price + no_ask.price;
+                            if total_cost < Decimal::ONE {
+                                let spread = Decimal::ONE - total_cost;
+                                let spread_bps = (spread * dec!(10000)).to_string().parse::<u32>().unwrap_or(0);
+                                let max_size = yes_ask.size.min(no_ask.size).min(observer_settings.max_trade_size_usdc);
+                                let est = profit_calc.buy_and_merge_profit(yes_ask.price, no_ask.price, max_size, market.fee_rate_bps);
+
+                                bm_any_spread += 1;
+                                if spread_bps >= observer_settings.min_spread_bps {
+                                    bm_above_min_bps += 1;
+                                }
+                                if est.net_profit >= observer_settings.min_profit_usdc {
+                                    bm_above_min_profit += 1;
+                                }
+                                if spread > bm_best_spread {
+                                    bm_best_spread = spread;
+                                    bm_best_profit = est.net_profit;
+                                    bm_best_question = format!(
+                                        "{} (ask:{:.2}+{:.2}={:.2}, spread:{:.1}bps, profit:${:.4}, size:{:.0})",
+                                        &market.question[..market.question.len().min(50)],
+                                        yes_ask.price, no_ask.price, total_cost,
+                                        spread * dec!(10000), est.net_profit, max_size,
+                                    );
+                                }
+                            }
+                        }
+
+                        // --- SplitAndSell check ---
+                        if let (Some(yes_bid), Some(no_bid)) = (yes_book.best_bid(), no_book.best_bid()) {
+                            let total_revenue = yes_bid.price + no_bid.price;
+                            if total_revenue > Decimal::ONE {
+                                let spread = total_revenue - Decimal::ONE;
+                                let spread_bps = (spread * dec!(10000)).to_string().parse::<u32>().unwrap_or(0);
+                                let max_size = yes_bid.size.min(no_bid.size).min(observer_settings.max_trade_size_usdc);
+                                let est = profit_calc.split_and_sell_profit(yes_bid.price, no_bid.price, max_size, market.fee_rate_bps);
+
+                                ss_any_spread += 1;
+                                if spread_bps >= observer_settings.min_spread_bps {
+                                    ss_above_min_bps += 1;
+                                }
+                                if est.net_profit >= observer_settings.min_profit_usdc {
+                                    ss_above_min_profit += 1;
+                                }
+                                if spread > ss_best_spread {
+                                    ss_best_spread = spread;
+                                    ss_best_profit = est.net_profit;
+                                    ss_best_question = format!(
+                                        "{} (bid:{:.2}+{:.2}={:.2}, spread:{:.1}bps, profit:${:.4}, size:{:.0})",
+                                        &market.question[..market.question.len().min(50)],
+                                        yes_bid.price, no_bid.price, total_revenue,
+                                        spread * dec!(10000), est.net_profit, max_size,
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    tracing::info!(
+                        markets_checked = total_checked,
+                        with_orderbook = has_book,
+                        "━━━ Market Spread Observer ━━━"
+                    );
+                    tracing::info!(
+                        any_spread = bm_any_spread,
+                        pass_spread_filter = bm_above_min_bps,
+                        pass_profit_filter = bm_above_min_profit,
+                        best_spread_bps = %format!("{:.0}", bm_best_spread * dec!(10000)),
+                        best_profit_usd = %format!("{:.4}", bm_best_profit),
+                        "[BuyAndMerge] spread distribution"
+                    );
+                    if !bm_best_question.is_empty() {
+                        tracing::info!(market = %bm_best_question, "[BuyAndMerge] best opportunity");
+                    }
+                    tracing::info!(
+                        any_spread = ss_any_spread,
+                        pass_spread_filter = ss_above_min_bps,
+                        pass_profit_filter = ss_above_min_profit,
+                        best_spread_bps = %format!("{:.0}", ss_best_spread * dec!(10000)),
+                        best_profit_usd = %format!("{:.4}", ss_best_profit),
+                        "[SplitAndSell] spread distribution"
+                    );
+                    if !ss_best_question.is_empty() {
+                        tracing::info!(market = %ss_best_question, "[SplitAndSell] best opportunity");
                     }
                 }
             }
