@@ -6,6 +6,7 @@ use std::time::Duration;
 use alloy::signers::Signer as _;
 use alloy::signers::local::PrivateKeySigner;
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use chrono::Utc;
 use rust_decimal_macros::dec;
 use tokio_util::sync::CancellationToken;
@@ -76,7 +77,8 @@ async fn main() -> Result<()> {
     let cancel = CancellationToken::new();
 
     // --- Initialize market data ---
-    let market_data = MarketDataService::with_defaults(&settings);
+    let market_data = MarketDataService::new(&settings)
+        .context("Failed to initialize market data service")?;
     tracing::info!("Market data service initialized");
 
     // --- Start health/metrics server ---
@@ -184,9 +186,20 @@ async fn main() -> Result<()> {
 
     // --- Initialize execution layer ---
     tracing::info!("Authenticating with CLOB API...");
-    let clob = ClobExecutor::connect(&settings.clob.host, signer).await
-        .context("Failed to authenticate with CLOB API")?;
-    tracing::info!("CLOB authenticated");
+    let clob = match ClobExecutor::connect(&settings.clob.host, signer).await {
+        Ok(c) => {
+            tracing::info!("CLOB authenticated");
+            Some(c)
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "CLOB authentication failed — running in OBSERVE-ONLY mode. \
+                 Ensure your wallet has logged into polymarket.com at least once."
+            );
+            None
+        }
+    };
 
     let provider = alloy::providers::ProviderBuilder::new()
         .connect(&settings.chain.rpc_url)
@@ -196,8 +209,13 @@ async fn main() -> Result<()> {
         .context("Failed to create CTF executor")?;
     tracing::info!("CTF executor initialized");
 
-    let orchestrator = HybridOrchestrator::new(clob, ctf);
-    let executor: Arc<dyn pa_core::traits::Executor> = Arc::new(orchestrator);
+    // Build executor: real orchestrator if CLOB available, dry-run otherwise
+    let trading_enabled = clob.is_some();
+    let executor: Arc<dyn pa_core::traits::Executor> = if let Some(clob) = clob {
+        Arc::new(HybridOrchestrator::new(clob, ctf))
+    } else {
+        Arc::new(DryRunExecutor)
+    };
 
     // --- Initialize risk manager ---
     let risk_manager: Arc<dyn pa_core::traits::RiskManager> =
@@ -255,7 +273,10 @@ async fn main() -> Result<()> {
         settings.strategy.scan_interval_ms,
     );
 
-    tracing::info!("PolyAlpha initialized — entering trading loop");
+    tracing::info!(
+        trading = trading_enabled,
+        "PolyAlpha initialized — entering trading loop"
+    );
 
     // --- Run trading loop with graceful shutdown ---
     let engine_cancel = cancel.clone();
@@ -296,4 +317,37 @@ fn price_levels_to_json(levels: &[pa_core::types::PriceLevel]) -> serde_json::Va
             })
             .collect(),
     )
+}
+
+/// No-op executor used when CLOB authentication fails (observe-only mode).
+///
+/// Logs detected opportunities without executing any trades.
+struct DryRunExecutor;
+
+#[async_trait]
+impl pa_core::traits::Executor for DryRunExecutor {
+    async fn execute(
+        &self,
+        opportunity: &pa_core::types::ArbitrageOpportunity,
+    ) -> pa_core::Result<pa_core::types::ExecutionResult> {
+        tracing::info!(
+            id = %opportunity.id,
+            strategy = ?opportunity.strategy_type,
+            profit = %opportunity.estimated_profit,
+            "[DRY-RUN] Would execute opportunity"
+        );
+        Ok(pa_core::types::ExecutionResult {
+            opportunity_id: opportunity.id,
+            status: pa_core::types::ExecutionStatus::NoFill,
+            trades: vec![],
+            realized_profit: rust_decimal::Decimal::ZERO,
+            total_fees: rust_decimal::Decimal::ZERO,
+            total_gas: rust_decimal::Decimal::ZERO,
+            executed_at: chrono::Utc::now(),
+        })
+    }
+
+    async fn cancel_all(&self) -> pa_core::Result<()> {
+        Ok(())
+    }
 }

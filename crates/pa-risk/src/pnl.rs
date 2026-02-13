@@ -50,6 +50,10 @@ impl PnlTracker {
         let wins = self.winning_trades.lock().map(|w| *w).unwrap_or(0);
         wins as f64 / total as f64
     }
+
+    pub fn started_at(&self) -> DateTime<Utc> {
+        self.started_at
+    }
 }
 
 impl Default for PnlTracker {
