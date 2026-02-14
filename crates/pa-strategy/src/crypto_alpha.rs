@@ -627,10 +627,10 @@ impl CryptoAlphaStrategy {
         };
 
         // Check min edge
-        let edge_bps = (edge * dec!(10000))
-            .to_string()
-            .parse::<u32>()
-            .unwrap_or(0);
+        let edge_bps = {
+            use rust_decimal::prelude::ToPrimitive;
+            (edge * dec!(10000)).to_u32().unwrap_or(0)
+        };
         if edge_bps < self.config.min_edge_bps {
             return None;
         }

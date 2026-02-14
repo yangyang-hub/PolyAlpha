@@ -1,11 +1,22 @@
 # PolyAlpha
 
-Polymarket 量化套利交易机器人，基于 Rust 构建。通过实时监控订单簿价差，自动发现并执行 YES/NO 二元市场、NegRisk 多结果事件及跨市场相关性套利，结合 CLOB API 下单与链上 CTF（Conditional Token Framework）拆分/合并操作实现混合执行。
+Polymarket 量化套利 + 方向性 Alpha 交易机器人，基于 Rust 构建。
+
+**套利策略**：实时监控订单簿价差，自动发现并执行 YES/NO 二元市场、NegRisk 多结果事件及跨市场相关性套利。混合执行层：CLOB API 下单 + Polygon 链上 CTF（Conditional Token Framework）拆分/合并。
+
+**方向性策略**：基于外部数据源（天气预报、加密货币实时价格、市场到期时间）构建概率模型，识别 mispriced tokens 并方向性买入。
+
+**风控增强**：事件日历过滤器在 FOMC、CPI、Token Unlock 等重大事件窗口期自动降低仓位上限，防止模型预测不可靠时的过度暴露。
+
+- **语言**: Rust Edition 2024, ~9100 行
+- **测试**: 110 个（全部通过）
 
 ## 目录
 
 - [架构概览](#架构概览)
 - [套利策略](#套利策略)
+- [方向性策略](#方向性策略)
+- [事件日历过滤器](#事件日历过滤器)
 - [项目结构](#项目结构)
 - [快速开始](#快速开始)
 - [配置说明](#配置说明)
@@ -28,13 +39,15 @@ Polymarket 量化套利交易机器人，基于 Rust 构建。通过实时监控
 │  │ Gamma API   │──▶│ YesNo Arb    │──▶│ CLOB Executor (API)   │  │
 │  │ (discovery) │  │ NegRisk Arb  │  │ CTF Executor (on-chain)│  │
 │  │             │  │ CrossMkt Arb │  │ Hybrid Orchestrator    │  │
-│  │ WebSocket   │  │              │  │                        │  │
-│  │ (orderbook) │  │ Strategy     │  │  ┌─────┐  ┌────────┐  │  │
-│  │             │  │ Engine       │  │  │ FOK │  │ Split/ │  │  │
+│  │ WebSocket   │  │ Weather Alpha│  │                        │  │
+│  │ (orderbook) │  │ Convergence  │  │  ┌─────┐  ┌────────┐  │  │
+│  │             │  │ CryptoAlpha  │  │  │ FOK │  │ Split/ │  │  │
 │  │ OB Cache    │  │              │  │  │Order│  │ Merge  │  │  │
-│  └──────┬──────┘  └──────┬───────┘  │  └─────┘  └────────┘  │  │
-│         │                │          └────────────────────────┘  │
-│         │                │                                      │
+│  │             │  │ Strategy     │  │  └─────┘  └────────┘  │  │
+│  │ Event       │  │ Engine       │  └────────────────────────┘  │
+│  │ Calendar    │  │              │                                │
+│  └──────┬──────┘  └──────┬───────┘                               │
+│         │                │                                        │
 │  ┌──────▼──────┐  ┌──────▼───────┐  ┌────────────────────────┐  │
 │  │  Storage     │  │ Risk Manager │  │      Monitoring        │  │
 │  │             │  │              │  │                        │  │
@@ -49,8 +62,9 @@ Polymarket 量化套利交易机器人，基于 Rust 构建。通过实时监控
 
 1. **市场发现** — 通过 Gamma API 获取所有活跃的 Polymarket 二元市场
 2. **实时数据** — WebSocket 订阅订单簿更新（最多 500 instruments/连接），缓存至内存
-3. **策略扫描** — 事件驱动 + 定时轮询双模式，检测所有已注册策略的套利机会
-4. **风控检查** — 仓位限制、日损失限制、滑点保护、熔断机制
+3. **策略扫描** — 事件驱动 + 定时轮询双模式，检测套利机会和方向性 Alpha
+4. **事件过滤** — 事件日历在 FOMC/CPI 等重大事件窗口期自动缩减仓位
+5. **风控检查** — 仓位限制、日损失限制、滑点保护、熔断机制
 5. **混合执行** — CLOB API（FOK 订单）+ Polygon 链上 CTF 合约（split/merge）
 6. **持续记录** — 交易记录入库，订单簿快照每分钟持久化，全链路 Prometheus 指标
 
@@ -91,6 +105,92 @@ fee = min(fee_rate × price, price × (1 - price))
 
 这意味着极端价格（接近 0 或 1）的手续费会被封顶，对套利有利。
 
+## 方向性策略
+
+与套利策略不同，方向性策略带有方向性风险。通过外部数据源构建概率模型，当模型概率与市场价格存在显著偏差（edge）时买入。
+
+### 4. Weather Alpha（天气 Alpha）
+
+利用 Open-Meteo 免费天气预报 API 为 Polymarket 上的天气相关市场定价。
+
+**二元市场模式** — 单一阈值问题（如 "温度会超过 100°F 吗？"）：
+- 关键词匹配识别天气市场（temperature, rainfall, snowfall, wind）
+- 解析目标日期 → 获取 Open-Meteo 预报 → 分布 CDF 概率模型
+- 温度用正态分布，降水用对数正态分布，风速用 Weibull 分布
+- 包含预报误差模型（`ForecastErrorConfig` 每指标独立 sigma）
+
+**NegRisk 多结果模式** — 区间分布问题（如 "NYC 最高温度？"）：
+- 解析每个结果的数值区间（"35°F or below", "36-37°F", "50°F or higher"）
+- 区间概率 `P(a <= X <= b) = CDF(b) - CDF(a)`
+- 双侧 YES/NO edge 检测，选最大 edge 结果买入
+
+**启用**: `strategy.enabled` 中添加 `"weather"`
+
+### 5. Resolution Convergence（到期收敛）
+
+买入接近到期且价格已收敛至 0 或 1 附近的 token。市场越接近到期，结果越确定。
+
+- 过滤: `end_date` 在 7 天内，token price > 0.93
+- 时间衰减模型: 离到期越近，模型概率越高
+- Kelly criterion 仓位控制 + position-aware sizing
+
+**启用**: `strategy.enabled` 中添加 `"convergence"`
+
+### 6. Crypto Alpha（加密货币 Alpha）
+
+利用实时 crypto 价格 + GBM（几何布朗运动）模型为 crypto 预测市场定价。
+
+- **支持资产**: BTC, ETH, SOL, BNB, XRP, DOGE, ADA, AVAX, DOT, POL
+- 价格源: Binance（主）+ CoinGecko（备），30 日 K 线计算年化波动率
+- Black-Scholes 概率: `P(S_T > K) = Phi(d)`, `d = (ln(S/K) + (mu - sigma^2/2)t) / (sigma * sqrt(t))`
+- 双侧 YES/NO edge 检测，min_edge_bps 过滤
+
+**启用**: `strategy.enabled` 中添加 `"crypto"`
+
+### 通用机制
+
+所有方向性策略共享：
+- **仓位控制**: Kelly criterion（quarter Kelly）+ max_position_usdc + position-aware sizing
+- **执行**: CLOB FOK 单边买入（`DirectionalBuy`），无链上操作
+- **盈利检查**: `ProfitCalculator::directional_buy_profit()`
+
+## 事件日历过滤器
+
+在 FOMC 利率决议、CPI 发布、Token Unlock 等重大事件前后，方向性策略的模型预测不可靠。事件日历过滤器在事件窗口期自动降低仓位上限。
+
+### 集成方式
+
+集中式处理，在 `StrategyEngine::scan_and_execute()` 中，策略产出机会后、执行前，乘以事件系数缩减 `size` 和 `estimated_profit`。无需修改任何策略代码。
+
+### 事件来源
+
+| 来源 | 类别 | 数据 |
+|------|------|------|
+| **Finnhub** | Macro | 美国经济日历（FOMC, CPI, NFP, GDP） |
+| **CoinMarketCal** | Crypto | 加密货币事件（Token Unlock, Fork, ETF） |
+| **Static (TOML)** | 全部 | 手动配置事件，支持 Macro/Crypto/Political/Sports |
+
+### 仓位乘数
+
+| 事件影响 | 乘数（默认） | 说明 |
+|----------|-------------|------|
+| High | 0.25 | 仓位缩至 25%（FOMC, CPI 等） |
+| Medium | 0.50 | 仓位缩至 50% |
+| Low | 0.75 | 仓位缩至 75% |
+
+多事件重叠时取最小值（最保守）。
+
+### 事件窗口
+
+`[event_time - pre_event_hours, event_time + post_event_hours]`（默认前 4h 后 2h）
+
+### 关键词匹配
+
+1. **直接匹配**: event.keywords 子串匹配市场问题
+2. **扩展匹配**: event title 触发类别关键词映射（如 "fomc" → "interest rate, federal reserve, fed, monetary policy"）
+
+**启用**: `[event_calendar] enabled = true` + API keys
+
 ## 项目结构
 
 ```
@@ -112,14 +212,18 @@ PolyAlpha/
 │   │       ├── ws_feed.rs          # WebSocket 订单簿流（含断线重连 + 指数退避）
 │   │       ├── cache.rs            # DashMap 并发订单簿缓存
 │   │       ├── orderbook.rs        # 订单簿构建与排序
+│   │       ├── event_calendar.rs   # 事件日历服务（Finnhub/CoinMarketCal/Static）
 │   │       └── service.rs          # MarketDataService（组合 Gamma + WS + Cache）
-│   ├── pa-strategy/                # 套利策略实现
+│   ├── pa-strategy/                # 策略实现（套利 + 方向性）
 │   │   └── src/
-│   │       ├── yes_no.rs           # YesNo Merge/Split 策略
-│   │       ├── neg_risk.rs         # NegRisk 多结果策略
-│   │       ├── cross_market.rs     # 跨市场相关性策略 + 自动配对检测
+│   │       ├── yes_no.rs           # YesNo Merge/Split 套利
+│   │       ├── neg_risk.rs         # NegRisk 多结果套利
+│   │       ├── cross_market.rs     # 跨市场相关性套利 + 自动配对检测
+│   │       ├── weather.rs          # Weather Alpha（Open-Meteo + CDF 概率模型）
+│   │       ├── convergence.rs      # Resolution Convergence（到期收敛）
+│   │       ├── crypto_alpha.rs     # Crypto Alpha（Binance/CoinGecko + GBM 模型）
 │   │       ├── profitability.rs    # 利润计算器（含封顶手续费模型）
-│   │       ├── engine.rs           # StrategyEngine（事件驱动 + 定时扫描）
+│   │       ├── engine.rs           # StrategyEngine（事件驱动 + 定时扫描 + 事件日历过滤）
 │   │       └── detector.rs         # 通用机会检测辅助
 │   ├── pa-execution/               # 执行层
 │   │   └── src/
@@ -147,7 +251,7 @@ PolyAlpha/
 │   │       └── report.rs           # BacktestResult（PnL、Sharpe、最大回撤、胜率）
 │   └── pa-monitor/                 # 监控
 │       └── src/
-│           ├── metrics.rs          # 13 个 Prometheus 指标
+│           ├── metrics.rs          # 14 个 Prometheus 指标
 │           ├── health.rs           # /health + /ready + /metrics HTTP 端点
 │           └── alerts.rs           # 告警（Webhook）
 ├── config/
@@ -197,7 +301,7 @@ cp .env.example .env
 # 4. 编译检查
 cargo check --workspace
 
-# 5. 运行测试（27 个测试）
+# 5. 运行测试（110 个测试）
 cargo test --workspace
 
 # 6. 启动机器人
@@ -246,6 +350,7 @@ host = "https://gamma-api.polymarket.com"   # Gamma 市场发现 API
 
 [strategy]
 enabled = ["yes_no"]                        # 启用的策略列表
+# 方向性策略: 添加 "weather", "convergence", "crypto" 启用
 scan_interval_ms = 100                      # 定时扫描间隔（毫秒）
 min_spread_bps = 300                        # 最小价差（基点，300 = 3%）
 min_profit_usdc = 0.50                      # 最小利润阈值（USDC）
@@ -274,6 +379,43 @@ min_liquidity = 1000.0                      # 最小流动性筛选
 min_volume_24h = 5000.0                     # 24h 最小交易量
 max_markets = 200                           # 最大监控市场数
 ws_max_instruments = 450                    # WS 最大订阅数（上限 500）
+
+[weather]
+min_edge_bps = 500                          # 最小 edge（基点）
+max_position_usdc = 50.0                    # 单市场最大仓位（USDC）
+kelly_fraction = 0.25                       # Kelly 分数上限
+refresh_interval_secs = 3600                # 预报刷新间隔
+
+[weather.forecast_error]
+temperature_sigma_f = 3.0                   # 温度预报误差 sigma（°F）
+precipitation_sigma_in = 0.3                # 降水预报误差 sigma（inch）
+snowfall_sigma_in = 2.0                     # 降雪预报误差 sigma（inch）
+wind_sigma_mph = 5.0                        # 风速预报误差 sigma（mph）
+
+[convergence]
+min_price_threshold = 0.93                  # 最低 token 价格阈值
+max_days_to_resolution = 7                  # 最大到期天数
+max_position_usdc = 100.0                   # 单市场最大仓位
+kelly_fraction = 0.25                       # Kelly 分数
+time_decay_boost = true                     # 时间衰减增强
+
+[crypto_alpha]
+min_edge_bps = 500                          # 最小 edge（基点）
+max_position_usdc = 100.0                   # 单市场最大仓位
+kelly_fraction = 0.25                       # Kelly 分数
+refresh_interval_secs = 300                 # 价格刷新间隔
+coingecko_api_key = ""                      # CoinGecko Demo API key
+
+[event_calendar]
+enabled = false                             # 是否启用事件日历过滤
+finnhub_api_key = ""                        # Finnhub API key（免费版可用）
+coinmarketcal_api_key = ""                  # CoinMarketCal API key
+refresh_interval_secs = 3600                # 事件数据刷新间隔
+pre_event_hours = 4                         # 事件前开始降仓的小时数
+post_event_hours = 2                        # 事件后恢复的小时数
+high_impact_multiplier = 0.25               # 高影响事件仓位乘数
+medium_impact_multiplier = 0.50             # 中影响事件仓位乘数
+low_impact_multiplier = 0.75                # 低影响事件仓位乘数
 ```
 
 ### 环境变量
@@ -499,7 +641,7 @@ DB (snapshots) → DataLoader → SnapshotFrame[]
 
 `status` 取值：`healthy`（全部通过）、`degraded`（部分失败）。
 
-### Prometheus 指标（13 个）
+### Prometheus 指标（14 个）
 
 | 指标 | 类型 | 说明 |
 |------|------|------|
@@ -516,6 +658,7 @@ DB (snapshots) → DataLoader → SnapshotFrame[]
 | `circuit_breaker_active` | Gauge | 熔断器状态（1=触发, 0=正常） |
 | `total_exposure_usd` | Gauge | 当前总敞口（USD） |
 | `scan_latency_seconds` | Histogram | 策略扫描周期延迟 |
+| `event_filter_applied_total` | Counter | 被事件日历降仓的次数 |
 
 ## 数据库
 

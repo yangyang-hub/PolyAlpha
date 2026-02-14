@@ -13,7 +13,7 @@ ws_host = "wss://ws-subscriptions-clob.polymarket.com"
 host = "https://gamma-api.polymarket.com"
 
 [strategy]
-enabled = ["yes_no", "weather"]
+enabled = ["yes_no", "weather", "convergence", "crypto"]
 scan_interval_ms = 100
 min_spread_bps = 200
 min_profit_usdc = 0.20

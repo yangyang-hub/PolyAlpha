@@ -277,7 +277,10 @@ async fn main() -> Result<()> {
 
                             if total_cost < Decimal::ONE {
                                 let spread = Decimal::ONE - total_cost;
-                                let spread_bps = (spread * dec!(10000)).to_string().parse::<u32>().unwrap_or(0);
+                                let spread_bps = {
+                                    use rust_decimal::prelude::ToPrimitive;
+                                    (spread * dec!(10000)).to_u32().unwrap_or(0)
+                                };
                                 let max_size = yes_ask.size.min(no_ask.size).min(observer_settings.max_trade_size_usdc);
                                 let est = profit_calc.buy_and_merge_profit(yes_ask.price, no_ask.price, max_size, market.fee_rate_bps);
 
@@ -319,7 +322,10 @@ async fn main() -> Result<()> {
 
                             if total_revenue > Decimal::ONE {
                                 let spread = total_revenue - Decimal::ONE;
-                                let spread_bps = (spread * dec!(10000)).to_string().parse::<u32>().unwrap_or(0);
+                                let spread_bps = {
+                                    use rust_decimal::prelude::ToPrimitive;
+                                    (spread * dec!(10000)).to_u32().unwrap_or(0)
+                                };
                                 let max_size = yes_bid.size.min(no_bid.size).min(observer_settings.max_trade_size_usdc);
                                 let est = profit_calc.split_and_sell_profit(yes_bid.price, no_bid.price, max_size, market.fee_rate_bps);
 
