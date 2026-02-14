@@ -191,6 +191,42 @@ impl ProfitCalculator {
             roi,
         }
     }
+
+    /// Calculate expected profit for a directional buy.
+    ///
+    /// Unlike arbitrage (risk-free), directional buys are probabilistic:
+    /// - Expected value = model_prob * payout - cost
+    /// - EV per unit = model_prob * $1.00 - ask_price
+    /// - Net = EV * size - fee - gas(0, CLOB-only)
+    pub fn directional_buy_profit(
+        &self,
+        ask_price: Decimal,
+        model_prob: Decimal,
+        size: Decimal,
+        fee_rate_bps: u32,
+    ) -> ProfitEstimate {
+        let ev_per_unit = model_prob - ask_price;
+        let gross_profit = ev_per_unit * size;
+        let fee = self.capped_fee(ask_price, fee_rate_bps);
+        let total_fees = fee * size;
+        let total_gas = Decimal::ZERO; // CLOB-only, no on-chain tx
+
+        let net_profit = gross_profit - total_fees;
+        let total_cost = ask_price * size + total_fees;
+        let roi = if total_cost > Decimal::ZERO {
+            net_profit / total_cost
+        } else {
+            Decimal::ZERO
+        };
+
+        ProfitEstimate {
+            gross_profit,
+            fees: total_fees,
+            gas: total_gas,
+            net_profit,
+            roi,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -294,5 +330,24 @@ mod tests {
         );
         assert_eq!(est.gross_profit, Decimal::ZERO);
         assert!(est.net_profit < Decimal::ZERO); // fees + gas make it negative
+    }
+
+    #[test]
+    fn test_directional_buy_positive_edge() {
+        // model_prob=0.70, ask=0.50 → strong positive edge
+        let est = calc().directional_buy_profit(dec!(0.50), dec!(0.70), dec!(100), 200);
+        // gross = (0.70 - 0.50) * 100 = 20.00
+        assert_eq!(est.gross_profit, dec!(20.00));
+        assert!(est.net_profit > Decimal::ZERO, "Expected positive profit, got {}", est.net_profit);
+        assert_eq!(est.gas, Decimal::ZERO); // CLOB-only
+    }
+
+    #[test]
+    fn test_directional_buy_no_edge() {
+        // model_prob=0.45, ask=0.50 → negative edge (market overestimates)
+        let est = calc().directional_buy_profit(dec!(0.50), dec!(0.45), dec!(100), 200);
+        // gross = (0.45 - 0.50) * 100 = -5.00
+        assert!(est.gross_profit < Decimal::ZERO);
+        assert!(est.net_profit < Decimal::ZERO);
     }
 }

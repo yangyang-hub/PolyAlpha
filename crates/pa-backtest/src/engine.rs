@@ -246,6 +246,10 @@ impl BacktestEngine {
             strategies.push(Box::new(cross_market));
         }
 
+        // Note: WeatherAlphaStrategy requires live Open-Meteo API calls and cannot
+        // meaningfully replay historical forecasts from DB snapshots alone.
+        // Weather strategy is excluded from backtest by default.
+
         strategies
     }
 }

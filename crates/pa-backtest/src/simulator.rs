@@ -414,6 +414,86 @@ impl TradeSimulator {
             executed_at: Utc::now(),
         }
     }
+
+    /// Simulate a directional buy: single CLOB order, no on-chain tx.
+    fn simulate_directional_buy(
+        &self,
+        token_id: U256,
+        side: TradeSide,
+        price: Decimal,
+        size: Decimal,
+        opportunity_id: Uuid,
+    ) -> ExecutionResult {
+        let books = self.books.read().unwrap();
+
+        // Check available liquidity
+        let available = match side {
+            TradeSide::Buy => books
+                .get(&token_id)
+                .and_then(|b| b.best_ask())
+                .map(|a| a.size)
+                .unwrap_or(Decimal::ZERO),
+            TradeSide::Sell => books
+                .get(&token_id)
+                .and_then(|b| b.best_bid())
+                .map(|b| b.size)
+                .unwrap_or(Decimal::ZERO),
+        };
+
+        let filled = size.min(available) * self.config.fill_ratio;
+
+        if filled <= Decimal::ZERO {
+            return ExecutionResult {
+                opportunity_id,
+                status: ExecutionStatus::NoFill,
+                trades: vec![],
+                realized_profit: Decimal::ZERO,
+                total_fees: Decimal::ZERO,
+                total_gas: Decimal::ZERO,
+                executed_at: Utc::now(),
+            };
+        }
+
+        let actual_price = match side {
+            TradeSide::Buy => self.slipped_buy_price(price),
+            TradeSide::Sell => self.slipped_sell_price(price),
+        };
+
+        let fee = self.profit_calc.capped_fee(actual_price, self.config.fee_rate_bps);
+        let total_fees = fee * filled;
+
+        // Directional profit is based on model edge, not actual resolution.
+        // We record cost basis only; true P&L depends on market outcome.
+        let realized_profit = Decimal::ZERO;
+
+        let trades = vec![TradeRecord {
+            id: Uuid::now_v7(),
+            token_id,
+            side,
+            price: actual_price,
+            size,
+            filled_size: filled,
+            fee: total_fees,
+            tx_type: TxType::ClobOrder,
+            tx_hash: None,
+        }];
+
+        let status = if filled == size {
+            ExecutionStatus::Success
+        } else {
+            ExecutionStatus::PartialFill
+        };
+
+        ExecutionResult {
+            opportunity_id,
+            status,
+            trades,
+            realized_profit,
+            total_fees,
+            total_gas: Decimal::ZERO, // CLOB-only
+            executed_at: Utc::now(),
+        }
+    }
 }
 
 #[async_trait]
@@ -459,6 +539,13 @@ impl Executor for TradeSimulator {
                 amount,
                 ..
             } => self.simulate_cross_market(leg_a, leg_b, *amount, opp.id),
+            ExecutionPlan::DirectionalBuy {
+                token_id,
+                side,
+                price,
+                size,
+                ..
+            } => self.simulate_directional_buy(*token_id, *side, *price, *size, opp.id),
         };
         Ok(result)
     }

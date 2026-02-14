@@ -471,6 +471,18 @@ async fn main() -> Result<()> {
         tracing::info!("CrossMarket arbitrage strategy enabled");
     }
 
+    // Add weather alpha strategy if enabled
+    if settings.strategy.enabled.contains(&"weather".to_string()) {
+        let weather_cache = market_data.cache().clone();
+        let weather_strategy = pa_strategy::weather::WeatherAlphaStrategy::new(
+            settings.weather.clone(),
+            dec!(0.00), // no gas for CLOB-only
+            Box::new(move |token_id| weather_cache.get(&token_id)),
+        );
+        strategies.push(Box::new(weather_strategy));
+        tracing::info!("Weather alpha strategy enabled");
+    }
+
     let engine = StrategyEngine::new(
         strategies,
         executor.clone(),

@@ -423,6 +423,62 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
             executed_at: Utc::now(),
         })
     }
+
+    /// Execute a directional buy: single CLOB FOK order, no on-chain tx.
+    async fn execute_directional_buy(
+        &self,
+        token_id: U256,
+        side: TradeSide,
+        price: Decimal,
+        size: Decimal,
+        opportunity_id: Uuid,
+    ) -> Result<ExecutionResult> {
+        tracing::info!(
+            id = %opportunity_id,
+            token_id = %token_id,
+            side = ?side,
+            price = %price,
+            size = %size,
+            "Executing DirectionalBuy"
+        );
+
+        let order_result = match side {
+            TradeSide::Buy => self.clob.buy_fok(token_id, price, size).await,
+            TradeSide::Sell => self.clob.sell_fok(token_id, price, size).await,
+        };
+
+        let order = order_result.map_err(|e| pa_core::Error::OrderFailed(e.to_string()))?;
+
+        let trades = vec![TradeRecord {
+            id: Uuid::now_v7(),
+            token_id,
+            side,
+            price,
+            size,
+            filled_size: order.filled_size,
+            fee: Decimal::ZERO,
+            tx_type: TxType::ClobOrder,
+            tx_hash: None,
+        }];
+
+        let status = if order.filled_size == size {
+            ExecutionStatus::Success
+        } else if order.filled_size > Decimal::ZERO {
+            ExecutionStatus::PartialFill
+        } else {
+            ExecutionStatus::NoFill
+        };
+
+        Ok(ExecutionResult {
+            opportunity_id,
+            status,
+            trades,
+            realized_profit: Decimal::ZERO, // Unknown until market resolution
+            total_fees: Decimal::ZERO,
+            total_gas: Decimal::ZERO, // CLOB-only
+            executed_at: Utc::now(),
+        })
+    }
 }
 
 #[async_trait]
@@ -482,6 +538,16 @@ impl<P: Provider + Clone + Send + Sync> Executor for HybridOrchestrator<P> {
                 ..
             } => {
                 self.execute_cross_market(leg_a, leg_b, *amount, opp.id)
+                    .await
+            }
+            ExecutionPlan::DirectionalBuy {
+                token_id,
+                side,
+                price,
+                size,
+                ..
+            } => {
+                self.execute_directional_buy(*token_id, *side, *price, *size, opp.id)
                     .await
             }
         }

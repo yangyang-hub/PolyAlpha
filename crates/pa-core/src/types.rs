@@ -153,6 +153,8 @@ pub enum StrategyType {
     NegRiskConvert,
     /// Cross-market correlation arbitrage
     CrossMarket,
+    /// Weather forecast-based directional alpha
+    Weather,
 }
 
 /// Concrete execution plan for an arbitrage opportunity.
@@ -194,6 +196,15 @@ pub enum ExecutionPlan {
         leg_b: CrossMarketLeg,
         /// Total size to trade (min of both legs).
         amount: Decimal,
+    },
+    /// Directional buy: purchase a single token (YES or NO) via CLOB only.
+    /// No on-chain CTF operation needed — just a CLOB FOK order.
+    DirectionalBuy {
+        token_id: U256,
+        side: TradeSide,
+        price: Decimal,
+        size: Decimal,
+        condition_id: B256,
     },
 }
 

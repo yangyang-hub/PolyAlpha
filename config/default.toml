@@ -42,3 +42,10 @@ min_liquidity = 300.0
 min_volume_24h = 1000.0
 max_markets = 225
 ws_max_instruments = 450
+
+[weather]
+min_edge_bps = 500
+max_position_usdc = 50.0
+kelly_fraction = 0.25
+forecast_uncertainty_pct = 10.0
+refresh_interval_secs = 3600

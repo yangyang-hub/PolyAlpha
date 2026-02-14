@@ -12,6 +12,8 @@ pub struct Settings {
     pub database: DatabaseConfig,
     pub monitor: MonitorConfig,
     pub market_filter: MarketFilterConfig,
+    #[serde(default)]
+    pub weather: WeatherConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -78,6 +80,32 @@ pub struct MarketFilterConfig {
     pub min_volume_24h: Decimal,
     pub max_markets: usize,
     pub ws_max_instruments: usize,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct WeatherConfig {
+    /// Minimum edge (model_prob - market_price) to trigger a trade, in basis points.
+    pub min_edge_bps: u32,
+    /// Maximum position size per weather market in USDC.
+    pub max_position_usdc: Decimal,
+    /// Kelly fraction cap (0.0-1.0). Limits position sizing aggressiveness.
+    pub kelly_fraction: Decimal,
+    /// Forecast uncertainty (std dev) to add to model.
+    pub forecast_uncertainty_pct: Decimal,
+    /// How often to refresh forecasts (seconds).
+    pub refresh_interval_secs: u64,
+}
+
+impl Default for WeatherConfig {
+    fn default() -> Self {
+        Self {
+            min_edge_bps: 500,
+            max_position_usdc: Decimal::from(50),
+            kelly_fraction: Decimal::new(25, 2), // 0.25 (quarter Kelly)
+            forecast_uncertainty_pct: Decimal::from(10),
+            refresh_interval_secs: 3600,
+        }
+    }
 }
 
 impl Settings {
