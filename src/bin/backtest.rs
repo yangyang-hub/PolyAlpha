@@ -165,5 +165,7 @@ fn default_risk_config() -> pa_core::config::RiskConfig {
         circuit_breaker_loss: dec!(200),
         circuit_breaker_consecutive_losses: 5,
         max_slippage_bps: 50,
+        min_order_usdc: dec!(1),
+        min_profit_usdc: dec!(0.01),
     }
 }

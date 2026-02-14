@@ -58,7 +58,8 @@ async fn main() -> Result<()> {
     let signer = PrivateKeySigner::from_str(&private_key)
         .context("Invalid private key")?
         .with_chain_id(Some(settings.chain.chain_id));
-    tracing::info!(address = %signer.address(), "Wallet loaded");
+    let wallet_address = signer.address();
+    tracing::info!(address = %wallet_address, "Wallet loaded");
 
     // --- Initialize database ---
     let db_url = std::env::var("PA_DATABASE__URL")
@@ -410,9 +411,50 @@ async fn main() -> Result<()> {
         .connect(&settings.chain.rpc_url)
         .await
         .context("Failed to connect to RPC")?;
+    let balance_provider = provider.clone();
     let ctf = CtfExecutor::with_neg_risk(provider, settings.chain.chain_id)
         .context("Failed to create CTF executor")?;
     tracing::info!("CTF executor initialized");
+
+    // --- Query USDC balance ---
+    let usdc_balance: Arc<std::sync::RwLock<Decimal>> =
+        Arc::new(std::sync::RwLock::new(Decimal::ZERO));
+
+    match query_usdc_balance(&balance_provider, wallet_address).await {
+        Ok(bal) => {
+            *usdc_balance.write().unwrap() = bal;
+            tracing::info!(balance_usdc = %bal, "Wallet USDC balance loaded");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to query USDC balance — position sizing may be limited");
+        }
+    }
+
+    // Periodic balance refresh (every 30s)
+    let bal_state = Arc::clone(&usdc_balance);
+    let bal_cancel = cancel.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                _ = bal_cancel.cancelled() => break,
+                _ = interval.tick() => {
+                    match query_usdc_balance(&balance_provider, wallet_address).await {
+                        Ok(bal) => {
+                            let prev = *bal_state.read().unwrap();
+                            if bal != prev {
+                                tracing::info!(balance_usdc = %bal, prev = %prev, "USDC balance updated");
+                            }
+                            *bal_state.write().unwrap() = bal;
+                        }
+                        Err(e) => {
+                            tracing::debug!(error = %e, "Balance refresh failed");
+                        }
+                    }
+                }
+            }
+        }
+    });
 
     // Build executor: real orchestrator if CLOB available, dry-run otherwise
     let trading_enabled = clob.is_some();
@@ -431,12 +473,25 @@ async fn main() -> Result<()> {
     let cache = market_data.cache().clone();
     let cache2 = market_data.cache().clone();
 
+    // Shared available capital closure: balance - total_exposure
+    // Cloned for each strategy that needs it.
+    let make_capital_fn = |bal: Arc<std::sync::RwLock<Decimal>>,
+                           rm: Arc<dyn pa_core::traits::RiskManager>|
+     -> Box<dyn Fn() -> Decimal + Send + Sync> {
+        Box::new(move || {
+            let balance = *bal.read().unwrap();
+            let exposure = rm.total_exposure();
+            (balance - exposure).max(Decimal::ZERO)
+        })
+    };
+
     let yes_no_strategy = YesNoArbitrage::new(
         settings.strategy.min_spread_bps,
         settings.strategy.max_trade_size_usdc,
         settings.strategy.min_profit_usdc,
         dec!(0.01), // gas cost estimate in USD
         Box::new(move |token_id| cache.get(&token_id)),
+        make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
     );
 
     let mut strategies: Vec<Box<dyn pa_core::traits::Strategy>> =
@@ -451,6 +506,7 @@ async fn main() -> Result<()> {
             dec!(0.01), // gas cost estimate in USD
             neg_risk_events,
             Box::new(move |token_id| cache2.get(&token_id)),
+            make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
         );
         strategies.push(Box::new(neg_risk_strategy));
         tracing::info!("NegRisk arbitrage strategy enabled");
@@ -466,6 +522,7 @@ async fn main() -> Result<()> {
             dec!(0.02), // 2x gas for two on-chain txs
             cross_market_pairs,
             Box::new(move |token_id| cache3.get(&token_id)),
+            make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
         );
         strategies.push(Box::new(cross_market_strategy));
         tracing::info!("CrossMarket arbitrage strategy enabled");
@@ -478,6 +535,7 @@ async fn main() -> Result<()> {
             settings.weather.clone(),
             dec!(0.00), // no gas for CLOB-only
             Box::new(move |token_id| weather_cache.get(&token_id)),
+            make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
         );
         strategies.push(Box::new(weather_strategy));
         tracing::info!("Weather alpha strategy enabled");
@@ -499,6 +557,32 @@ async fn main() -> Result<()> {
     let engine_cancel = cancel.clone();
     let engine_handle = tokio::spawn(async move {
         engine.run(&markets, update_rx, engine_cancel).await;
+    });
+
+    // --- Daily circuit breaker reset at midnight UTC ---
+    let daily_rm = Arc::clone(&risk_manager);
+    let daily_cancel = cancel.clone();
+    tokio::spawn(async move {
+        loop {
+            // Calculate seconds until next midnight UTC
+            let now = chrono::Utc::now();
+            let tomorrow = (now + chrono::Duration::days(1))
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .unwrap();
+            let until_midnight = tomorrow
+                .signed_duration_since(now.naive_utc())
+                .to_std()
+                .unwrap_or(Duration::from_secs(3600));
+
+            tokio::select! {
+                _ = daily_cancel.cancelled() => break,
+                _ = tokio::time::sleep(until_midnight) => {
+                    daily_rm.reset_daily();
+                    tracing::info!("Daily risk counters reset at midnight UTC");
+                }
+            }
+        }
     });
 
     // Wait for Ctrl+C
@@ -567,4 +651,28 @@ impl pa_core::traits::Executor for DryRunExecutor {
     async fn cancel_all(&self) -> pa_core::Result<()> {
         Ok(())
     }
+}
+
+/// Query USDC balance for a wallet address on Polygon.
+///
+/// Uses alloy's sol! macro to call `balanceOf(address)` on the USDC contract.
+/// USDC on Polygon has 6 decimals, so the returned value is scaled accordingly.
+async fn query_usdc_balance(
+    provider: &impl alloy::providers::Provider,
+    wallet: alloy::primitives::Address,
+) -> anyhow::Result<Decimal> {
+    alloy::sol! {
+        #[sol(rpc)]
+        contract IERC20 {
+            function balanceOf(address account) external view returns (uint256);
+        }
+    }
+
+    let usdc = pa_execution::ctf_executor::USDC_ADDRESS;
+    let contract = IERC20::new(usdc, provider);
+    let result = contract.balanceOf(wallet).call().await?;
+
+    // USDC has 6 decimals
+    let balance_u64 = result.to::<u64>();
+    Ok(Decimal::from(balance_u64) / Decimal::from(1_000_000u64))
 }

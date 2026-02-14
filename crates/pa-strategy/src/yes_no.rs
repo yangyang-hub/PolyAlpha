@@ -28,6 +28,8 @@ pub struct YesNoArbitrage {
     profit_calc: ProfitCalculator,
     /// Callback to get current order book for a token.
     get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+    /// Returns available capital (balance - exposure) for position sizing.
+    get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
 }
 
 impl YesNoArbitrage {
@@ -37,6 +39,7 @@ impl YesNoArbitrage {
         min_profit: Decimal,
         gas_cost_usd: Decimal,
         get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+        get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
     ) -> Self {
         Self {
             min_spread_bps,
@@ -44,6 +47,7 @@ impl YesNoArbitrage {
             min_profit,
             profit_calc: ProfitCalculator::new(gas_cost_usd),
             get_orderbook,
+            get_available_capital,
         }
     }
 
@@ -95,8 +99,9 @@ impl YesNoArbitrage {
             return None;
         }
 
-        // Executable size = min of both ask sizes, capped by max trade size
-        let max_size_by_price = self.max_trade_size / total_cost;
+        // Executable size = min of both ask sizes, capped by max trade size and available capital
+        let available = (self.get_available_capital)();
+        let max_size_by_price = self.max_trade_size.min(available) / total_cost;
         let size = yes_ask
             .size
             .min(no_ask.size)
@@ -156,10 +161,12 @@ impl YesNoArbitrage {
             return None;
         }
 
+        let available = (self.get_available_capital)();
         let size = yes_bid
             .size
             .min(no_bid.size)
-            .min(self.max_trade_size);
+            .min(self.max_trade_size)
+            .min(available);
 
         let estimate = self.profit_calc.split_and_sell_profit(
             yes_bid.price,

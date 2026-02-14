@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use rust_decimal::Decimal;
 use pa_core::config::RiskConfig;
 use pa_core::traits::RiskManager;
 use pa_core::types::{ArbitrageOpportunity, ExecutionResult, RiskDecision};
@@ -52,6 +53,10 @@ impl RiskManager for RiskManagerImpl {
 
     fn is_circuit_broken(&self) -> bool {
         self.circuit_breaker.is_broken()
+    }
+
+    fn total_exposure(&self) -> Decimal {
+        self.positions.total_exposure()
     }
 
     fn reset_daily(&self) {

@@ -53,6 +53,20 @@ pub struct RiskConfig {
     pub circuit_breaker_loss: Decimal,
     pub circuit_breaker_consecutive_losses: u32,
     pub max_slippage_bps: u32,
+    /// Minimum order size in USDC. Orders below this are skipped.
+    #[serde(default = "default_min_order_usdc")]
+    pub min_order_usdc: Decimal,
+    /// Minimum profit in USDC to execute a trade (overrides hard-coded value).
+    #[serde(default = "default_min_profit_usdc")]
+    pub min_profit_usdc: Decimal,
+}
+
+fn default_min_order_usdc() -> Decimal {
+    Decimal::ONE
+}
+
+fn default_min_profit_usdc() -> Decimal {
+    Decimal::new(20, 2) // 0.20
 }
 
 #[derive(Debug, Deserialize, Clone)]

@@ -36,6 +36,8 @@ pub struct NegRiskArbitrage {
     events: Vec<NegRiskEvent>,
     /// Callback to get current order book for a token.
     get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+    /// Returns available capital (balance - exposure) for position sizing.
+    get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
 }
 
 impl NegRiskArbitrage {
@@ -46,6 +48,7 @@ impl NegRiskArbitrage {
         gas_cost_usd: Decimal,
         events: Vec<NegRiskEvent>,
         get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+        get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
     ) -> Self {
         Self {
             min_spread_bps,
@@ -54,6 +57,7 @@ impl NegRiskArbitrage {
             profit_calc: ProfitCalculator::new(gas_cost_usd),
             events,
             get_orderbook,
+            get_available_capital,
         }
     }
 
@@ -108,8 +112,9 @@ impl NegRiskArbitrage {
             return None;
         }
 
-        // Executable size: min of all ask sizes, capped by max trade size / total_ask
-        let max_size_by_price = self.max_trade_size / total_ask;
+        // Executable size: min of all ask sizes, capped by max trade size / total_ask and available capital
+        let available = (self.get_available_capital)();
+        let max_size_by_price = self.max_trade_size.min(available) / total_ask;
         let size = min_ask_size.min(max_size_by_price);
 
         if size <= Decimal::ZERO {

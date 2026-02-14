@@ -449,6 +449,8 @@ pub struct WeatherAlphaStrategy {
     meteo: OpenMeteoClient,
     profit_calc: ProfitCalculator,
     get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+    /// Returns available capital (balance - exposure) for position sizing.
+    get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
     forecast_cache: Arc<Mutex<HashMap<u64, CachedForecast>>>,
 }
 
@@ -457,12 +459,14 @@ impl WeatherAlphaStrategy {
         config: WeatherConfig,
         gas_cost_usd: Decimal,
         get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+        get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
     ) -> Self {
         Self {
             config,
             meteo: OpenMeteoClient::new(),
             profit_calc: ProfitCalculator::new(gas_cost_usd),
             get_orderbook,
+            get_available_capital,
             forecast_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -616,7 +620,8 @@ impl WeatherAlphaStrategy {
             Decimal::ZERO
         };
         let kelly_size = kelly_raw * self.config.kelly_fraction * self.config.max_position_usdc;
-        let size = kelly_size.min(self.config.max_position_usdc);
+        let available = (self.get_available_capital)();
+        let size = kelly_size.min(self.config.max_position_usdc).min(available);
 
         if size <= Decimal::ZERO {
             return None;
@@ -643,6 +648,7 @@ impl WeatherAlphaStrategy {
             model_prob = model_prob,
             ask_price = %ask_price,
             edge_bps = edge_bps,
+            available_capital = %available,
             size = %size,
             est_profit = %est.net_profit,
             "Weather alpha opportunity detected"

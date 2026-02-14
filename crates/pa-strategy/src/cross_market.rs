@@ -27,6 +27,8 @@ pub struct CrossMarketArbitrage {
     profit_calc: ProfitCalculator,
     pairs: Vec<CrossMarketPair>,
     get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+    /// Returns available capital (balance - exposure) for position sizing.
+    get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
 }
 
 impl CrossMarketArbitrage {
@@ -37,6 +39,7 @@ impl CrossMarketArbitrage {
         gas_cost_usd: Decimal,
         pairs: Vec<CrossMarketPair>,
         get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+        get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
     ) -> Self {
         Self {
             min_spread_bps,
@@ -45,6 +48,7 @@ impl CrossMarketArbitrage {
             profit_calc: ProfitCalculator::new(gas_cost_usd),
             pairs,
             get_orderbook,
+            get_available_capital,
         }
     }
 
@@ -109,12 +113,14 @@ impl CrossMarketArbitrage {
                 let no_a_ask = no_a_book.best_ask()?;
                 let no_b_ask = no_b_book.best_ask()?;
 
+                let available = (self.get_available_capital)();
                 let size = yes_a_ask
                     .size
                     .min(yes_b_ask.size)
                     .min(no_a_ask.size)
                     .min(no_b_ask.size)
-                    .min(self.max_trade_size);
+                    .min(self.max_trade_size)
+                    .min(available);
 
                 let estimate = self.profit_calc.cross_market_profit(
                     yes_a_ask.price,
@@ -179,12 +185,14 @@ impl CrossMarketArbitrage {
                 let no_a_bid = no_a_book.best_bid()?;
                 let no_b_bid = no_b_book.best_bid()?;
 
+                let available = (self.get_available_capital)();
                 let size = yes_a_bid
                     .size
                     .min(yes_b_bid.size)
                     .min(no_a_bid.size)
                     .min(no_b_bid.size)
-                    .min(self.max_trade_size);
+                    .min(self.max_trade_size)
+                    .min(available);
 
                 let estimate = self.profit_calc.cross_market_profit(
                     yes_a_bid.price,
@@ -258,10 +266,12 @@ impl CrossMarketArbitrage {
             let spread_bps = (spread * dec!(10000)).to_u32_saturating();
 
             if spread_bps >= self.min_spread_bps {
+                let available = (self.get_available_capital)();
                 let size = yes_a_ask
                     .size
                     .min(no_b_ask.size)
-                    .min(self.max_trade_size);
+                    .min(self.max_trade_size)
+                    .min(available);
 
                 let estimate = self.profit_calc.cross_market_profit(
                     yes_a_ask.price,
@@ -505,6 +515,7 @@ mod tests {
             dec!(0.01),
             vec![pair],
             Box::new(move |id| books.get(&id).cloned()),
+            Box::new(|| Decimal::MAX),
         );
 
         let opps = tokio::runtime::Runtime::new()
@@ -546,6 +557,7 @@ mod tests {
             dec!(0.01),
             vec![pair],
             Box::new(move |id| books.get(&id).cloned()),
+            Box::new(|| Decimal::MAX),
         );
 
         let opps = tokio::runtime::Runtime::new()

@@ -18,6 +18,11 @@ impl LimitsChecker {
         opp: &ArbitrageOpportunity,
         total_exposure: Decimal,
     ) -> RiskDecision {
+        // Check minimum order size
+        if opp.size < self.config.min_order_usdc {
+            return RiskDecision::Reject(RiskRejectReason::BelowMinOrder);
+        }
+
         // Check single trade size
         let trade_value = opp.size;
         if trade_value > self.config.max_position_per_market {
@@ -29,9 +34,8 @@ impl LimitsChecker {
             return RiskDecision::Reject(RiskRejectReason::ExceedsTotalExposure);
         }
 
-        // Check minimum profit threshold
-        let min_profit = Decimal::from(50) / Decimal::from(100); // $0.50
-        if opp.estimated_profit < min_profit {
+        // Check minimum profit threshold (from config, not hard-coded)
+        if opp.estimated_profit < self.config.min_profit_usdc {
             return RiskDecision::Reject(RiskRejectReason::BelowMinProfit);
         }
 

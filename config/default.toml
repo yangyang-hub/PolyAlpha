@@ -13,7 +13,7 @@ ws_host = "wss://ws-subscriptions-clob.polymarket.com"
 host = "https://gamma-api.polymarket.com"
 
 [strategy]
-enabled = ["yes_no"]
+enabled = ["yes_no", "weather"]
 scan_interval_ms = 100
 min_spread_bps = 200
 min_profit_usdc = 0.20
@@ -27,6 +27,8 @@ max_daily_loss = 500.0
 circuit_breaker_loss = 1000.0
 circuit_breaker_consecutive_losses = 5
 max_slippage_bps = 50
+min_order_usdc = 1.0
+min_profit_usdc = 0.01
 
 [database]
 url = "postgresql://polyalpha:polyalpha@localhost:5432/polyalpha"

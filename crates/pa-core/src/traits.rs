@@ -57,6 +57,9 @@ pub trait RiskManager: Send + Sync {
     /// Whether the circuit breaker has been triggered.
     fn is_circuit_broken(&self) -> bool;
 
+    /// Current total exposure across all open positions (in USDC).
+    fn total_exposure(&self) -> rust_decimal::Decimal;
+
     /// Reset the daily counters (called at midnight UTC).
     fn reset_daily(&self);
 }

@@ -303,6 +303,8 @@ pub enum RiskRejectReason {
     ExceedsMarketPositionLimit,
     ExceedsTotalExposure,
     BelowMinProfit,
+    BelowMinOrder,
+    InsufficientBalance,
     CircuitBroken,
     ExceedsSlippage,
 }

@@ -197,6 +197,8 @@ impl BacktestEngine {
     ) -> Vec<Box<dyn Strategy>> {
         let mut strategies: Vec<Box<dyn Strategy>> = Vec::new();
 
+        // In backtest, available capital is unlimited (simulation mode)
+
         // YesNo strategy
         let books_ref = shared_books.clone();
         let yes_no = YesNoArbitrage::new(
@@ -208,6 +210,7 @@ impl BacktestEngine {
                 let books = books_ref.read().ok()?;
                 books.get(&token_id).cloned()
             }),
+            Box::new(|| rust_decimal::Decimal::MAX),
         );
         strategies.push(Box::new(yes_no));
 
@@ -224,6 +227,7 @@ impl BacktestEngine {
                     let books = books_ref.read().ok()?;
                     books.get(&token_id).cloned()
                 }),
+                Box::new(|| rust_decimal::Decimal::MAX),
             );
             strategies.push(Box::new(neg_risk));
         }
@@ -242,6 +246,7 @@ impl BacktestEngine {
                     let books = books_ref.read().ok()?;
                     books.get(&token_id).cloned()
                 }),
+                Box::new(|| rust_decimal::Decimal::MAX),
             );
             strategies.push(Box::new(cross_market));
         }
