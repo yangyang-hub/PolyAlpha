@@ -1,0 +1,448 @@
+use alloy::primitives::U256;
+use async_trait::async_trait;
+use chrono::Utc;
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
+use uuid::Uuid;
+
+use pa_core::config::ConvergenceConfig;
+use pa_core::traits::Strategy;
+use pa_core::types::{
+    ArbitrageOpportunity, ExecutionPlan, MarketInfo, OrderBook, StrategyType, TradeSide,
+};
+
+use crate::profitability::ProfitCalculator;
+
+/// Resolution Convergence Strategy
+///
+/// Buys tokens priced near 0 or 1 in markets approaching their resolution date.
+/// As markets near resolution, outcomes become increasingly certain and token
+/// prices converge to their payout value (0.00 or 1.00). Buying a token at 0.95
+/// that resolves to 1.00 yields ~5 cents per token minus fees.
+///
+/// Uses `DirectionalBuy` execution plan — CLOB FOK only, no on-chain operations.
+pub struct ResolutionConvergenceStrategy {
+    config: ConvergenceConfig,
+    profit_calc: ProfitCalculator,
+    get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+    get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
+    get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
+}
+
+impl ResolutionConvergenceStrategy {
+    pub fn new(
+        config: ConvergenceConfig,
+        gas_cost_usd: Decimal,
+        get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+        get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
+        get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
+    ) -> Self {
+        Self {
+            config,
+            profit_calc: ProfitCalculator::new(gas_cost_usd),
+            get_orderbook,
+            get_available_capital,
+            get_position,
+        }
+    }
+
+    /// Detect a convergence opportunity on a single market.
+    fn detect_convergence(&self, market: &MarketInfo) -> Option<ArbitrageOpportunity> {
+        // Filter: must have end_date
+        let end_date = market.end_date?;
+
+        // Filter: must not be past
+        let now = Utc::now();
+        if end_date <= now {
+            return None;
+        }
+
+        // Filter: must be within max_days_to_resolution
+        let duration = end_date.signed_duration_since(now);
+        let days_remaining = duration.num_hours() as f64 / 24.0;
+        if days_remaining > self.config.max_days_to_resolution as f64 {
+            return None;
+        }
+
+        // Filter: binary market (2 tokens), non-NegRisk, active
+        if market.neg_risk || market.tokens.len() != 2 || !market.active {
+            return None;
+        }
+
+        let yes_token = &market.tokens[0];
+        let no_token = &market.tokens[1];
+
+        let yes_book = (self.get_orderbook)(yes_token.token_id)?;
+        let no_book = (self.get_orderbook)(no_token.token_id)?;
+
+        let yes_ask = yes_book.best_ask()?.price;
+        let no_ask = no_book.best_ask()?.price;
+
+        // Pick the side above min_price_threshold (if both qualify, pick higher price)
+        let yes_qualifies = yes_ask >= self.config.min_price_threshold;
+        let no_qualifies = no_ask >= self.config.min_price_threshold;
+
+        let (token_id, ask_price) = match (yes_qualifies, no_qualifies) {
+            (true, true) => {
+                if yes_ask >= no_ask {
+                    (yes_token.token_id, yes_ask)
+                } else {
+                    (no_token.token_id, no_ask)
+                }
+            }
+            (true, false) => (yes_token.token_id, yes_ask),
+            (false, true) => (no_token.token_id, no_ask),
+            (false, false) => return None,
+        };
+
+        // Model probability: how likely this token resolves to 1.00
+        let max_days = self.config.max_days_to_resolution as f64;
+        let model_prob_f64 = if self.config.time_decay_boost {
+            // Closer to resolution → higher confidence
+            // Range: ~0.97 (at max_days) to ~0.999 (at 0 days)
+            1.0 - (days_remaining / max_days) * 0.03
+        } else {
+            0.99
+        };
+        let model_prob = Decimal::from_f64_retain(model_prob_f64)?;
+
+        // Edge = model_prob - ask_price
+        if model_prob <= ask_price {
+            return None;
+        }
+        let edge = model_prob - ask_price;
+
+        // Kelly sizing: f* = edge / (1 - price)
+        let kelly_raw = if ask_price > Decimal::ZERO && ask_price < dec!(0.99) {
+            (edge / (Decimal::ONE - ask_price)).min(Decimal::TWO)
+        } else {
+            Decimal::ZERO
+        };
+        let kelly_size = kelly_raw * self.config.kelly_fraction * self.config.max_position_usdc;
+        let available = (self.get_available_capital)();
+
+        // Position-aware sizing: subtract existing position from max
+        let existing = (self.get_position)(token_id);
+        let remaining = (self.config.max_position_usdc - existing).max(Decimal::ZERO);
+        let size = kelly_size.min(remaining).min(available);
+
+        if size <= Decimal::ZERO {
+            return None;
+        }
+
+        // Profitability check
+        let est = self.profit_calc.directional_buy_profit(
+            ask_price,
+            model_prob,
+            size,
+            market.fee_rate_bps,
+        );
+
+        if est.net_profit <= Decimal::ZERO {
+            return None;
+        }
+
+        tracing::info!(
+            question = %market.question,
+            days_remaining = format!("{:.1}", days_remaining),
+            ask_price = %ask_price,
+            model_prob = %model_prob,
+            edge = %edge,
+            size = %size,
+            est_profit = %est.net_profit,
+            "Resolution convergence opportunity detected"
+        );
+
+        Some(ArbitrageOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::ResolutionConvergence,
+            condition_id: market.condition_id,
+            question: market.question.clone(),
+            spread: edge,
+            estimated_profit: est.net_profit,
+            size,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id,
+                side: TradeSide::Buy,
+                price: ask_price,
+                size,
+                condition_id: market.condition_id,
+            },
+        })
+    }
+}
+
+#[async_trait]
+impl Strategy for ResolutionConvergenceStrategy {
+    fn name(&self) -> &str {
+        "ResolutionConvergence"
+    }
+
+    fn strategy_type(&self) -> StrategyType {
+        StrategyType::ResolutionConvergence
+    }
+
+    async fn scan(
+        &self,
+        markets: &[MarketInfo],
+    ) -> pa_core::Result<Vec<ArbitrageOpportunity>> {
+        let mut opportunities = Vec::new();
+
+        for market in markets {
+            if !market.active || market.neg_risk {
+                continue;
+            }
+
+            if let Some(opp) = self.detect_convergence(market) {
+                opportunities.push(opp);
+            }
+        }
+
+        Ok(opportunities)
+    }
+}
+
+// ──── Tests ────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::B256;
+    use chrono::{Duration, Utc};
+    use pa_core::types::{Outcome, PriceLevel, TokenInfo};
+    use rust_decimal_macros::dec;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    fn default_config() -> ConvergenceConfig {
+        ConvergenceConfig {
+            min_price_threshold: dec!(0.93),
+            max_days_to_resolution: 7,
+            max_position_usdc: dec!(100),
+            kelly_fraction: dec!(0.25),
+            time_decay_boost: true,
+        }
+    }
+
+    fn make_market(
+        end_date: Option<chrono::DateTime<Utc>>,
+        neg_risk: bool,
+    ) -> MarketInfo {
+        MarketInfo {
+            condition_id: B256::ZERO,
+            question_id: B256::ZERO,
+            question: "Will event X happen?".to_string(),
+            neg_risk,
+            neg_risk_market_id: None,
+            tokens: vec![
+                TokenInfo {
+                    token_id: U256::from(1u64),
+                    outcome: Outcome::Yes,
+                    complement_id: U256::from(2u64),
+                },
+                TokenInfo {
+                    token_id: U256::from(2u64),
+                    outcome: Outcome::No,
+                    complement_id: U256::from(1u64),
+                },
+            ],
+            tick_size: dec!(0.01),
+            fee_rate_bps: 200,
+            active: true,
+            liquidity: dec!(1000),
+            event_title: None,
+            end_date,
+            category: None,
+        }
+    }
+
+    fn make_book(token_id: U256, best_ask_price: Decimal) -> OrderBook {
+        OrderBook {
+            token_id,
+            bids: vec![PriceLevel {
+                price: best_ask_price - dec!(0.02),
+                size: dec!(500),
+            }],
+            asks: vec![PriceLevel {
+                price: best_ask_price,
+                size: dec!(500),
+            }],
+            timestamp: Utc::now(),
+        }
+    }
+
+    fn make_strategy(
+        config: ConvergenceConfig,
+        books: HashMap<U256, OrderBook>,
+        position: Decimal,
+    ) -> ResolutionConvergenceStrategy {
+        let books = Arc::new(books);
+        let pos = Arc::new(Mutex::new(position));
+        ResolutionConvergenceStrategy::new(
+            config,
+            dec!(0.00), // no gas for CLOB-only
+            Box::new(move |tid| books.get(&tid).cloned()),
+            Box::new(|| Decimal::MAX),
+            Box::new(move |_| *pos.lock().unwrap()),
+        )
+    }
+
+    #[test]
+    fn test_filters_market_without_end_date() {
+        let market = make_market(None, false);
+        let mut books = HashMap::new();
+        books.insert(U256::from(1u64), make_book(U256::from(1u64), dec!(0.95)));
+        books.insert(U256::from(2u64), make_book(U256::from(2u64), dec!(0.05)));
+        let strategy = make_strategy(default_config(), books, Decimal::ZERO);
+
+        assert!(strategy.detect_convergence(&market).is_none());
+    }
+
+    #[test]
+    fn test_filters_market_too_far() {
+        let market = make_market(Some(Utc::now() + Duration::days(30)), false);
+        let mut books = HashMap::new();
+        books.insert(U256::from(1u64), make_book(U256::from(1u64), dec!(0.95)));
+        books.insert(U256::from(2u64), make_book(U256::from(2u64), dec!(0.05)));
+        let strategy = make_strategy(default_config(), books, Decimal::ZERO);
+
+        assert!(strategy.detect_convergence(&market).is_none());
+    }
+
+    #[test]
+    fn test_filters_market_past_end_date() {
+        let market = make_market(Some(Utc::now() - Duration::hours(1)), false);
+        let mut books = HashMap::new();
+        books.insert(U256::from(1u64), make_book(U256::from(1u64), dec!(0.95)));
+        books.insert(U256::from(2u64), make_book(U256::from(2u64), dec!(0.05)));
+        let strategy = make_strategy(default_config(), books, Decimal::ZERO);
+
+        assert!(strategy.detect_convergence(&market).is_none());
+    }
+
+    #[test]
+    fn test_filters_price_below_threshold() {
+        // YES@0.80, NO@0.20 — both below 0.93 threshold
+        let market = make_market(Some(Utc::now() + Duration::days(3)), false);
+        let mut books = HashMap::new();
+        books.insert(U256::from(1u64), make_book(U256::from(1u64), dec!(0.80)));
+        books.insert(U256::from(2u64), make_book(U256::from(2u64), dec!(0.20)));
+        let strategy = make_strategy(default_config(), books, Decimal::ZERO);
+
+        assert!(strategy.detect_convergence(&market).is_none());
+    }
+
+    #[test]
+    fn test_detects_yes_convergence() {
+        // YES@0.95, 3 days out → should detect opportunity on YES side
+        let market = make_market(Some(Utc::now() + Duration::days(3)), false);
+        let mut books = HashMap::new();
+        books.insert(U256::from(1u64), make_book(U256::from(1u64), dec!(0.95)));
+        books.insert(U256::from(2u64), make_book(U256::from(2u64), dec!(0.05)));
+        let strategy = make_strategy(default_config(), books, Decimal::ZERO);
+
+        let opp = strategy.detect_convergence(&market).unwrap();
+        assert_eq!(opp.strategy_type, StrategyType::ResolutionConvergence);
+        // Should buy the YES token
+        match &opp.execution_plan {
+            ExecutionPlan::DirectionalBuy { token_id, price, .. } => {
+                assert_eq!(*token_id, U256::from(1u64));
+                assert_eq!(*price, dec!(0.95));
+            }
+            _ => panic!("Expected DirectionalBuy"),
+        }
+    }
+
+    #[test]
+    fn test_detects_no_convergence() {
+        // NO@0.96, 2 days out → should detect opportunity on NO side
+        let market = make_market(Some(Utc::now() + Duration::days(2)), false);
+        let mut books = HashMap::new();
+        books.insert(U256::from(1u64), make_book(U256::from(1u64), dec!(0.04)));
+        books.insert(U256::from(2u64), make_book(U256::from(2u64), dec!(0.96)));
+        let strategy = make_strategy(default_config(), books, Decimal::ZERO);
+
+        let opp = strategy.detect_convergence(&market).unwrap();
+        match &opp.execution_plan {
+            ExecutionPlan::DirectionalBuy { token_id, price, .. } => {
+                assert_eq!(*token_id, U256::from(2u64));
+                assert_eq!(*price, dec!(0.96));
+            }
+            _ => panic!("Expected DirectionalBuy"),
+        }
+    }
+
+    #[test]
+    fn test_picks_higher_conviction() {
+        // YES@0.97 vs NO@0.94 → should pick YES (higher price, stronger conviction)
+        let market = make_market(Some(Utc::now() + Duration::days(2)), false);
+        let mut books = HashMap::new();
+        books.insert(U256::from(1u64), make_book(U256::from(1u64), dec!(0.97)));
+        books.insert(U256::from(2u64), make_book(U256::from(2u64), dec!(0.94)));
+        let strategy = make_strategy(default_config(), books, Decimal::ZERO);
+
+        let opp = strategy.detect_convergence(&market).unwrap();
+        match &opp.execution_plan {
+            ExecutionPlan::DirectionalBuy { token_id, .. } => {
+                assert_eq!(*token_id, U256::from(1u64), "Should pick YES (higher price)");
+            }
+            _ => panic!("Expected DirectionalBuy"),
+        }
+    }
+
+    #[test]
+    fn test_time_decay_boost() {
+        // 1 day remaining → higher model_prob than 7 days
+        let config = default_config();
+        let max_days = config.max_days_to_resolution as f64;
+
+        let days_1 = 1.0_f64;
+        let days_7 = 7.0_f64;
+        let prob_1 = 1.0 - (days_1 / max_days) * 0.03;
+        let prob_7 = 1.0 - (days_7 / max_days) * 0.03;
+
+        assert!(
+            prob_1 > prob_7,
+            "1 day ({}) should have higher prob than 7 days ({})",
+            prob_1,
+            prob_7
+        );
+        // 1 day: ~0.9957, 7 days: ~0.97
+        assert!(prob_1 > 0.99);
+        assert!(prob_7 < 0.98);
+    }
+
+    #[test]
+    fn test_position_aware_sizing() {
+        // Existing $80, max $100 → only $20 remaining
+        let market = make_market(Some(Utc::now() + Duration::days(3)), false);
+        let mut books = HashMap::new();
+        books.insert(U256::from(1u64), make_book(U256::from(1u64), dec!(0.95)));
+        books.insert(U256::from(2u64), make_book(U256::from(2u64), dec!(0.05)));
+        let strategy = make_strategy(default_config(), books, dec!(80));
+
+        let opp = strategy.detect_convergence(&market).unwrap();
+        match &opp.execution_plan {
+            ExecutionPlan::DirectionalBuy { size, .. } => {
+                assert!(
+                    *size <= dec!(20),
+                    "Size {} should be <= $20 (max $100 - existing $80)",
+                    size
+                );
+            }
+            _ => panic!("Expected DirectionalBuy"),
+        }
+    }
+
+    #[test]
+    fn test_skips_neg_risk() {
+        let market = make_market(Some(Utc::now() + Duration::days(3)), true);
+        let mut books = HashMap::new();
+        books.insert(U256::from(1u64), make_book(U256::from(1u64), dec!(0.95)));
+        books.insert(U256::from(2u64), make_book(U256::from(2u64), dec!(0.05)));
+        let strategy = make_strategy(default_config(), books, Decimal::ZERO);
+
+        assert!(strategy.detect_convergence(&market).is_none());
+    }
+}

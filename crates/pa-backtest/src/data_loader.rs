@@ -105,6 +105,8 @@ impl DataLoader {
                 active: m.active,
                 liquidity: Decimal::ZERO,
                 event_title: None,
+                end_date: None,
+                category: None,
             });
         }
 

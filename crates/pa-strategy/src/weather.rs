@@ -76,7 +76,7 @@ const KNOWN_CITIES: &[&str] = &[
 ];
 
 /// Check if `text` contains `word` as a whole word (not part of a larger word).
-fn contains_word(text: &str, word: &str) -> bool {
+pub(crate) fn contains_word(text: &str, word: &str) -> bool {
     for (i, _) in text.match_indices(word) {
         let before_ok = i == 0 || !text.as_bytes()[i - 1].is_ascii_alphabetic();
         let after_idx = i + word.len();
@@ -776,7 +776,7 @@ impl OpenMeteoClient {
 
 /// Retry an async operation with exponential backoff.
 /// Delays: 500ms, 1s, 2s, ...
-async fn with_retry<T, F, Fut>(max_retries: u32, f: F) -> anyhow::Result<T>
+pub(crate) async fn with_retry<T, F, Fut>(max_retries: u32, f: F) -> anyhow::Result<T>
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<T>>,

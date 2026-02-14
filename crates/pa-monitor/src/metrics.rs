@@ -105,3 +105,14 @@ pub static SCAN_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
     REGISTRY.register(Box::new(hist.clone())).unwrap();
     hist
 });
+
+/// Positions reduced by event calendar filter.
+pub static EVENT_FILTER_APPLIED: LazyLock<IntCounter> = LazyLock::new(|| {
+    let counter = IntCounter::new(
+        "event_filter_applied_total",
+        "Positions reduced by event calendar filter",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});

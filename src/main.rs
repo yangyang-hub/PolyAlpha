@@ -20,6 +20,7 @@ use pa_execution::ctf_executor::CtfExecutor;
 use pa_execution::orchestrator::HybridOrchestrator;
 use pa_market_data::gamma_feed::GammaFeed;
 use pa_market_data::service::MarketDataService;
+use pa_market_data::event_calendar::EventCalendarService;
 use pa_monitor::health::HealthState;
 use pa_risk::manager::RiskManagerImpl;
 use pa_storage::models::OrderBookSnapshotRow;
@@ -545,11 +546,52 @@ async fn main() -> Result<()> {
         tracing::info!("Weather alpha strategy enabled (binary + NegRisk)");
     }
 
+    // Add resolution convergence strategy if enabled
+    if settings.strategy.enabled.contains(&"convergence".to_string()) {
+        let conv_cache = market_data.cache().clone();
+        let rm_pos_conv = Arc::clone(&risk_manager_impl);
+        let convergence = pa_strategy::convergence::ResolutionConvergenceStrategy::new(
+            settings.convergence.clone(),
+            dec!(0.00), // no gas for CLOB-only
+            Box::new(move |token_id| conv_cache.get(&token_id)),
+            make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
+            Box::new(move |tid: alloy::primitives::U256| rm_pos_conv.get_position_size(&tid)),
+        );
+        strategies.push(Box::new(convergence));
+        tracing::info!("Resolution convergence strategy enabled");
+    }
+
+    // Add crypto alpha strategy if enabled
+    if settings.strategy.enabled.contains(&"crypto".to_string()) {
+        let crypto_cache = market_data.cache().clone();
+        let rm_pos_crypto = Arc::clone(&risk_manager_impl);
+        let crypto = pa_strategy::crypto_alpha::CryptoAlphaStrategy::new(
+            settings.crypto_alpha.clone(),
+            dec!(0.00), // no gas for CLOB-only
+            Box::new(move |token_id| crypto_cache.get(&token_id)),
+            make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
+            Box::new(move |tid: alloy::primitives::U256| rm_pos_crypto.get_position_size(&tid)),
+        );
+        strategies.push(Box::new(crypto));
+        tracing::info!("Crypto alpha strategy enabled");
+    }
+
+    // --- Initialize event calendar filter ---
+    let event_calendar = if settings.event_calendar.enabled {
+        let ec = Arc::new(EventCalendarService::new(settings.event_calendar.clone()));
+        ec.refresh().await;
+        tracing::info!(events = ec.event_count().await, "Event calendar initialized");
+        Some(ec)
+    } else {
+        None
+    };
+
     let engine = StrategyEngine::new(
         strategies,
         executor.clone(),
         risk_manager.clone(),
         settings.strategy.scan_interval_ms,
+        event_calendar,
     );
 
     tracing::info!(

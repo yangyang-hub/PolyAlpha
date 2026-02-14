@@ -255,6 +255,12 @@ impl BacktestEngine {
         // meaningfully replay historical forecasts from DB snapshots alone.
         // Weather strategy (both binary and NegRisk modes) is excluded from backtest.
 
+        // Note: ResolutionConvergenceStrategy requires end_date which is not stored in DB.
+        // Excluded from backtest, same as Weather.
+
+        // Note: CryptoAlphaStrategy requires live Binance/CoinGecko API calls.
+        // Excluded from backtest, same as Weather/Convergence.
+
         strategies
     }
 }

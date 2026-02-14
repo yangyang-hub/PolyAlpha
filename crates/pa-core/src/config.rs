@@ -14,6 +14,12 @@ pub struct Settings {
     pub market_filter: MarketFilterConfig,
     #[serde(default)]
     pub weather: WeatherConfig,
+    #[serde(default)]
+    pub convergence: ConvergenceConfig,
+    #[serde(default)]
+    pub crypto_alpha: CryptoAlphaConfig,
+    #[serde(default)]
+    pub event_calendar: EventCalendarConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -151,6 +157,162 @@ impl Default for ForecastErrorConfig {
             wind_sigma_mph: default_wind_sigma(),
         }
     }
+}
+
+/// Configuration for the Resolution Convergence strategy.
+///
+/// Targets tokens priced near 0 or 1 in markets approaching resolution,
+/// where outcomes become increasingly certain.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ConvergenceConfig {
+    /// Minimum token price to consider (e.g. 0.93 = 93% implied certainty).
+    #[serde(default = "default_min_price_threshold")]
+    pub min_price_threshold: Decimal,
+    /// Maximum days until resolution to consider a market.
+    #[serde(default = "default_max_days_to_resolution")]
+    pub max_days_to_resolution: u32,
+    /// Maximum position size per market in USDC.
+    #[serde(default = "default_conv_max_position")]
+    pub max_position_usdc: Decimal,
+    /// Kelly fraction cap (0.0-1.0).
+    #[serde(default = "default_conv_kelly")]
+    pub kelly_fraction: Decimal,
+    /// Confidence boost: higher model probability for markets closer to resolution.
+    #[serde(default = "default_time_decay_boost")]
+    pub time_decay_boost: bool,
+}
+
+fn default_min_price_threshold() -> Decimal { Decimal::new(93, 2) }
+fn default_max_days_to_resolution() -> u32 { 7 }
+fn default_conv_max_position() -> Decimal { Decimal::from(100) }
+fn default_conv_kelly() -> Decimal { Decimal::new(25, 2) }
+fn default_time_decay_boost() -> bool { true }
+
+impl Default for ConvergenceConfig {
+    fn default() -> Self {
+        Self {
+            min_price_threshold: default_min_price_threshold(),
+            max_days_to_resolution: default_max_days_to_resolution(),
+            max_position_usdc: default_conv_max_position(),
+            kelly_fraction: default_conv_kelly(),
+            time_decay_boost: default_time_decay_boost(),
+        }
+    }
+}
+
+/// Configuration for the Crypto Alpha strategy.
+///
+/// Uses real-time crypto prices + GBM model to find mispriced crypto prediction markets.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CryptoAlphaConfig {
+    /// Minimum edge in basis points.
+    #[serde(default = "default_crypto_min_edge")]
+    pub min_edge_bps: u32,
+    /// Maximum position size per market in USDC.
+    #[serde(default = "default_crypto_max_position")]
+    pub max_position_usdc: Decimal,
+    /// Kelly fraction cap (0.0-1.0).
+    #[serde(default = "default_crypto_kelly")]
+    pub kelly_fraction: Decimal,
+    /// Price data refresh interval (seconds).
+    #[serde(default = "default_crypto_refresh")]
+    pub refresh_interval_secs: u64,
+    /// CoinGecko Demo API key (empty = fallback disabled).
+    #[serde(default)]
+    pub coingecko_api_key: String,
+}
+
+fn default_crypto_min_edge() -> u32 { 500 }
+fn default_crypto_max_position() -> Decimal { Decimal::from(100) }
+fn default_crypto_kelly() -> Decimal { Decimal::new(25, 2) }
+fn default_crypto_refresh() -> u64 { 300 }
+
+impl Default for CryptoAlphaConfig {
+    fn default() -> Self {
+        Self {
+            min_edge_bps: default_crypto_min_edge(),
+            max_position_usdc: default_crypto_max_position(),
+            kelly_fraction: default_crypto_kelly(),
+            refresh_interval_secs: default_crypto_refresh(),
+            coingecko_api_key: String::new(),
+        }
+    }
+}
+
+/// Configuration for the Event Calendar filter.
+///
+/// When enabled, reduces position sizes during high-impact event windows
+/// (e.g. FOMC, CPI, token unlocks) to avoid model unreliability.
+#[derive(Debug, Deserialize, Clone)]
+pub struct EventCalendarConfig {
+    /// Whether the event calendar filter is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Finnhub API key for economic calendar data.
+    #[serde(default)]
+    pub finnhub_api_key: String,
+    /// CoinMarketCal API key for crypto event data.
+    #[serde(default)]
+    pub coinmarketcal_api_key: String,
+    /// How often to refresh event data (seconds).
+    #[serde(default = "default_ec_refresh")]
+    pub refresh_interval_secs: u64,
+    /// Hours before an event to start reducing positions.
+    #[serde(default = "default_ec_pre_hours")]
+    pub pre_event_hours: u32,
+    /// Hours after an event to keep reducing positions.
+    #[serde(default = "default_ec_post_hours")]
+    pub post_event_hours: u32,
+    /// Position multiplier for high-impact events (0.0-1.0).
+    #[serde(default = "default_ec_high_mult")]
+    pub high_impact_multiplier: Decimal,
+    /// Position multiplier for medium-impact events (0.0-1.0).
+    #[serde(default = "default_ec_medium_mult")]
+    pub medium_impact_multiplier: Decimal,
+    /// Position multiplier for low-impact events (0.0-1.0).
+    #[serde(default = "default_ec_low_mult")]
+    pub low_impact_multiplier: Decimal,
+    /// Static/manual events defined in config file.
+    #[serde(default)]
+    pub static_events: Vec<StaticEventConfig>,
+}
+
+fn default_ec_refresh() -> u64 { 3600 }
+fn default_ec_pre_hours() -> u32 { 4 }
+fn default_ec_post_hours() -> u32 { 2 }
+fn default_ec_high_mult() -> Decimal { Decimal::new(25, 2) }   // 0.25
+fn default_ec_medium_mult() -> Decimal { Decimal::new(50, 2) } // 0.50
+fn default_ec_low_mult() -> Decimal { Decimal::new(75, 2) }    // 0.75
+
+impl Default for EventCalendarConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            finnhub_api_key: String::new(),
+            coinmarketcal_api_key: String::new(),
+            refresh_interval_secs: default_ec_refresh(),
+            pre_event_hours: default_ec_pre_hours(),
+            post_event_hours: default_ec_post_hours(),
+            high_impact_multiplier: default_ec_high_mult(),
+            medium_impact_multiplier: default_ec_medium_mult(),
+            low_impact_multiplier: default_ec_low_mult(),
+            static_events: vec![],
+        }
+    }
+}
+
+/// A manually-defined event in the config file.
+#[derive(Debug, Deserialize, Clone)]
+pub struct StaticEventConfig {
+    pub title: String,
+    /// Category: "macro", "crypto", "political", "sports"
+    pub category: String,
+    /// ISO 8601 datetime string (e.g. "2026-03-18T18:00:00Z")
+    pub event_time: String,
+    /// Impact level: "high", "medium", "low"
+    pub impact: String,
+    #[serde(default)]
+    pub keywords: Vec<String>,
 }
 
 impl Settings {

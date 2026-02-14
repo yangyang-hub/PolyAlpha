@@ -179,6 +179,8 @@ impl GammaFeed {
             active,
             liquidity,
             event_title,
+            end_date: market.end_date,
+            category: market.category.clone(),
         })
     }
 

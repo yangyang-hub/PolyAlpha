@@ -460,6 +460,8 @@ mod tests {
             active: true,
             liquidity: dec!(1000),
             event_title: None,
+            end_date: None,
+            category: None,
         }
     }
 

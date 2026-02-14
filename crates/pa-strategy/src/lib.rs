@@ -5,3 +5,5 @@ pub mod neg_risk;
 pub mod cross_market;
 pub mod profitability;
 pub mod weather;
+pub mod convergence;
+pub mod crypto_alpha;

@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use alloy::primitives::U256;
+use chrono::Utc;
+use rust_decimal::Decimal;
 use pa_core::traits::{Executor, RiskManager, Strategy};
-use pa_core::types::{ArbitrageOpportunity, MarketInfo, RiskDecision};
+use pa_core::types::{ArbitrageOpportunity, ExecutionPlan, MarketInfo, RiskDecision};
+use pa_market_data::event_calendar::EventCalendarService;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
@@ -19,6 +22,7 @@ pub struct StrategyEngine {
     executor: Arc<dyn Executor>,
     risk_manager: Arc<dyn RiskManager>,
     scan_interval: Duration,
+    event_calendar: Option<Arc<EventCalendarService>>,
 }
 
 impl StrategyEngine {
@@ -27,12 +31,14 @@ impl StrategyEngine {
         executor: Arc<dyn Executor>,
         risk_manager: Arc<dyn RiskManager>,
         scan_interval_ms: u64,
+        event_calendar: Option<Arc<EventCalendarService>>,
     ) -> Self {
         Self {
             strategies,
             executor,
             risk_manager,
             scan_interval: Duration::from_millis(scan_interval_ms),
+            event_calendar,
         }
     }
 
@@ -94,6 +100,10 @@ impl StrategyEngine {
                         tracing::warn!("Circuit breaker active, skipping periodic scan");
                         continue;
                     }
+                    // Refresh event calendar if needed
+                    if let Some(ref ec) = self.event_calendar {
+                        ec.refresh_if_needed().await;
+                    }
                     self.scan_and_execute(markets).await;
                 }
             }
@@ -114,6 +124,23 @@ impl StrategyEngine {
             match strategy.scan(markets).await {
                 Ok(opportunities) => {
                     for opp in opportunities {
+                        // Apply event calendar position filter
+                        if let Some(ref ec) = self.event_calendar {
+                            let multiplier = ec.position_multiplier(&opp.question, Utc::now()).await;
+                            if multiplier < Decimal::ONE {
+                                tracing::info!(
+                                    id = %opp.id, multiplier = %multiplier,
+                                    "Event calendar reducing position"
+                                );
+                                let mut scaled = opp;
+                                scaled.size = (scaled.size * multiplier).round_dp(2);
+                                scaled.estimated_profit = (scaled.estimated_profit * multiplier).round_dp(4);
+                                scale_execution_plan_size(&mut scaled.execution_plan, multiplier);
+                                pa_monitor::metrics::EVENT_FILTER_APPLIED.inc();
+                                self.process_opportunity(&scaled).await;
+                                continue;
+                            }
+                        }
                         self.process_opportunity(&opp).await;
                     }
                 }
@@ -172,6 +199,32 @@ impl StrategyEngine {
                 tracing::error!(id = %opp.id, error = %e, "Execution failed");
                 pa_monitor::metrics::EXECUTION_ERRORS.inc();
             }
+        }
+    }
+}
+
+/// Scale all size fields within an execution plan by the given multiplier.
+fn scale_execution_plan_size(plan: &mut ExecutionPlan, multiplier: Decimal) {
+    match plan {
+        ExecutionPlan::BuyAndMerge { merge_amount, .. } => {
+            *merge_amount = (*merge_amount * multiplier).round_dp(2);
+        }
+        ExecutionPlan::SplitAndSell { split_amount, .. } => {
+            *split_amount = (*split_amount * multiplier).round_dp(2);
+        }
+        ExecutionPlan::NegRiskArbitrage { amount, legs, .. } => {
+            *amount = (*amount * multiplier).round_dp(2);
+            for leg in legs {
+                leg.size = (leg.size * multiplier).round_dp(2);
+            }
+        }
+        ExecutionPlan::CrossMarket { amount, leg_a, leg_b, .. } => {
+            *amount = (*amount * multiplier).round_dp(2);
+            leg_a.size = (leg_a.size * multiplier).round_dp(2);
+            leg_b.size = (leg_b.size * multiplier).round_dp(2);
+        }
+        ExecutionPlan::DirectionalBuy { size, .. } => {
+            *size = (*size * multiplier).round_dp(2);
         }
     }
 }

@@ -4,6 +4,23 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+// ──── Event Calendar Types ────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum EventCategory {
+    Macro,      // FOMC, CPI, NFP, GDP
+    Crypto,     // Token unlocks, forks, ETF decisions
+    Political,  // Elections, hearings, legislation
+    Sports,     // Matches, tournaments
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum EventImpact {
+    Low,
+    Medium,
+    High,
+}
+
 // ──── Market Types ────
 
 /// Metadata for a Polymarket binary market.
@@ -25,6 +42,12 @@ pub struct MarketInfo {
     /// For NegRisk markets, the parent event's title (used for weather detection).
     #[serde(default)]
     pub event_title: Option<String>,
+    /// Market resolution/end date (from Gamma API). Used by convergence strategy.
+    #[serde(default)]
+    pub end_date: Option<DateTime<Utc>>,
+    /// Market category hint (e.g. "crypto", "politics"). Used by event calendar filter.
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 /// A NegRisk event containing multiple outcome markets.
@@ -160,6 +183,10 @@ pub enum StrategyType {
     CrossMarket,
     /// Weather forecast-based directional alpha
     Weather,
+    /// Resolution convergence: buy tokens near 0/1 as markets approach resolution
+    ResolutionConvergence,
+    /// Crypto price-based directional alpha
+    CryptoAlpha,
 }
 
 /// Concrete execution plan for an arbitrage opportunity.
