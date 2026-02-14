@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use alloy::primitives::U256;
 use rust_decimal::Decimal;
 use pa_core::config::RiskConfig;
 use pa_core::traits::RiskManager;
@@ -25,6 +26,12 @@ impl RiskManagerImpl {
             circuit_breaker: CircuitBreaker::new(&config),
             pnl: PnlTracker::new(),
         }
+    }
+
+    /// Get the current position size for a specific token.
+    /// Returns `Decimal::ZERO` if no position exists.
+    pub fn get_position_size(&self, token_id: &U256) -> Decimal {
+        self.positions.get_size(token_id)
     }
 }
 

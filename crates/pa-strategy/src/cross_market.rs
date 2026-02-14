@@ -459,6 +459,7 @@ mod tests {
             fee_rate_bps: 200,
             active: true,
             liquidity: dec!(1000),
+            event_title: None,
         }
     }
 

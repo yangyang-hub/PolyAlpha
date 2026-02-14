@@ -465,8 +465,9 @@ async fn main() -> Result<()> {
     };
 
     // --- Initialize risk manager ---
+    let risk_manager_impl = Arc::new(RiskManagerImpl::new(settings.risk.clone()));
     let risk_manager: Arc<dyn pa_core::traits::RiskManager> =
-        Arc::new(RiskManagerImpl::new(settings.risk.clone()));
+        Arc::clone(&risk_manager_impl) as Arc<dyn pa_core::traits::RiskManager>;
     tracing::info!("Risk manager initialized");
 
     // --- Initialize strategy engine ---
@@ -504,7 +505,7 @@ async fn main() -> Result<()> {
             settings.strategy.max_trade_size_usdc,
             settings.strategy.min_profit_usdc,
             dec!(0.01), // gas cost estimate in USD
-            neg_risk_events,
+            neg_risk_events.clone(),
             Box::new(move |token_id| cache2.get(&token_id)),
             make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
         );
@@ -531,14 +532,17 @@ async fn main() -> Result<()> {
     // Add weather alpha strategy if enabled
     if settings.strategy.enabled.contains(&"weather".to_string()) {
         let weather_cache = market_data.cache().clone();
+        let rm_pos = Arc::clone(&risk_manager_impl);
         let weather_strategy = pa_strategy::weather::WeatherAlphaStrategy::new(
             settings.weather.clone(),
             dec!(0.00), // no gas for CLOB-only
             Box::new(move |token_id| weather_cache.get(&token_id)),
             make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
+            Box::new(move |tid: alloy::primitives::U256| rm_pos.get_position_size(&tid)),
+            neg_risk_events.clone(),
         );
         strategies.push(Box::new(weather_strategy));
-        tracing::info!("Weather alpha strategy enabled");
+        tracing::info!("Weather alpha strategy enabled (binary + NegRisk)");
     }
 
     let engine = StrategyEngine::new(

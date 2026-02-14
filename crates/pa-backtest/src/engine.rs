@@ -253,7 +253,7 @@ impl BacktestEngine {
 
         // Note: WeatherAlphaStrategy requires live Open-Meteo API calls and cannot
         // meaningfully replay historical forecasts from DB snapshots alone.
-        // Weather strategy is excluded from backtest by default.
+        // Weather strategy (both binary and NegRisk modes) is excluded from backtest.
 
         strategies
     }

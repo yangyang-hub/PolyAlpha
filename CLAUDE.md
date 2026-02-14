@@ -8,14 +8,14 @@ Polymarket 量化套利交易机器人（Rust）。通过实时订单簿监控�
 
 - **语言**: Rust Edition 2024, MSRV 1.88.0
 - **工具链**: rustc 1.93.0, cargo 1.93.0
-- **代码量**: ~7200 行 Rust
-- **测试**: 40 个（全部通过）
+- **代码量**: ~8600 行 Rust
+- **测试**: 76 个（全部通过）
 
 ## 常用命令
 
 ```bash
 cargo check --workspace          # 编译检查
-cargo test --workspace           # 运行全部 40 个测试
+cargo test --workspace           # 运行全部 76 个测试
 cargo build --release            # 构建 release
 cargo run --release              # 运行机器人
 cargo run --bin backtest -- --from "2025-01-01T00:00:00" --to "2025-01-31T23:59:59"  # 回测
@@ -63,13 +63,13 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 
 | 类型 | 说明 |
 |------|------|
-| `MarketInfo` | 市场元数据（condition_id, tokens, fee_rate_bps） |
+| `MarketInfo` | 市场元数据（condition_id, tokens, fee_rate_bps, event_title） |
 | `OrderBook` | 订单簿快照（bids 降序, asks 升序） |
 | `ArbitrageOpportunity` | 检测到的套利机会（含 ExecutionPlan） |
 | `ExecutionPlan` | 枚举: BuyAndMerge / SplitAndSell / NegRiskConvert / CrossMarket / DirectionalBuy |
 | `ExecutionResult` | 执行结果（profit, fees, gas, status） |
 | `StrategyType` | 枚举: YesNoMerge / YesNoSplit / NegRiskConvert / CrossMarket / Weather |
-| `NegRiskEvent` | NegRisk 事件（包含多个 MarketInfo） |
+| `NegRiskEvent` | NegRisk 事件（title + 多个 MarketInfo） |
 | `CrossMarketPair` | 跨市场配对（market_a, market_b, expected_sum, correlation） |
 | `RiskDecision` | 枚举: Approve / Reject(reason) |
 
@@ -88,6 +88,10 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 
 关键结构: `Settings { chain, clob, gamma, strategy, risk, database, monitor, market_filter, weather }`
 
+`WeatherConfig` fields: `min_edge_bps`, `max_position_usdc`, `kelly_fraction`, `forecast_error: ForecastErrorConfig`, `refresh_interval_secs`
+
+`ForecastErrorConfig` — 每指标预报误差σ: `temperature_sigma_f(3.0°F)`, `precipitation_sigma_in(0.3in)`, `snowfall_sigma_in(2.0in)`, `wind_sigma_mph(5.0mph)`
+
 ## 策略模式
 
 所有策略遵循相同模式：
@@ -100,14 +104,38 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 
 ### Weather Alpha 策略（方向性）
 
-与套利策略不同，Weather Alpha 是有方向性风险的：
+与套利策略不同，Weather Alpha 是有方向性风险的。支持两种模式：
+
+**二元市场模式** — 单一阈值问题（如 "Will temperature exceed 100°F?"）：
 1. 通过关键词匹配识别天气相关市场（temperature, rainfall, snowfall, wind）
-2. 调用 Open-Meteo API（免费，无需 API Key）获取实时天气预报
-3. 使用正态分布 CDF 模型将预报转换为事件概率
-4. 比较模型概率与市场价格，当偏差超过阈值时买入低估的一方
-5. 仓位控制: Kelly criterion（quarter Kelly）+ max_position_usdc 上限
-6. 执行: CLOB FOK 单边买入（`DirectionalBuy`），无链上操作
-7. 启用: 在 `strategy.enabled` 中添加 `"weather"`
+2. 解析目标日期（"on Feb 14"、"today"、"tomorrow"、"2/14"）→ 单日预报
+3. 检测降水单位（"mm" vs "inch"，默认 inch）
+4. 调用 Open-Meteo API（免费，无需 API Key，10s超时+指数退避重试）获取天气预报
+5. 使用分布CDF模型将预报转换为事件概率（温度→正态, 降水→对数正态, 风速→Weibull）
+6. 比较模型概率与市场价格，检查YES和NO两侧，取更大edge的一方买入
+
+**NegRisk 多结果模式** — 区间分布问题（如 "Highest temperature in NYC?"）：
+1. 通过 `NegRiskEvent.title` 识别天气事件
+2. 对每个结果市场解析数值区间（"35°F or below", "36-37°F", "50°F or higher"）
+3. 使用 CDF 区间概率 `P(a ≤ X ≤ b) = CDF(b) - CDF(a)` 为每个结果建模
+4. 检查每个结果的YES和NO两侧edge，选择最大edge的结果买入
+
+**Forecast Error Model**:
+- 使用绝对值 sigma 替代百分比不确定性: `ForecastErrorConfig` per metric
+- 日期特定: `sigma = forecast_error_sigma`（仅预报误差）
+- 多日模式: `sigma = sqrt(std_dev² + forecast_error_sigma²)`（组合方差）
+
+**分布模型（CDF）**:
+- 温度: 正态分布 `normal_cdf(z)`
+- 降水/降雪: 对数正态分布 `lognormal_cdf(t, mean, sigma)`
+- 风速: Weibull分布 `weibull_cdf(t, mean, sigma)` (k=2, Rayleigh)
+
+**共通逻辑**：
+- 仓位控制: Kelly criterion（quarter Kelly）+ max_position_usdc 上限 + position-aware sizing（减去已有仓位）
+- 执行: CLOB FOK 单边买入（`DirectionalBuy`），无链上操作
+- API: HTTP 10s timeout + 指数退避重试（500ms, 1s, 2s）
+- 缓存: 带TTL驱逐的forecast cache
+- 启用: 在 `strategy.enabled` 中添加 `"weather"`
 
 ## 执行层
 
@@ -193,12 +221,12 @@ Grafana 仪表盘: PnL, Exposure gauge, Circuit breaker, Market stats, Opportuni
 7. `crates/pa-backtest/src/engine.rs` — build_strategies() 中添加
 8. 测试: 至少覆盖 detect 逻辑 + profitability 计算
 
-## 测试分布（40 个）
+## 测试分布（76 个）
 
 | Crate | 数量 | 覆盖 |
 |-------|------|------|
 | pa-backtest | 11 | DataLoader 解析, Report 构建/统计, Simulator 执行模拟 |
-| pa-strategy | 27 | ProfitCalculator(9), CrossMarket(4), Weather(11: parser, CDF, probability model, edge detection), YesNo(内含于profitability) |
+| pa-strategy | 62 | ProfitCalculator(12), CrossMarket(4), Weather(45: binary parser, NegRisk outcome range parser(5), event title parser(2), date parser(6), precipitation unit(3), CDF models(7: normal, lognormal, weibull, dispatcher), forecast error sigma(2), probability model(3), position sizing(3), cache eviction, NegRisk NO-side, edge detection), YesNo(内含于profitability) |
 | pa-execution | 1 | Gas 估算 |
 | pa-market-data | 1 | OrderBook 排序 |
 

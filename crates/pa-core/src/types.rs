@@ -22,6 +22,9 @@ pub struct MarketInfo {
     /// Market liquidity in USD (from Gamma API). Used for prioritizing subscriptions.
     #[serde(default)]
     pub liquidity: Decimal,
+    /// For NegRisk markets, the parent event's title (used for weather detection).
+    #[serde(default)]
+    pub event_title: Option<String>,
 }
 
 /// A NegRisk event containing multiple outcome markets.
@@ -35,6 +38,8 @@ pub struct MarketInfo {
 pub struct NegRiskEvent {
     /// The NegRisk market ID that groups all outcomes.
     pub neg_risk_market_id: B256,
+    /// The event title (e.g. "Highest temperature in NYC on February 14?").
+    pub title: String,
     /// All outcome markets within this event.
     pub markets: Vec<MarketInfo>,
     /// Fee rate from any constituent market (they share the same rate).

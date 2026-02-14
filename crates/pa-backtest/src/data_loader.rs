@@ -104,6 +104,7 @@ impl DataLoader {
                 fee_rate_bps: m.fee_rate_bps as u32,
                 active: m.active,
                 liquidity: Decimal::ZERO,
+                event_title: None,
             });
         }
 

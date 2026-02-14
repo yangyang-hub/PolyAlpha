@@ -104,8 +104,9 @@ pub struct WeatherConfig {
     pub max_position_usdc: Decimal,
     /// Kelly fraction cap (0.0-1.0). Limits position sizing aggressiveness.
     pub kelly_fraction: Decimal,
-    /// Forecast uncertainty (std dev) to add to model.
-    pub forecast_uncertainty_pct: Decimal,
+    /// Per-metric forecast error standard deviations.
+    #[serde(default)]
+    pub forecast_error: ForecastErrorConfig,
     /// How often to refresh forecasts (seconds).
     pub refresh_interval_secs: u64,
 }
@@ -116,8 +117,38 @@ impl Default for WeatherConfig {
             min_edge_bps: 500,
             max_position_usdc: Decimal::from(50),
             kelly_fraction: Decimal::new(25, 2), // 0.25 (quarter Kelly)
-            forecast_uncertainty_pct: Decimal::from(10),
+            forecast_error: ForecastErrorConfig::default(),
             refresh_interval_secs: 3600,
+        }
+    }
+}
+
+/// Per-metric forecast error standard deviations (absolute units).
+/// These represent the expected error between the forecast and actual observed value.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ForecastErrorConfig {
+    #[serde(default = "default_temp_sigma")]
+    pub temperature_sigma_f: f64,
+    #[serde(default = "default_precip_sigma")]
+    pub precipitation_sigma_in: f64,
+    #[serde(default = "default_snow_sigma")]
+    pub snowfall_sigma_in: f64,
+    #[serde(default = "default_wind_sigma")]
+    pub wind_sigma_mph: f64,
+}
+
+fn default_temp_sigma() -> f64 { 3.0 }
+fn default_precip_sigma() -> f64 { 0.3 }
+fn default_snow_sigma() -> f64 { 2.0 }
+fn default_wind_sigma() -> f64 { 5.0 }
+
+impl Default for ForecastErrorConfig {
+    fn default() -> Self {
+        Self {
+            temperature_sigma_f: default_temp_sigma(),
+            precipitation_sigma_in: default_precip_sigma(),
+            snowfall_sigma_in: default_snow_sigma(),
+            wind_sigma_mph: default_wind_sigma(),
         }
     }
 }

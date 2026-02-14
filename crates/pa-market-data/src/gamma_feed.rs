@@ -70,6 +70,7 @@ impl GammaFeed {
 
             let event_neg_risk = event.neg_risk.unwrap_or(false);
             let event_neg_risk_market_id = event.neg_risk_market_id;
+            let event_title = event.title.clone();
 
             // Extract markets from this event
             let markets = match event.markets {
@@ -78,7 +79,7 @@ impl GammaFeed {
             };
 
             for market in markets {
-                if let Some(info) = self.convert_market(&market, event_neg_risk, event_neg_risk_market_id) {
+                if let Some(info) = self.convert_market(&market, event_neg_risk, event_neg_risk_market_id, event_title.clone()) {
                     all_markets.push(info);
                 }
             }
@@ -115,6 +116,7 @@ impl GammaFeed {
         market: &polymarket_client_sdk::gamma::types::response::Market,
         event_neg_risk: bool,
         event_neg_risk_market_id: Option<B256>,
+        event_title: Option<String>,
     ) -> Option<MarketInfo> {
         let condition_id = market.condition_id?;
         let question_id = market.question_id.unwrap_or(B256::ZERO);
@@ -176,6 +178,7 @@ impl GammaFeed {
             fee_rate_bps,
             active,
             liquidity,
+            event_title,
         })
     }
 
@@ -200,8 +203,13 @@ impl GammaFeed {
             .filter(|(_, ms)| ms.len() >= 2)
             .map(|(nr_id, ms)| {
                 let fee_rate_bps = ms.first().map(|m| m.fee_rate_bps).unwrap_or(0);
+                let title = ms
+                    .iter()
+                    .find_map(|m| m.event_title.clone())
+                    .unwrap_or_else(|| format!("NegRisk event {}", nr_id));
                 NegRiskEvent {
                     neg_risk_market_id: nr_id,
+                    title,
                     markets: ms,
                     fee_rate_bps,
                 }
@@ -242,7 +250,7 @@ impl GammaFeed {
             None => return Ok(None),
         };
 
-        Ok(self.convert_market(&market, false, None))
+        Ok(self.convert_market(&market, false, None, None))
     }
 
     /// Get all token IDs from discovered markets (for WebSocket subscription).
