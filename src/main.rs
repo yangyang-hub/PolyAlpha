@@ -566,11 +566,11 @@ async fn main() -> Result<()> {
         loop {
             // Calculate seconds until next midnight UTC
             let now = chrono::Utc::now();
-            let tomorrow = (now + chrono::Duration::days(1))
-                .date_naive()
+            let today = now.date_naive();
+            let next_midnight = (today + chrono::Duration::days(1))
                 .and_hms_opt(0, 0, 0)
                 .unwrap();
-            let until_midnight = tomorrow
+            let until_midnight = next_midnight
                 .signed_duration_since(now.naive_utc())
                 .to_std()
                 .unwrap_or(Duration::from_secs(3600));
@@ -672,7 +672,7 @@ async fn query_usdc_balance(
     let contract = IERC20::new(usdc, provider);
     let result = contract.balanceOf(wallet).call().await?;
 
-    // USDC has 6 decimals
-    let balance_u64 = result.to::<u64>();
+    // USDC has 6 decimals — use try_into to avoid panic on absurd values
+    let balance_u64: u64 = result.try_into().unwrap_or(u64::MAX);
     Ok(Decimal::from(balance_u64) / Decimal::from(1_000_000u64))
 }

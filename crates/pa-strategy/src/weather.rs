@@ -615,7 +615,7 @@ impl WeatherAlphaStrategy {
         // Position sizing via Kelly criterion: f* = edge / (1 - price)
         // Guard against extreme prices where denominator approaches zero
         let kelly_raw = if ask_price > Decimal::ZERO && ask_price < dec!(0.99) {
-            edge / (Decimal::ONE - ask_price)
+            (edge / (Decimal::ONE - ask_price)).min(Decimal::TWO) // cap at 200%
         } else {
             Decimal::ZERO
         };
