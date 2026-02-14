@@ -201,22 +201,31 @@ async fn main() -> Result<()> {
             tokio::select! {
                 _ = observer_cancel.cancelled() => break,
                 _ = interval.tick() => {
+                    let total_markets = observer_markets.len();
+                    let neg_risk_count = observer_markets.iter().filter(|m| m.neg_risk).count();
                     let mut total_checked = 0u32;
                     let mut has_book = 0u32;
+                    let mut no_asks = 0u32;  // markets missing ask data
+                    let mut no_bids = 0u32;  // markets missing bid data
                     // BuyAndMerge observations
                     let mut bm_any_spread = 0u32;       // YES+NO ask < 1.00
                     let mut bm_above_min_bps = 0u32;    // spread >= min_spread_bps
                     let mut bm_above_min_profit = 0u32;  // net_profit >= min_profit
                     let mut bm_best_spread = Decimal::ZERO;
-                    let mut bm_best_profit = Decimal::ZERO;
                     let mut bm_best_question = String::new();
                     // SplitAndSell observations
                     let mut ss_any_spread = 0u32;
                     let mut ss_above_min_bps = 0u32;
                     let mut ss_above_min_profit = 0u32;
                     let mut ss_best_spread = Decimal::ZERO;
-                    let mut ss_best_profit = Decimal::ZERO;
                     let mut ss_best_question = String::new();
+                    // Track closest-to-opportunity (even when no arb exists)
+                    let mut bm_tightest_gap = Decimal::new(999, 0);  // distance from $1.00
+                    let mut bm_tightest_info = String::new();
+                    let mut ss_tightest_gap = Decimal::new(999, 0);
+                    let mut ss_tightest_info = String::new();
+                    // Sample some actual prices for diagnostics
+                    let mut sample_prices: Vec<String> = Vec::new();
 
                     for market in &observer_markets {
                         if market.neg_risk || market.tokens.len() != 2 || !market.active {
@@ -234,9 +243,36 @@ async fn main() -> Result<()> {
                         };
                         has_book += 1;
 
-                        // --- BuyAndMerge check ---
+                        // --- BuyAndMerge check (ask side) ---
                         if let (Some(yes_ask), Some(no_ask)) = (yes_book.best_ask(), no_book.best_ask()) {
                             let total_cost = yes_ask.price + no_ask.price;
+                            let gap = total_cost - Decimal::ONE; // positive = no arb, negative = arb exists
+
+                            // Track tightest (closest to opportunity)
+                            if gap < bm_tightest_gap {
+                                bm_tightest_gap = gap;
+                                let q = &market.question[..market.question.len().min(40)];
+                                bm_tightest_info = format!(
+                                    "{} Y_ask:{} N_ask:{} sum:{} gap:{}bps",
+                                    q, yes_ask.price, no_ask.price, total_cost,
+                                    (gap * dec!(10000)).round(),
+                                );
+                            }
+
+                            // Sample first 5 markets for price diagnostics
+                            if sample_prices.len() < 5 {
+                                let q = &market.question[..market.question.len().min(30)];
+                                sample_prices.push(format!(
+                                    "{}.. Y:{}/{} N:{}/{} fee:{}bps",
+                                    q,
+                                    yes_book.best_bid().map(|b| b.price.to_string()).unwrap_or("-".into()),
+                                    yes_ask.price,
+                                    no_book.best_bid().map(|b| b.price.to_string()).unwrap_or("-".into()),
+                                    no_ask.price,
+                                    market.fee_rate_bps,
+                                ));
+                            }
+
                             if total_cost < Decimal::ONE {
                                 let spread = Decimal::ONE - total_cost;
                                 let spread_bps = (spread * dec!(10000)).to_string().parse::<u32>().unwrap_or(0);
@@ -252,20 +288,33 @@ async fn main() -> Result<()> {
                                 }
                                 if spread > bm_best_spread {
                                     bm_best_spread = spread;
-                                    bm_best_profit = est.net_profit;
+                                    let q = &market.question[..market.question.len().min(50)];
                                     bm_best_question = format!(
                                         "{} (ask:{:.2}+{:.2}={:.2}, spread:{:.1}bps, profit:${:.4}, size:{:.0})",
-                                        &market.question[..market.question.len().min(50)],
-                                        yes_ask.price, no_ask.price, total_cost,
+                                        q, yes_ask.price, no_ask.price, total_cost,
                                         spread * dec!(10000), est.net_profit, max_size,
                                     );
                                 }
                             }
+                        } else {
+                            no_asks += 1;
                         }
 
-                        // --- SplitAndSell check ---
+                        // --- SplitAndSell check (bid side) ---
                         if let (Some(yes_bid), Some(no_bid)) = (yes_book.best_bid(), no_book.best_bid()) {
                             let total_revenue = yes_bid.price + no_bid.price;
+                            let gap = Decimal::ONE - total_revenue; // positive = no arb
+
+                            if gap < ss_tightest_gap {
+                                ss_tightest_gap = gap;
+                                let q = &market.question[..market.question.len().min(40)];
+                                ss_tightest_info = format!(
+                                    "{} Y_bid:{} N_bid:{} sum:{} gap:{}bps",
+                                    q, yes_bid.price, no_bid.price, total_revenue,
+                                    (gap * dec!(10000)).round(),
+                                );
+                            }
+
                             if total_revenue > Decimal::ONE {
                                 let spread = total_revenue - Decimal::ONE;
                                 let spread_bps = (spread * dec!(10000)).to_string().parse::<u32>().unwrap_or(0);
@@ -281,44 +330,59 @@ async fn main() -> Result<()> {
                                 }
                                 if spread > ss_best_spread {
                                     ss_best_spread = spread;
-                                    ss_best_profit = est.net_profit;
+                                    let q = &market.question[..market.question.len().min(50)];
                                     ss_best_question = format!(
                                         "{} (bid:{:.2}+{:.2}={:.2}, spread:{:.1}bps, profit:${:.4}, size:{:.0})",
-                                        &market.question[..market.question.len().min(50)],
-                                        yes_bid.price, no_bid.price, total_revenue,
+                                        q, yes_bid.price, no_bid.price, total_revenue,
                                         spread * dec!(10000), est.net_profit, max_size,
                                     );
                                 }
                             }
+                        } else {
+                            no_bids += 1;
                         }
                     }
 
                     tracing::info!(
-                        markets_checked = total_checked,
+                        total_markets,
+                        neg_risk = neg_risk_count,
+                        binary_checked = total_checked,
                         with_orderbook = has_book,
+                        missing_asks = no_asks,
+                        missing_bids = no_bids,
                         "━━━ Market Spread Observer ━━━"
                     );
                     tracing::info!(
                         any_spread = bm_any_spread,
-                        pass_spread_filter = bm_above_min_bps,
-                        pass_profit_filter = bm_above_min_profit,
+                        pass_bps = bm_above_min_bps,
+                        pass_profit = bm_above_min_profit,
                         best_spread_bps = %format!("{:.0}", bm_best_spread * dec!(10000)),
-                        best_profit_usd = %format!("{:.4}", bm_best_profit),
-                        "[BuyAndMerge] spread distribution"
+                        tightest_gap_bps = %format!("{:.0}", bm_tightest_gap * dec!(10000)),
+                        "[BuyAndMerge]"
                     );
                     if !bm_best_question.is_empty() {
-                        tracing::info!(market = %bm_best_question, "[BuyAndMerge] best opportunity");
+                        tracing::info!(market = %bm_best_question, "[BuyAndMerge] best");
+                    }
+                    if !bm_tightest_info.is_empty() {
+                        tracing::info!(market = %bm_tightest_info, "[BuyAndMerge] tightest");
                     }
                     tracing::info!(
                         any_spread = ss_any_spread,
-                        pass_spread_filter = ss_above_min_bps,
-                        pass_profit_filter = ss_above_min_profit,
+                        pass_bps = ss_above_min_bps,
+                        pass_profit = ss_above_min_profit,
                         best_spread_bps = %format!("{:.0}", ss_best_spread * dec!(10000)),
-                        best_profit_usd = %format!("{:.4}", ss_best_profit),
-                        "[SplitAndSell] spread distribution"
+                        tightest_gap_bps = %format!("{:.0}", ss_tightest_gap * dec!(10000)),
+                        "[SplitAndSell]"
                     );
                     if !ss_best_question.is_empty() {
-                        tracing::info!(market = %ss_best_question, "[SplitAndSell] best opportunity");
+                        tracing::info!(market = %ss_best_question, "[SplitAndSell] best");
+                    }
+                    if !ss_tightest_info.is_empty() {
+                        tracing::info!(market = %ss_tightest_info, "[SplitAndSell] tightest");
+                    }
+                    // Log sample prices for data validation
+                    for (i, sample) in sample_prices.iter().enumerate() {
+                        tracing::info!(idx = i, sample = %sample, "[Sample]");
                     }
                 }
             }
