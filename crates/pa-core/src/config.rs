@@ -34,6 +34,11 @@ pub struct ChainConfig {
 pub struct ClobConfig {
     pub host: String,
     pub ws_host: String,
+    /// Signature type for CLOB authentication and balance queries.
+    /// 0 = EOA (default), 1 = Proxy (email/magic wallet), 2 = GnosisSafe (browser wallet proxy).
+    /// Use 2 if you deposited funds through the Polymarket website.
+    #[serde(default)]
+    pub signature_type: u8,
 }
 
 #[derive(Debug, Deserialize, Clone)]

@@ -4,7 +4,7 @@ use rust_decimal::Decimal;
 
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::Normal;
-use polymarket_client_sdk::clob::types::{OrderType, Side};
+use polymarket_client_sdk::clob::types::{OrderType, Side, SignatureType};
 use polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest;
 use polymarket_client_sdk::clob::types::response::PostOrderResponse;
 
@@ -31,16 +31,30 @@ impl ClobExecutor {
     /// # Arguments
     /// * `host` - CLOB API host (e.g. "https://clob.polymarket.com")
     /// * `signer` - Local wallet signer with chain_id set (137 for Polygon)
-    pub async fn connect(host: &str, signer: PrivateKeySigner) -> anyhow::Result<Self> {
+    /// * `signature_type` - 0=EOA, 1=Proxy, 2=GnosisSafe
+    pub async fn connect(host: &str, signer: PrivateKeySigner, signature_type: u8) -> anyhow::Result<Self> {
         let unauth_client = polymarket_client_sdk::clob::Client::new(
             host,
             polymarket_client_sdk::clob::Config::default(),
         )?;
 
+        let sig_type = match signature_type {
+            1 => SignatureType::Proxy,
+            2 => SignatureType::GnosisSafe,
+            _ => SignatureType::Eoa,
+        };
+
         let client = unauth_client
             .authentication_builder(&signer)
+            .signature_type(sig_type)
             .authenticate()
             .await?;
+
+        tracing::info!(
+            signature_type = signature_type,
+            sig_type = ?sig_type,
+            "CLOB authenticated with signature type"
+        );
 
         Ok(Self { client, signer })
     }
@@ -207,6 +221,11 @@ impl ClobExecutor {
     pub async fn get_balance(&self) -> anyhow::Result<Decimal> {
         let request = BalanceAllowanceRequest::default(); // AssetType::Collateral
         let response = self.client.balance_allowance(request).await?;
+        tracing::debug!(
+            balance = %response.balance,
+            allowances = ?response.allowances,
+            "CLOB balance_allowance response"
+        );
         Ok(response.balance)
     }
 

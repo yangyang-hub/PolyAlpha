@@ -399,7 +399,7 @@ async fn main() -> Result<()> {
 
     // --- Initialize execution layer ---
     tracing::info!("Authenticating with CLOB API...");
-    let clob = match ClobExecutor::connect(&settings.clob.host, signer).await {
+    let clob = match ClobExecutor::connect(&settings.clob.host, signer, settings.clob.signature_type).await {
         Ok(c) => {
             tracing::info!("CLOB authenticated");
             Some(c)

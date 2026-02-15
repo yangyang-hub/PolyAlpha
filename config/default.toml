@@ -8,6 +8,9 @@ rpc_fallbacks = [
 [clob]
 host = "https://clob.polymarket.com"
 ws_host = "wss://ws-subscriptions-clob.polymarket.com"
+# Signature type: 0=EOA, 1=Proxy(email wallet), 2=GnosisSafe(browser wallet proxy)
+# Use 2 if you deposited funds through the Polymarket website
+signature_type = 2
 
 [gamma]
 host = "https://gamma-api.polymarket.com"
