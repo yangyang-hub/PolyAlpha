@@ -559,6 +559,13 @@ impl<P: Provider + Clone + Send + Sync> Executor for HybridOrchestrator<P> {
             .await
             .map_err(|e| pa_core::Error::Execution(e.to_string()))
     }
+
+    async fn get_balance(&self) -> Result<rust_decimal::Decimal> {
+        self.clob
+            .get_balance()
+            .await
+            .map_err(|e| pa_core::Error::Execution(e.to_string()))
+    }
 }
 
 /// Convert a Decimal amount to U256 with 6 decimal places (USDC).

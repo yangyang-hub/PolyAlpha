@@ -43,6 +43,14 @@ pub trait Executor: Send + Sync {
 
     /// Cancel all outstanding orders.
     async fn cancel_all(&self) -> Result<()>;
+
+    /// Query the available USDC collateral balance from the exchange.
+    ///
+    /// Returns the balance held in the Polymarket proxy wallet (not the EOA).
+    /// Default implementation returns zero (e.g. for dry-run or backtest).
+    async fn get_balance(&self) -> Result<rust_decimal::Decimal> {
+        Ok(rust_decimal::Decimal::ZERO)
+    }
 }
 
 /// Risk manager performing pre-trade checks and position tracking.

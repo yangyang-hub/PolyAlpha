@@ -5,6 +5,7 @@ use rust_decimal::Decimal;
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::Normal;
 use polymarket_client_sdk::clob::types::{OrderType, Side};
+use polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest;
 use polymarket_client_sdk::clob::types::response::PostOrderResponse;
 
 /// CLOB order executor using the Polymarket SDK.
@@ -197,6 +198,16 @@ impl ClobExecutor {
             "Cancel all orders complete"
         );
         Ok(())
+    }
+
+    /// Query available USDC collateral balance from the CLOB API.
+    ///
+    /// This returns the balance held in the Polymarket proxy wallet,
+    /// not the EOA wallet balance.
+    pub async fn get_balance(&self) -> anyhow::Result<Decimal> {
+        let request = BalanceAllowanceRequest::default(); // AssetType::Collateral
+        let response = self.client.balance_allowance(request).await?;
+        Ok(response.balance)
     }
 
     /// Parse the SDK's PostOrderResponse into our OrderResult.

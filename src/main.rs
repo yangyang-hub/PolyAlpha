@@ -418,27 +418,35 @@ async fn main() -> Result<()> {
         .connect(&settings.chain.rpc_url)
         .await
         .context("Failed to connect to RPC")?;
-    let balance_provider = provider.clone();
     let ctf = CtfExecutor::with_neg_risk(provider, settings.chain.chain_id)
         .context("Failed to create CTF executor")?;
     tracing::info!("CTF executor initialized");
 
-    // --- Query USDC balance ---
+    // Build executor: real orchestrator if CLOB available, dry-run otherwise
+    let trading_enabled = clob.is_some();
+    let executor: Arc<dyn pa_core::traits::Executor> = if let Some(clob) = clob {
+        Arc::new(HybridOrchestrator::new(clob, ctf))
+    } else {
+        Arc::new(DryRunExecutor)
+    };
+
+    // --- Query USDC balance from CLOB API (proxy wallet balance) ---
     let usdc_balance: Arc<std::sync::RwLock<Decimal>> =
         Arc::new(std::sync::RwLock::new(Decimal::ZERO));
 
-    match query_usdc_balance(&balance_provider, wallet_address).await {
+    match executor.get_balance().await {
         Ok(bal) => {
             *usdc_balance.write().unwrap() = bal;
-            tracing::info!(balance_usdc = %bal, "Wallet USDC balance loaded");
+            tracing::info!(balance_usdc = %bal, "CLOB collateral balance loaded");
         }
         Err(e) => {
-            tracing::warn!(error = %e, "Failed to query USDC balance — position sizing may be limited");
+            tracing::warn!(error = %e, "Failed to query CLOB balance — position sizing may be limited");
         }
     }
 
-    // Periodic balance refresh (every 30s)
+    // Periodic balance refresh (every 30s) via CLOB API
     let bal_state = Arc::clone(&usdc_balance);
+    let bal_executor = Arc::clone(&executor);
     let bal_cancel = cancel.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
@@ -446,7 +454,7 @@ async fn main() -> Result<()> {
             tokio::select! {
                 _ = bal_cancel.cancelled() => break,
                 _ = interval.tick() => {
-                    match query_usdc_balance(&balance_provider, wallet_address).await {
+                    match bal_executor.get_balance().await {
                         Ok(bal) => {
                             let prev = *bal_state.read().unwrap();
                             if bal != prev {
@@ -463,14 +471,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Build executor: real orchestrator if CLOB available, dry-run otherwise
-    let trading_enabled = clob.is_some();
-    let executor: Arc<dyn pa_core::traits::Executor> = if let Some(clob) = clob {
-        Arc::new(HybridOrchestrator::new(clob, ctf))
-    } else {
-        Arc::new(DryRunExecutor)
-    };
-
     // --- Initialize risk manager ---
     let risk_manager_impl = Arc::new(RiskManagerImpl::new(settings.risk.clone()));
     let risk_manager: Arc<dyn pa_core::traits::RiskManager> =
@@ -479,7 +479,6 @@ async fn main() -> Result<()> {
 
     // --- Initialize strategy engine ---
     let cache = market_data.cache().clone();
-    let cache2 = market_data.cache().clone();
 
     // Shared available capital closure: balance - total_exposure
     // Cloned for each strategy that needs it.
@@ -493,43 +492,55 @@ async fn main() -> Result<()> {
         })
     };
 
-    let yes_no_strategy = YesNoArbitrage::new(
-        settings.strategy.min_spread_bps,
-        settings.strategy.max_trade_size_usdc,
-        settings.strategy.min_profit_usdc,
-        dec!(0.01), // gas cost estimate in USD
-        Box::new(move |token_id| cache.get(&token_id)),
-        make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
-    );
+    let mut strategies: Vec<Box<dyn pa_core::traits::Strategy>> = Vec::new();
 
-    let mut strategies: Vec<Box<dyn pa_core::traits::Strategy>> =
-        vec![Box::new(yes_no_strategy)];
+    // Add YesNo arbitrage strategy if enabled
+    if settings.strategy.enabled.contains(&"yes_no".to_string()) {
+        let yes_no_strategy = YesNoArbitrage::new(
+            settings.strategy.min_spread_bps,
+            settings.strategy.max_trade_size_usdc,
+            settings.strategy.min_profit_usdc,
+            dec!(0.01), // gas cost estimate in USD
+            Box::new({
+                let c = cache.clone();
+                move |token_id| c.get(&token_id)
+            }),
+            make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
+        );
+        strategies.push(Box::new(yes_no_strategy));
+        tracing::info!("YesNo arbitrage strategy enabled");
+    }
 
-    // Add NegRisk strategy if events were found
-    if !neg_risk_events.is_empty() {
+    // Add NegRisk strategy if enabled and events were found
+    if settings.strategy.enabled.contains(&"neg_risk".to_string()) && !neg_risk_events.is_empty() {
         let neg_risk_strategy = NegRiskArbitrage::new(
             settings.strategy.min_spread_bps,
             settings.strategy.max_trade_size_usdc,
             settings.strategy.min_profit_usdc,
             dec!(0.01), // gas cost estimate in USD
             neg_risk_events.clone(),
-            Box::new(move |token_id| cache2.get(&token_id)),
+            Box::new({
+                let c = cache.clone();
+                move |token_id| c.get(&token_id)
+            }),
             make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
         );
         strategies.push(Box::new(neg_risk_strategy));
         tracing::info!("NegRisk arbitrage strategy enabled");
     }
 
-    // Add cross-market strategy if pairs were found
-    if !cross_market_pairs.is_empty() {
-        let cache3 = market_data.cache().clone();
+    // Add cross-market strategy if enabled and pairs were found
+    if settings.strategy.enabled.contains(&"cross_market".to_string()) && !cross_market_pairs.is_empty() {
         let cross_market_strategy = CrossMarketArbitrage::new(
             settings.strategy.min_spread_bps,
             settings.strategy.max_trade_size_usdc,
             settings.strategy.min_profit_usdc,
             dec!(0.02), // 2x gas for two on-chain txs
             cross_market_pairs,
-            Box::new(move |token_id| cache3.get(&token_id)),
+            Box::new({
+                let c = cache.clone();
+                move |token_id| c.get(&token_id)
+            }),
             make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
         );
         strategies.push(Box::new(cross_market_strategy));
@@ -577,6 +588,7 @@ async fn main() -> Result<()> {
             Box::new(move |token_id| crypto_cache.get(&token_id)),
             make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
             Box::new(move |tid: alloy::primitives::U256| rm_pos_crypto.get_position_size(&tid)),
+            neg_risk_events.clone(),
         );
         strategies.push(Box::new(crypto));
         tracing::info!("Crypto alpha strategy enabled");
@@ -703,28 +715,4 @@ impl pa_core::traits::Executor for DryRunExecutor {
     async fn cancel_all(&self) -> pa_core::Result<()> {
         Ok(())
     }
-}
-
-/// Query USDC balance for a wallet address on Polygon.
-///
-/// Uses alloy's sol! macro to call `balanceOf(address)` on the USDC contract.
-/// USDC on Polygon has 6 decimals, so the returned value is scaled accordingly.
-async fn query_usdc_balance(
-    provider: &impl alloy::providers::Provider,
-    wallet: alloy::primitives::Address,
-) -> anyhow::Result<Decimal> {
-    alloy::sol! {
-        #[sol(rpc)]
-        contract IERC20 {
-            function balanceOf(address account) external view returns (uint256);
-        }
-    }
-
-    let usdc = pa_execution::ctf_executor::USDC_ADDRESS;
-    let contract = IERC20::new(usdc, provider);
-    let result = contract.balanceOf(wallet).call().await?;
-
-    // USDC has 6 decimals — use try_into to avoid panic on absurd values
-    let balance_u64: u64 = result.try_into().unwrap_or(u64::MAX);
-    Ok(Decimal::from(balance_u64) / Decimal::from(1_000_000u64))
 }

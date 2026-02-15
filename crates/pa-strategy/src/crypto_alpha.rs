@@ -11,7 +11,8 @@ use uuid::Uuid;
 use pa_core::config::CryptoAlphaConfig;
 use pa_core::traits::Strategy;
 use pa_core::types::{
-    ArbitrageOpportunity, ExecutionPlan, MarketInfo, OrderBook, StrategyType, TradeSide,
+    ArbitrageOpportunity, ExecutionPlan, MarketInfo, NegRiskEvent, OrderBook, StrategyType,
+    TradeSide,
 };
 
 use crate::profitability::ProfitCalculator;
@@ -224,6 +225,133 @@ pub fn parse_crypto_question(question: &str) -> Option<CryptoQuestion> {
         direction,
         target_date,
     })
+}
+
+// ──── NegRisk Event Title Parser ────
+
+/// Check if a NegRisk event title is crypto-related and extract the asset + optional date.
+///
+/// Example titles:
+///   "Bitcoin price at 12pm ET on March 1"
+///   "What will ETH be on February 28?"
+pub fn parse_crypto_event_title(title: &str) -> Option<(&'static CryptoAsset, Option<NaiveDate>)> {
+    let asset = find_asset(title)?;
+    let lower = title.to_lowercase();
+    let has_price_indicator = lower.contains("price")
+        || lower.contains('$')
+        || lower.contains("value")
+        || contains_word(&lower, "worth")
+        || contains_word(&lower, "trade")
+        || contains_word(&lower, "be");
+    if !has_price_indicator {
+        return None;
+    }
+    let target_date = parse_target_date(title);
+    Some((asset, target_date))
+}
+
+// ──── NegRisk Outcome Range Parser ────
+
+/// A price range parsed from a NegRisk crypto outcome market question.
+#[derive(Debug, Clone)]
+pub enum CryptoPriceRange {
+    /// "$89,999 or below"
+    AtOrBelow(f64),
+    /// "$90,000 - $94,999"
+    Range(f64, f64),
+    /// "$100,000 or above"
+    AtOrAbove(f64),
+}
+
+/// Extract all dollar prices from text.
+fn extract_all_prices(text: &str) -> Vec<f64> {
+    let lower = text.to_lowercase();
+    let mut prices = Vec::new();
+
+    // Find prices with $ prefix
+    for (i, _) in lower.match_indices('$') {
+        let rest = &lower[i + 1..];
+        if let Some(price) = parse_price_token(rest) {
+            prices.push(price);
+        }
+    }
+
+    // If no $ prices found, try suffixed numbers (100k, 1.5m)
+    if prices.is_empty() {
+        for word in lower.split_whitespace() {
+            let word =
+                word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != ',');
+            if let Some(price) = parse_suffixed_number(word) {
+                if (1900.0..=2099.0).contains(&price) && price == price.floor() {
+                    continue;
+                }
+                prices.push(price);
+            }
+        }
+    }
+
+    prices
+}
+
+/// Parse a NegRisk crypto outcome market question into a price range.
+///
+/// Supports formats:
+/// - `"$89,999 or below"` / `"Under $90,000"` → AtOrBelow
+/// - `"$100,000 or above"` / `"$100,000+"` → AtOrAbove
+/// - `"$90,000 - $94,999"` → Range
+pub fn parse_crypto_outcome_range(question: &str) -> Option<CryptoPriceRange> {
+    let lower = question.to_lowercase();
+    let prices = extract_all_prices(question);
+
+    if lower.contains("or below")
+        || lower.contains("or less")
+        || lower.contains("or lower")
+        || lower.contains("under ")
+    {
+        let price = prices.first()?;
+        Some(CryptoPriceRange::AtOrBelow(*price))
+    } else if lower.contains("or above")
+        || lower.contains("or more")
+        || lower.contains("or higher")
+        || lower.contains('+')
+    {
+        let price = prices.first()?;
+        Some(CryptoPriceRange::AtOrAbove(*price))
+    } else if prices.len() >= 2 {
+        Some(CryptoPriceRange::Range(prices[0], prices[1]))
+    } else {
+        None
+    }
+}
+
+// ──── GBM Range Probability ────
+
+/// Calculate the probability of price falling within a range under GBM.
+///
+/// Uses `gbm_probability()` (P(S_T > K)) to compute interval probabilities:
+/// - AtOrBelow(bound): P(S_T <= bound) = 1 - P(S_T > bound)
+/// - Range(lo, hi): P(lo < S_T <= hi) = P(S_T > lo) - P(S_T > hi)
+/// - AtOrAbove(bound): P(S_T > bound)
+pub fn gbm_range_probability(
+    current_price: f64,
+    range: &CryptoPriceRange,
+    mu: f64,
+    sigma: f64,
+    days: f64,
+) -> f64 {
+    match range {
+        CryptoPriceRange::AtOrBelow(bound) => {
+            1.0 - gbm_probability(current_price, *bound, mu, sigma, days)
+        }
+        CryptoPriceRange::Range(lo, hi) => {
+            let p_above_lo = gbm_probability(current_price, *lo, mu, sigma, days);
+            let p_above_hi = gbm_probability(current_price, *hi, mu, sigma, days);
+            (p_above_lo - p_above_hi).max(0.0)
+        }
+        CryptoPriceRange::AtOrAbove(bound) => {
+            gbm_probability(current_price, *bound, mu, sigma, days)
+        }
+    }
 }
 
 // ──── Price Client ────
@@ -489,6 +617,7 @@ pub struct CryptoAlphaStrategy {
     get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
     get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
     price_cache: Arc<Mutex<HashMap<String, CachedPrice>>>,
+    neg_risk_events: Vec<NegRiskEvent>,
 }
 
 impl CryptoAlphaStrategy {
@@ -498,6 +627,7 @@ impl CryptoAlphaStrategy {
         get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
         get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
         get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
+        neg_risk_events: Vec<NegRiskEvent>,
     ) -> Self {
         let coingecko_key = if config.coingecko_api_key.is_empty() {
             None
@@ -512,6 +642,7 @@ impl CryptoAlphaStrategy {
             get_available_capital,
             get_position,
             price_cache: Arc::new(Mutex::new(HashMap::new())),
+            neg_risk_events,
         }
     }
 
@@ -698,6 +829,162 @@ impl CryptoAlphaStrategy {
             },
         })
     }
+
+    /// Detect the best undervalued outcome in a NegRisk crypto price event.
+    ///
+    /// Checks both YES and NO sides for each outcome market, picks the best edge.
+    async fn detect_crypto_neg_risk(
+        &self,
+        event: &NegRiskEvent,
+        asset: &'static CryptoAsset,
+        days: f64,
+    ) -> Option<ArbitrageOpportunity> {
+        // Fetch price data
+        let price_data = match self.get_price_data(asset).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::debug!(
+                    asset = asset.name,
+                    error = %e,
+                    "Failed to fetch crypto price data for NegRisk"
+                );
+                return None;
+            }
+        };
+
+        let (mu, sigma) = calculate_volatility(&price_data.daily_closes)?;
+
+        // Evaluate each outcome market
+        let mut best_edge = Decimal::ZERO;
+        let mut best_candidate: Option<(
+            &MarketInfo,
+            U256,    // token_id
+            Decimal, // ask_price
+            Decimal, // effective_prob
+            Decimal, // edge
+        )> = None;
+
+        for market in &event.markets {
+            if !market.active || market.tokens.len() < 2 {
+                continue;
+            }
+
+            let range = match parse_crypto_outcome_range(&market.question) {
+                Some(r) => r,
+                None => continue,
+            };
+
+            let model_prob_f64 =
+                gbm_range_probability(price_data.current_price, &range, mu, sigma, days);
+            let model_prob = Decimal::from_f64_retain(model_prob_f64)?;
+
+            let yes_token = &market.tokens[0];
+            let no_token = &market.tokens[1];
+
+            // YES side check
+            if let Some(yes_book) = (self.get_orderbook)(yes_token.token_id)
+                && let Some(yes_ask_level) = yes_book.best_ask()
+            {
+                let yes_ask = yes_ask_level.price;
+                if model_prob > yes_ask {
+                    let edge = model_prob - yes_ask;
+                    if edge > best_edge {
+                        best_edge = edge;
+                        best_candidate =
+                            Some((market, yes_token.token_id, yes_ask, model_prob, edge));
+                    }
+                }
+            }
+
+            // NO side check
+            let no_model_prob = Decimal::ONE - model_prob;
+            if let Some(no_book) = (self.get_orderbook)(no_token.token_id)
+                && let Some(no_ask_level) = no_book.best_ask()
+            {
+                let no_ask = no_ask_level.price;
+                if no_model_prob > no_ask {
+                    let edge = no_model_prob - no_ask;
+                    if edge > best_edge {
+                        best_edge = edge;
+                        best_candidate =
+                            Some((market, no_token.token_id, no_ask, no_model_prob, edge));
+                    }
+                }
+            }
+        }
+
+        let (market, token_id, ask_price, effective_prob, edge) = best_candidate?;
+
+        // Check minimum edge threshold
+        let edge_bps = {
+            use rust_decimal::prelude::ToPrimitive;
+            (edge * dec!(10000)).to_u32().unwrap_or(0)
+        };
+        if edge_bps < self.config.min_edge_bps {
+            return None;
+        }
+
+        // Kelly sizing
+        let kelly_raw = if ask_price > Decimal::ZERO && ask_price < dec!(0.99) {
+            (edge / (Decimal::ONE - ask_price)).min(Decimal::TWO)
+        } else {
+            Decimal::ZERO
+        };
+        let kelly_size = kelly_raw * self.config.kelly_fraction * self.config.max_position_usdc;
+        let available = (self.get_available_capital)();
+
+        // Position-aware sizing
+        let existing = (self.get_position)(token_id);
+        let remaining = (self.config.max_position_usdc - existing).max(Decimal::ZERO);
+        let size = kelly_size.min(remaining).min(available);
+
+        if size <= Decimal::ZERO {
+            return None;
+        }
+
+        // Profitability check
+        let est = self.profit_calc.directional_buy_profit(
+            ask_price,
+            effective_prob,
+            size,
+            event.fee_rate_bps,
+        );
+
+        if est.net_profit <= Decimal::ZERO {
+            return None;
+        }
+
+        tracing::info!(
+            event_title = %event.title,
+            outcome = %market.question,
+            asset = asset.name,
+            current_price = price_data.current_price,
+            model_prob = %effective_prob,
+            ask = %ask_price,
+            edge_bps = edge_bps,
+            size = %size,
+            est_profit = %est.net_profit,
+            "NegRisk crypto alpha opportunity detected"
+        );
+
+        Some(ArbitrageOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: market.condition_id,
+            question: format!("{} → {}", event.title, market.question),
+            spread: edge,
+            estimated_profit: est.net_profit,
+            size,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id,
+                side: TradeSide::Buy,
+                price: ask_price,
+                size,
+                condition_id: market.condition_id,
+            },
+        })
+    }
 }
 
 #[async_trait]
@@ -716,6 +1003,7 @@ impl Strategy for CryptoAlphaStrategy {
     ) -> pa_core::Result<Vec<ArbitrageOpportunity>> {
         let mut opportunities = Vec::new();
 
+        // 1. Binary markets (existing)
         for market in markets {
             if !market.active || market.neg_risk {
                 continue;
@@ -723,6 +1011,22 @@ impl Strategy for CryptoAlphaStrategy {
 
             if let Some(opp) = self.detect_crypto_opportunity(market).await {
                 opportunities.push(opp);
+            }
+        }
+
+        // 2. NegRisk events
+        for event in &self.neg_risk_events {
+            if let Some((asset, target_date)) = parse_crypto_event_title(&event.title) {
+                let now_date = Utc::now().date_naive();
+                let days = target_date
+                    .map(|d| (d - now_date).num_days())
+                    .unwrap_or(0);
+                if days <= 0 {
+                    continue;
+                }
+                if let Some(opp) = self.detect_crypto_neg_risk(event, asset, days as f64).await {
+                    opportunities.push(opp);
+                }
             }
         }
 
@@ -860,5 +1164,166 @@ mod tests {
                 asset.name
             );
         }
+    }
+
+    // ──── NegRisk Event Title Parser Tests ────
+
+    #[test]
+    fn test_parse_crypto_event_title_bitcoin() {
+        use chrono::Datelike;
+        let (asset, date) =
+            parse_crypto_event_title("Bitcoin price at 12pm ET on March 1").unwrap();
+        assert_eq!(asset.name, "Bitcoin");
+        let d = date.unwrap();
+        assert_eq!(d.month(), 3);
+        assert_eq!(d.day(), 1);
+    }
+
+    #[test]
+    fn test_parse_crypto_event_title_eth() {
+        let (asset, _date) =
+            parse_crypto_event_title("What will ETH be on February 28?").unwrap();
+        assert_eq!(asset.name, "Ethereum");
+    }
+
+    #[test]
+    fn test_parse_crypto_event_title_non_crypto() {
+        assert!(parse_crypto_event_title("US GDP Q1 2026").is_none());
+    }
+
+    // ──── NegRisk Outcome Range Parser Tests ────
+
+    #[test]
+    fn test_parse_crypto_outcome_range_above() {
+        let range = parse_crypto_outcome_range("$100,000 or above").unwrap();
+        match range {
+            CryptoPriceRange::AtOrAbove(p) => {
+                assert!((p - 100_000.0).abs() < 0.01, "got {}", p);
+            }
+            other => panic!("Expected AtOrAbove, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_crypto_outcome_range_below() {
+        let range = parse_crypto_outcome_range("$89,999 or below").unwrap();
+        match range {
+            CryptoPriceRange::AtOrBelow(p) => {
+                assert!((p - 89_999.0).abs() < 0.01, "got {}", p);
+            }
+            other => panic!("Expected AtOrBelow, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_crypto_outcome_range_interval() {
+        let range = parse_crypto_outcome_range("$90,000 - $94,999").unwrap();
+        match range {
+            CryptoPriceRange::Range(lo, hi) => {
+                assert!((lo - 90_000.0).abs() < 0.01, "lo={}", lo);
+                assert!((hi - 94_999.0).abs() < 0.01, "hi={}", hi);
+            }
+            other => panic!("Expected Range, got {:?}", other),
+        }
+    }
+
+    // ──── GBM Range Probability Tests ────
+
+    #[test]
+    fn test_gbm_range_probability_monotonicity() {
+        // Higher range should have lower probability when price is at 95k
+        let p1 = gbm_range_probability(
+            95_000.0,
+            &CryptoPriceRange::Range(90_000.0, 95_000.0),
+            0.0,
+            0.5,
+            30.0,
+        );
+        let p2 = gbm_range_probability(
+            95_000.0,
+            &CryptoPriceRange::Range(95_000.0, 100_000.0),
+            0.0,
+            0.5,
+            30.0,
+        );
+        let p3 = gbm_range_probability(
+            95_000.0,
+            &CryptoPriceRange::Range(150_000.0, 200_000.0),
+            0.0,
+            0.5,
+            30.0,
+        );
+        // Range containing current price should have highest probability
+        assert!(
+            p1 > p3,
+            "Near-price range should have higher prob than far range: {} > {}",
+            p1,
+            p3
+        );
+        assert!(
+            p2 > p3,
+            "Adjacent range should have higher prob than far range: {} > {}",
+            p2,
+            p3
+        );
+    }
+
+    #[test]
+    fn test_gbm_range_probability_partition() {
+        // AtOrBelow + ranges + AtOrAbove should sum to ~1.0
+        let price = 95_000.0;
+        let mu = 0.0;
+        let sigma = 0.5;
+        let days = 30.0;
+
+        let p_below = gbm_range_probability(
+            price,
+            &CryptoPriceRange::AtOrBelow(85_000.0),
+            mu,
+            sigma,
+            days,
+        );
+        let p1 = gbm_range_probability(
+            price,
+            &CryptoPriceRange::Range(85_000.0, 90_000.0),
+            mu,
+            sigma,
+            days,
+        );
+        let p2 = gbm_range_probability(
+            price,
+            &CryptoPriceRange::Range(90_000.0, 95_000.0),
+            mu,
+            sigma,
+            days,
+        );
+        let p3 = gbm_range_probability(
+            price,
+            &CryptoPriceRange::Range(95_000.0, 100_000.0),
+            mu,
+            sigma,
+            days,
+        );
+        let p4 = gbm_range_probability(
+            price,
+            &CryptoPriceRange::Range(100_000.0, 105_000.0),
+            mu,
+            sigma,
+            days,
+        );
+        let p_above = gbm_range_probability(
+            price,
+            &CryptoPriceRange::AtOrAbove(105_000.0),
+            mu,
+            sigma,
+            days,
+        );
+
+        let total = p_below + p1 + p2 + p3 + p4 + p_above;
+        assert!(
+            (total - 1.0).abs() < 0.01,
+            "Partition should sum to ~1.0, got {}",
+            total
+        );
     }
 }
