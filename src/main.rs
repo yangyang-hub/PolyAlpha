@@ -123,6 +123,14 @@ async fn main() -> Result<()> {
         "NegRisk events discovered"
     );
 
+    // Group binary events by event title (for grouped binary market strategies)
+    let binary_event_groups = GammaFeed::group_binary_events(&markets);
+    tracing::info!(
+        binary_event_groups = binary_event_groups.len(),
+        grouped_markets = binary_event_groups.iter().map(|g| g.markets.len()).sum::<usize>(),
+        "Binary event groups discovered"
+    );
+
     // Detect cross-market pairs
     let cross_market_pairs = detect_cross_market_pairs(&markets);
 
@@ -589,6 +597,7 @@ async fn main() -> Result<()> {
             make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
             Box::new(move |tid: alloy::primitives::U256| rm_pos_crypto.get_position_size(&tid)),
             neg_risk_events.clone(),
+            binary_event_groups.clone(),
         );
         strategies.push(Box::new(crypto));
         tracing::info!("Crypto alpha strategy enabled");

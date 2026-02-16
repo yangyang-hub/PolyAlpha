@@ -69,6 +69,21 @@ pub struct NegRiskEvent {
     pub fee_rate_bps: u32,
 }
 
+/// A group of related binary markets sharing the same event (non-NegRisk).
+///
+/// Unlike `NegRiskEvent`, these markets are independent — not mutually exclusive.
+/// Example event: "What price will Bitcoin hit in 2026?" groups:
+///   - "Will Bitcoin reach $200,000 by December 31, 2026?"
+///   - "Will Bitcoin reach $150,000 by December 31, 2026?"
+///   - "Will Bitcoin dip to $85,000 by December 31, 2026?"
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BinaryEventGroup {
+    /// The shared event title.
+    pub title: String,
+    /// All binary markets within this event group.
+    pub markets: Vec<MarketInfo>,
+}
+
 /// A pair of correlated binary markets suitable for cross-market arbitrage.
 ///
 /// Example: "Will X happen by June?" and "Will X happen by December?"

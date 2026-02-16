@@ -11,8 +11,8 @@ use uuid::Uuid;
 use pa_core::config::CryptoAlphaConfig;
 use pa_core::traits::Strategy;
 use pa_core::types::{
-    ArbitrageOpportunity, ExecutionPlan, MarketInfo, NegRiskEvent, OrderBook, StrategyType,
-    TradeSide,
+    ArbitrageOpportunity, BinaryEventGroup, ExecutionPlan, MarketInfo, NegRiskEvent, OrderBook,
+    StrategyType, TradeSide,
 };
 
 use crate::profitability::ProfitCalculator;
@@ -618,6 +618,7 @@ pub struct CryptoAlphaStrategy {
     get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
     price_cache: Arc<Mutex<HashMap<String, CachedPrice>>>,
     neg_risk_events: Vec<NegRiskEvent>,
+    binary_event_groups: Vec<BinaryEventGroup>,
     /// Scan counter for periodic diagnostics (every ~600 scans ≈ 1 min at 100ms interval).
     scan_count: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -630,6 +631,7 @@ impl CryptoAlphaStrategy {
         get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
         get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
         neg_risk_events: Vec<NegRiskEvent>,
+        binary_event_groups: Vec<BinaryEventGroup>,
     ) -> Self {
         let coingecko_key = if config.coingecko_api_key.is_empty() {
             None
@@ -645,6 +647,7 @@ impl CryptoAlphaStrategy {
             get_position,
             price_cache: Arc::new(Mutex::new(HashMap::new())),
             neg_risk_events,
+            binary_event_groups,
             scan_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
@@ -988,6 +991,210 @@ impl CryptoAlphaStrategy {
             },
         })
     }
+
+    /// Detect the best crypto alpha opportunity within a binary event group.
+    ///
+    /// A binary event group is a set of independent binary markets sharing
+    /// the same event title (e.g. "What price will Bitcoin hit in 2026?").
+    /// Fetches price data once for the shared asset, then evaluates all
+    /// markets to find the best edge.
+    async fn detect_crypto_group(
+        &self,
+        group: &BinaryEventGroup,
+    ) -> Option<ArbitrageOpportunity> {
+        // Try to identify crypto asset from the group title first, then from individual markets
+        let asset = find_asset(&group.title).or_else(|| {
+            group.markets.iter().find_map(|m| {
+                parse_crypto_question(&m.question).map(|q| q.asset)
+            })
+        })?;
+
+        // Fetch price data once for the entire group
+        let price_data = match self.get_price_data(asset).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::debug!(
+                    asset = asset.name,
+                    group_title = %group.title,
+                    error = %e,
+                    "Failed to fetch crypto price data for binary group"
+                );
+                return None;
+            }
+        };
+
+        let (mu, sigma) = calculate_volatility(&price_data.daily_closes)?;
+
+        // Evaluate each market in the group, track the best edge
+        let mut best_edge = Decimal::ZERO;
+        let mut best_candidate: Option<(
+            &MarketInfo,
+            U256,    // token_id
+            Decimal, // ask_price
+            Decimal, // effective_prob (for sizing)
+            Decimal, // edge
+            u32,     // edge_bps
+        )> = None;
+
+        for market in &group.markets {
+            if !market.active || market.tokens.len() != 2 {
+                continue;
+            }
+
+            let question = match parse_crypto_question(&market.question) {
+                Some(q) => q,
+                None => continue,
+            };
+
+            // Require a target date
+            let target_date = match question.target_date {
+                Some(d) => d,
+                None => continue,
+            };
+            let now_date = Utc::now().date_naive();
+            let days = (target_date - now_date).num_days();
+            if days <= 0 {
+                continue;
+            }
+
+            // GBM probability
+            let prob_above = gbm_probability(
+                price_data.current_price,
+                question.threshold,
+                mu,
+                sigma,
+                days as f64,
+            );
+            let model_prob_f64 = match question.direction {
+                PriceDirection::Above => prob_above,
+                PriceDirection::Below => 1.0 - prob_above,
+            };
+            let model_prob = Decimal::from_f64_retain(model_prob_f64)?;
+            let model_prob_no = Decimal::ONE - model_prob;
+
+            let yes_token = &market.tokens[0];
+            let no_token = &market.tokens[1];
+
+            // Check YES side
+            if let Some(yes_book) = (self.get_orderbook)(yes_token.token_id)
+                && let Some(yes_ask_level) = yes_book.best_ask()
+            {
+                let yes_ask = yes_ask_level.price;
+                if model_prob > yes_ask {
+                    let edge = model_prob - yes_ask;
+                    if edge > best_edge {
+                        let edge_bps = {
+                            use rust_decimal::prelude::ToPrimitive;
+                            (edge * dec!(10000)).to_u32().unwrap_or(0)
+                        };
+                        best_edge = edge;
+                        best_candidate = Some((
+                            market,
+                            yes_token.token_id,
+                            yes_ask,
+                            model_prob,
+                            edge,
+                            edge_bps,
+                        ));
+                    }
+                }
+            }
+
+            // Check NO side
+            if let Some(no_book) = (self.get_orderbook)(no_token.token_id)
+                && let Some(no_ask_level) = no_book.best_ask()
+            {
+                let no_ask = no_ask_level.price;
+                if model_prob_no > no_ask {
+                    let edge = model_prob_no - no_ask;
+                    if edge > best_edge {
+                        let edge_bps = {
+                            use rust_decimal::prelude::ToPrimitive;
+                            (edge * dec!(10000)).to_u32().unwrap_or(0)
+                        };
+                        best_edge = edge;
+                        best_candidate = Some((
+                            market,
+                            no_token.token_id,
+                            no_ask,
+                            model_prob_no,
+                            edge,
+                            edge_bps,
+                        ));
+                    }
+                }
+            }
+        }
+
+        let (market, token_id, ask_price, effective_prob, edge, edge_bps) = best_candidate?;
+
+        // Check minimum edge threshold
+        if edge_bps < self.config.min_edge_bps {
+            return None;
+        }
+
+        // Kelly sizing
+        let kelly_raw = if ask_price > Decimal::ZERO && ask_price < dec!(0.99) {
+            (edge / (Decimal::ONE - ask_price)).min(Decimal::TWO)
+        } else {
+            Decimal::ZERO
+        };
+        let kelly_size = kelly_raw * self.config.kelly_fraction * self.config.max_position_usdc;
+        let available = (self.get_available_capital)();
+
+        // Position-aware sizing
+        let existing = (self.get_position)(token_id);
+        let remaining = (self.config.max_position_usdc - existing).max(Decimal::ZERO);
+        let size = kelly_size.min(remaining).min(available);
+
+        if size <= Decimal::ZERO {
+            return None;
+        }
+
+        // Profitability check
+        let est = self.profit_calc.directional_buy_profit(
+            ask_price,
+            effective_prob,
+            size,
+            market.fee_rate_bps,
+        );
+
+        if est.net_profit <= Decimal::ZERO {
+            return None;
+        }
+
+        tracing::info!(
+            group_title = %group.title,
+            question = %market.question,
+            asset = asset.name,
+            current_price = price_data.current_price,
+            model_prob = %effective_prob,
+            ask = %ask_price,
+            edge_bps = edge_bps,
+            group_size = group.markets.len(),
+            size = %size,
+            est_profit = %est.net_profit,
+            "Binary group crypto alpha opportunity detected"
+        );
+
+        Some(ArbitrageOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: market.condition_id,
+            question: format!("[Group] {} → {}", group.title, market.question),
+            spread: edge,
+            estimated_profit: est.net_profit,
+            size,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id,
+                side: TradeSide::Buy,
+                price: ask_price,
+                size,
+                condition_id: market.condition_id,
+            },
+        })
+    }
 }
 
 #[async_trait]
@@ -1006,21 +1213,53 @@ impl Strategy for CryptoAlphaStrategy {
     ) -> pa_core::Result<Vec<ArbitrageOpportunity>> {
         let mut opportunities = Vec::new();
         let count = self.scan_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let log_diag = count % 600 == 0; // ~every 60s at 100ms interval
+        let log_diag = count.is_multiple_of(600); // ~every 60s at 100ms interval
 
         let mut binary_crypto = 0u32;
+        let mut binary_group_crypto = 0u32;
         let mut neg_risk_matched = 0u32;
         let mut neg_risk_expired = 0u32;
         let mut neg_risk_no_date = 0u32;
 
-        // 1. Binary markets (existing)
+        // Build a set of condition_ids that belong to binary event groups,
+        // so we skip them in the individual market loop (avoid double-processing).
+        let grouped_condition_ids: std::collections::HashSet<alloy::primitives::B256> = self
+            .binary_event_groups
+            .iter()
+            .flat_map(|g| g.markets.iter().map(|m| m.condition_id))
+            .collect();
+
+        // 1. Binary event groups — process each group as a unit
+        for group in &self.binary_event_groups {
+            // Quick check: does this group contain any crypto market?
+            let has_crypto = find_asset(&group.title).is_some()
+                || group.markets.iter().any(|m| parse_crypto_question(&m.question).is_some());
+            if !has_crypto {
+                continue;
+            }
+            binary_group_crypto += 1;
+            if let Some(opp) = self.detect_crypto_group(group).await {
+                opportunities.push(opp);
+            }
+        }
+
+        // 2. Individual binary markets (skip those already in groups)
+        let mut binary_crypto_samples: Vec<String> = Vec::new();
         for market in markets {
             if !market.active || market.neg_risk {
                 continue;
             }
 
+            // Skip markets that are part of a binary event group
+            if grouped_condition_ids.contains(&market.condition_id) {
+                continue;
+            }
+
             if parse_crypto_question(&market.question).is_some() {
                 binary_crypto += 1;
+                if binary_crypto_samples.len() < 3 {
+                    binary_crypto_samples.push(market.question.chars().take(60).collect());
+                }
             }
 
             if let Some(opp) = self.detect_crypto_opportunity(market).await {
@@ -1028,7 +1267,7 @@ impl Strategy for CryptoAlphaStrategy {
             }
         }
 
-        // 2. NegRisk events
+        // 3. NegRisk events
         for event in &self.neg_risk_events {
             if let Some((asset, target_date)) = parse_crypto_event_title(&event.title) {
                 let now_date = Utc::now().date_naive();
@@ -1052,28 +1291,31 @@ impl Strategy for CryptoAlphaStrategy {
 
         if log_diag {
             tracing::info!(
-                total_events = self.neg_risk_events.len(),
+                binary_groups = self.binary_event_groups.len(),
+                binary_group_crypto,
+                binary_ungrouped = binary_crypto,
+                neg_risk_events = self.neg_risk_events.len(),
                 neg_risk_matched,
                 neg_risk_expired,
                 neg_risk_no_date,
-                binary_crypto,
                 opportunities = opportunities.len(),
                 "[CryptoAlpha] scan diagnostics"
             );
-            // Log a few matched event titles for visibility
-            let mut shown = 0u32;
-            for event in &self.neg_risk_events {
-                if shown >= 3 { break; }
-                if let Some((asset, date)) = parse_crypto_event_title(&event.title) {
-                    tracing::info!(
-                        title = %event.title,
-                        asset = asset.name,
-                        date = ?date,
-                        outcomes = event.markets.len(),
-                        "[CryptoAlpha] sample NegRisk event"
-                    );
-                    shown += 1;
-                }
+            // Log sample binary event group titles
+            for (i, group) in self.binary_event_groups.iter().enumerate() {
+                if i >= 5 { break; }
+                let has_crypto = find_asset(&group.title).is_some();
+                tracing::info!(
+                    idx = i,
+                    title = %group.title,
+                    markets = group.markets.len(),
+                    is_crypto = has_crypto,
+                    "[CryptoAlpha] binary event group"
+                );
+            }
+            // Log sample ungrouped binary crypto questions
+            for (i, q) in binary_crypto_samples.iter().enumerate() {
+                tracing::info!(idx = i, question = %q, "[CryptoAlpha] ungrouped binary crypto");
             }
         }
 
@@ -1372,5 +1614,77 @@ mod tests {
             "Partition should sum to ~1.0, got {}",
             total
         );
+    }
+
+    // ──── Binary Event Group Tests ────
+
+    #[test]
+    fn test_find_asset_from_event_title() {
+        // Group title contains crypto asset
+        assert!(find_asset("What price will Bitcoin hit in 2026?").is_some());
+        assert_eq!(
+            find_asset("What price will Bitcoin hit in 2026?").unwrap().name,
+            "Bitcoin"
+        );
+        assert!(find_asset("Ethereum price predictions 2026").is_some());
+        // Non-crypto event title
+        assert!(find_asset("Who will win the Super Bowl?").is_none());
+    }
+
+    #[test]
+    fn test_find_asset_from_reach_question() {
+        // Real Polymarket format: "Will Bitcoin reach $200,000 by December 31, 2026?"
+        let q = parse_crypto_question("Will Bitcoin reach $200,000 by December 31, 2026?");
+        assert!(q.is_some());
+        let q = q.unwrap();
+        assert_eq!(q.asset.name, "Bitcoin");
+        assert!((q.threshold - 200_000.0).abs() < 0.01);
+        assert_eq!(q.direction, PriceDirection::Above);
+    }
+
+    #[test]
+    fn test_find_asset_from_dip_question() {
+        // "Will Bitcoin dip to $85,000 by December 31, 2026?"
+        let q = parse_crypto_question("Will Bitcoin dip to $85,000 by December 31, 2026?");
+        assert!(q.is_some());
+        let q = q.unwrap();
+        assert_eq!(q.asset.name, "Bitcoin");
+        assert!((q.threshold - 85_000.0).abs() < 0.01);
+        // "dip to" is not explicitly "fall below" — direction depends on keyword matching
+    }
+
+    #[test]
+    fn test_binary_event_group_type() {
+        use pa_core::types::BinaryEventGroup;
+        use alloy::primitives::B256;
+
+        let market1 = MarketInfo {
+            condition_id: B256::ZERO,
+            question_id: B256::ZERO,
+            question: "Will Bitcoin reach $200,000?".into(),
+            neg_risk: false,
+            neg_risk_market_id: None,
+            tokens: vec![],
+            tick_size: dec!(0.01),
+            fee_rate_bps: 200,
+            active: true,
+            liquidity: dec!(1000),
+            event_title: Some("What price will Bitcoin hit in 2026?".into()),
+            end_date: None,
+            category: Some("crypto".into()),
+        };
+        let market2 = MarketInfo {
+            question: "Will Bitcoin reach $150,000?".into(),
+            ..market1.clone()
+        };
+
+        let group = BinaryEventGroup {
+            title: "What price will Bitcoin hit in 2026?".into(),
+            markets: vec![market1, market2],
+        };
+
+        assert_eq!(group.markets.len(), 2);
+        assert!(find_asset(&group.title).is_some());
+        assert_eq!(find_asset(&group.title).unwrap().name, "Bitcoin");
     }
 }

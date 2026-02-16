@@ -1,7 +1,7 @@
 use alloy::primitives::{B256, U256};
 use futures::{StreamExt, pin_mut};
 use pa_core::config::Settings;
-use pa_core::types::{MarketInfo, NegRiskEvent, Outcome, TokenInfo};
+use pa_core::types::{BinaryEventGroup, MarketInfo, NegRiskEvent, Outcome, TokenInfo};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 
@@ -227,6 +227,40 @@ impl GammaFeed {
         events
     }
 
+    /// Group non-NegRisk binary markets by their event title.
+    ///
+    /// Returns groups with at least 2 markets that share the same `event_title`.
+    /// This captures Polymarket's grouped binary market format (e.g. "What price
+    /// will Bitcoin hit in 2026?" containing "Will Bitcoin reach $200,000?", etc.).
+    pub fn group_binary_events(markets: &[MarketInfo]) -> Vec<BinaryEventGroup> {
+        let mut groups: HashMap<String, Vec<MarketInfo>> = HashMap::new();
+
+        for market in markets {
+            if market.neg_risk || !market.active {
+                continue;
+            }
+            if let Some(ref title) = market.event_title
+                && !title.is_empty()
+            {
+                groups.entry(title.clone()).or_default().push(market.clone());
+            }
+        }
+
+        let events: Vec<BinaryEventGroup> = groups
+            .into_iter()
+            .filter(|(_, ms)| ms.len() >= 2)
+            .map(|(title, ms)| BinaryEventGroup { title, markets: ms })
+            .collect();
+
+        tracing::info!(
+            binary_event_groups = events.len(),
+            total_grouped_markets = events.iter().map(|e| e.markets.len()).sum::<usize>(),
+            "Binary event groups formed"
+        );
+
+        events
+    }
+
     /// Get all token IDs from NegRisk events (for WebSocket subscription).
     pub fn extract_neg_risk_token_ids(events: &[NegRiskEvent]) -> Vec<U256> {
         events
@@ -261,5 +295,95 @@ impl GammaFeed {
             .iter()
             .flat_map(|m| m.tokens.iter().map(|t| t.token_id))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    fn make_market(question: &str, event_title: Option<&str>, neg_risk: bool) -> MarketInfo {
+        MarketInfo {
+            condition_id: B256::ZERO,
+            question_id: B256::ZERO,
+            question: question.into(),
+            neg_risk,
+            neg_risk_market_id: None,
+            tokens: vec![
+                TokenInfo {
+                    token_id: U256::from(1u64),
+                    outcome: Outcome::Yes,
+                    complement_id: U256::from(2u64),
+                },
+                TokenInfo {
+                    token_id: U256::from(2u64),
+                    outcome: Outcome::No,
+                    complement_id: U256::from(1u64),
+                },
+            ],
+            tick_size: dec!(0.01),
+            fee_rate_bps: 200,
+            active: true,
+            liquidity: dec!(1000),
+            event_title: event_title.map(String::from),
+            end_date: None,
+            category: None,
+        }
+    }
+
+    #[test]
+    fn test_group_binary_events_basic() {
+        let markets = vec![
+            make_market("Will BTC reach $200k?", Some("Bitcoin prices 2026"), false),
+            make_market("Will BTC reach $150k?", Some("Bitcoin prices 2026"), false),
+            make_market("Will BTC reach $100k?", Some("Bitcoin prices 2026"), false),
+            make_market("Unrelated solo market", Some("Other event"), false),
+        ];
+
+        let groups = GammaFeed::group_binary_events(&markets);
+        // "Bitcoin prices 2026" has 3 markets → 1 group
+        // "Other event" has 1 market → not a group (< 2)
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].title, "Bitcoin prices 2026");
+        assert_eq!(groups[0].markets.len(), 3);
+    }
+
+    #[test]
+    fn test_group_binary_events_excludes_neg_risk() {
+        let markets = vec![
+            make_market("Will BTC reach $200k?", Some("BTC event"), true), // neg_risk=true
+            make_market("Will BTC reach $150k?", Some("BTC event"), true), // neg_risk=true
+        ];
+
+        let groups = GammaFeed::group_binary_events(&markets);
+        assert!(groups.is_empty(), "NegRisk markets should be excluded");
+    }
+
+    #[test]
+    fn test_group_binary_events_no_title() {
+        let markets = vec![
+            make_market("Will BTC reach $200k?", None, false),
+            make_market("Will BTC reach $150k?", None, false),
+        ];
+
+        let groups = GammaFeed::group_binary_events(&markets);
+        assert!(groups.is_empty(), "Markets without event_title should be excluded");
+    }
+
+    #[test]
+    fn test_group_binary_events_multiple_groups() {
+        let markets = vec![
+            make_market("Will BTC reach $200k?", Some("Bitcoin 2026"), false),
+            make_market("Will BTC reach $150k?", Some("Bitcoin 2026"), false),
+            make_market("Will ETH reach $10k?", Some("Ethereum 2026"), false),
+            make_market("Will ETH reach $5k?", Some("Ethereum 2026"), false),
+        ];
+
+        let groups = GammaFeed::group_binary_events(&markets);
+        assert_eq!(groups.len(), 2);
+        let titles: Vec<&str> = groups.iter().map(|g| g.title.as_str()).collect();
+        assert!(titles.contains(&"Bitcoin 2026"));
+        assert!(titles.contains(&"Ethereum 2026"));
     }
 }

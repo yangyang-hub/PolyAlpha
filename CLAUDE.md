@@ -9,7 +9,7 @@ Polymarket 量化套利交易机器人（Rust）。通过实时订单簿监控�
 - **语言**: Rust Edition 2024, MSRV 1.88.0
 - **工具链**: rustc 1.93.0, cargo 1.93.0
 - **代码量**: ~9400 行 Rust
-- **测试**: 118 个（全部通过）
+- **测试**: 125 个（全部通过）
 
 ## 常用命令
 
@@ -70,6 +70,7 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 | `ExecutionResult` | 执行结果（profit, fees, gas, status） |
 | `StrategyType` | 枚举: YesNoMerge / YesNoSplit / NegRiskConvert / CrossMarket / Weather / ResolutionConvergence / CryptoAlpha |
 | `NegRiskEvent` | NegRisk 事件（title + 多个 MarketInfo） |
+| `BinaryEventGroup` | 二元事件分组（title + 多个独立 MarketInfo，非 NegRisk） |
 | `EventCategory` | 枚举: Macro / Crypto / Political / Sports |
 | `EventImpact` | 枚举: Low / Medium / High |
 | `CrossMarketPair` | 跨市场配对（market_a, market_b, expected_sum, correlation） |
@@ -184,6 +185,13 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 3. `gbm_range_probability()`: 区间概率（AtOrBelow: 1-P(S>K), Range: P(S>lo)-P(S>hi), AtOrAbove: P(S>K)）
 4. `detect_crypto_neg_risk()`: 遍历所有 outcome，双侧 YES/NO edge 检测，选最大 edge
 5. Kelly sizing + position-aware cap + profitability check
+
+**二元事件分组模式** — 分组的独立二元市场（如 "What price will Bitcoin hit in 2026?" → "Will Bitcoin reach $200,000?", "Will Bitcoin reach $150,000?"）:
+1. `group_binary_events()`: 按 `event_title` 将非 NegRisk 市场分组为 `BinaryEventGroup`
+2. `detect_crypto_group()`: 从组标题/问题中识别资产，一次获取价格数据
+3. 遍历组内所有市场：解析问题 → GBM 概率 → 双侧 YES/NO edge 检测
+4. 选择组内最大 edge 的市场，Kelly sizing + profitability check
+5. 与单独二元市场去重：已分组的市场跳过个别扫描
 
 **启用**: 在 `strategy.enabled` 中添加 `"crypto"`
 
@@ -303,14 +311,14 @@ Grafana 仪表盘: PnL, Exposure gauge, Circuit breaker, Market stats, Opportuni
 7. `crates/pa-backtest/src/engine.rs` — build_strategies() 中添加
 8. 测试: 至少覆盖 detect 逻辑 + profitability 计算
 
-## 测试分布（110 个）
+## 测试分布（125 个）
 
 | Crate | 数量 | 覆盖 |
 |-------|------|------|
 | pa-backtest | 11 | DataLoader 解析, Report 构建/统计, Simulator 执行模拟 |
-| pa-strategy | 92 | ProfitCalculator(12), CrossMarket(4), Weather(45: binary parser, NegRisk outcome range parser(5), event title parser(2), date parser(6), precipitation unit(3), CDF models(7: normal, lognormal, weibull, dispatcher), forecast error sigma(2), probability model(3), position sizing(3), cache eviction, NegRisk NO-side, edge detection), Convergence(10: filters(4), detection(3), time decay, position sizing, neg_risk skip), CryptoAlpha(20: question parser(6), volatility, GBM probability(4), asset mapping, NegRisk event title parser(3), NegRisk outcome range parser(3), GBM range probability(2), NegRisk edge detection), YesNo(内含于profitability) |
+| pa-strategy | 96 | ProfitCalculator(12), CrossMarket(4), Weather(45: binary parser, NegRisk outcome range parser(5), event title parser(2), date parser(6), precipitation unit(3), CDF models(7: normal, lognormal, weibull, dispatcher), forecast error sigma(2), probability model(3), position sizing(3), cache eviction, NegRisk NO-side, edge detection), Convergence(10: filters(4), detection(3), time decay, position sizing, neg_risk skip), CryptoAlpha(24: question parser(6), volatility, GBM probability(4), asset mapping, NegRisk event title parser(3), NegRisk outcome range parser(3), GBM range probability(2), binary group(4: asset from title, reach/dip questions, group type)), YesNo(内含于profitability) |
 | pa-execution | 1 | Gas 估算 |
-| pa-market-data | 13 | OrderBook 排序(1), EventCalendar(12: Finnhub/CoinMarketCal parsing, static loading, window tests(3), impact multipliers(3), overlapping events, keyword matching, no-match different category) |
+| pa-market-data | 17 | OrderBook 排序(1), EventCalendar(12: Finnhub/CoinMarketCal parsing, static loading, window tests(3), impact multipliers(3), overlapping events, keyword matching, no-match different category), GammaFeed(4: binary group basic, excludes neg_risk, no title, multiple groups) |
 
 ## Polygon 合约地址
 
