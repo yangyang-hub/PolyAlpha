@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("info,polymarket_client_sdk=debug,polymarket_client_sdk::serde_helpers=error,tungstenite=debug")
+            EnvFilter::new("info,polymarket_client_sdk::serde_helpers=error")
         }))
         .with(fmt::layer().with_target(true).with_thread_ids(true))
         .init();

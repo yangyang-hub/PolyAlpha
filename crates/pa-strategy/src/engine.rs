@@ -1,10 +1,11 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-use alloy::primitives::U256;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use alloy::primitives::{B256, U256};
 use chrono::Utc;
 use rust_decimal::Decimal;
 use pa_core::traits::{Executor, RiskManager, Strategy};
-use pa_core::types::{ArbitrageOpportunity, ExecutionPlan, MarketInfo, RiskDecision};
+use pa_core::types::{ArbitrageOpportunity, ExecutionPlan, MarketInfo, RiskDecision, StrategyType};
 use pa_market_data::event_calendar::EventCalendarService;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, interval};
@@ -23,6 +24,9 @@ pub struct StrategyEngine {
     risk_manager: Arc<dyn RiskManager>,
     scan_interval: Duration,
     event_calendar: Option<Arc<EventCalendarService>>,
+    /// Cooldown map: (condition_id, strategy_type) → expiry time.
+    /// Prevents retry flooding when the same opportunity is detected repeatedly.
+    cooldowns: Mutex<HashMap<(B256, StrategyType), Instant>>,
 }
 
 impl StrategyEngine {
@@ -39,6 +43,7 @@ impl StrategyEngine {
             risk_manager,
             scan_interval: Duration::from_millis(scan_interval_ms),
             event_calendar,
+            cooldowns: Mutex::new(HashMap::new()),
         }
     }
 
@@ -131,6 +136,11 @@ impl StrategyEngine {
                         );
                     }
                     for opp in opportunities {
+                        // Skip cooled-down opportunities (prevents retry flooding)
+                        if self.is_cooled_down(opp.condition_id, opp.strategy_type) {
+                            continue;
+                        }
+
                         // Apply event calendar position filter
                         if let Some(ref ec) = self.event_calendar {
                             let multiplier = ec.position_multiplier(&opp.question, Utc::now()).await;
@@ -178,6 +188,7 @@ impl StrategyEngine {
             RiskDecision::Reject(reason) => {
                 tracing::warn!(id = %opp.id, reason = ?reason, "Opportunity rejected by risk manager");
                 pa_monitor::metrics::OPPORTUNITIES_REJECTED.inc();
+                self.set_cooldown(opp.condition_id, opp.strategy_type, 10);
                 return;
             }
         }
@@ -200,13 +211,32 @@ impl StrategyEngine {
                     pa_monitor::metrics::REALIZED_PNL.add(pnl);
                 }
                 self.risk_manager.update_position(&result);
+                self.set_cooldown(opp.condition_id, opp.strategy_type, 10);
             }
             Err(e) => {
                 timer.observe_duration();
                 tracing::error!(id = %opp.id, error = %e, "Execution failed");
                 pa_monitor::metrics::EXECUTION_ERRORS.inc();
+                self.set_cooldown(opp.condition_id, opp.strategy_type, 60);
             }
         }
+    }
+
+    /// Check if an opportunity is in cooldown (recently attempted).
+    fn is_cooled_down(&self, condition_id: B256, strategy_type: StrategyType) -> bool {
+        let cooldowns = self.cooldowns.lock().unwrap();
+        cooldowns
+            .get(&(condition_id, strategy_type))
+            .is_some_and(|until| Instant::now() < *until)
+    }
+
+    /// Set a cooldown for an opportunity to prevent retry flooding.
+    fn set_cooldown(&self, condition_id: B256, strategy_type: StrategyType, secs: u64) {
+        let mut cooldowns = self.cooldowns.lock().unwrap();
+        cooldowns.insert(
+            (condition_id, strategy_type),
+            Instant::now() + Duration::from_secs(secs),
+        );
     }
 }
 

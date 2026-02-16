@@ -70,6 +70,12 @@ impl ClobExecutor {
         price: Decimal,
         size: Decimal,
     ) -> anyhow::Result<OrderResult> {
+        // Round size to 2 decimal places (Polymarket CLOB lot size constraint)
+        let size = size.round_dp(2);
+        if size <= Decimal::ZERO {
+            anyhow::bail!("Order size too small after rounding to lot size");
+        }
+
         tracing::info!(
             token_id = %token_id,
             price = %price,
@@ -108,6 +114,12 @@ impl ClobExecutor {
         price: Decimal,
         size: Decimal,
     ) -> anyhow::Result<OrderResult> {
+        // Round size to 2 decimal places (Polymarket CLOB lot size constraint)
+        let size = size.round_dp(2);
+        if size <= Decimal::ZERO {
+            anyhow::bail!("Order size too small after rounding to lot size");
+        }
+
         tracing::info!(
             token_id = %token_id,
             price = %price,
@@ -147,6 +159,12 @@ impl ClobExecutor {
         price: Decimal,
         size: Decimal,
     ) -> anyhow::Result<OrderResult> {
+        // Round size to 2 decimal places (Polymarket CLOB lot size constraint)
+        let size = size.round_dp(2);
+        if size <= Decimal::ZERO {
+            anyhow::bail!("Order size too small after rounding to lot size");
+        }
+
         tracing::info!(
             token_id = %token_id,
             price = %price,
@@ -178,6 +196,12 @@ impl ClobExecutor {
         price: Decimal,
         size: Decimal,
     ) -> anyhow::Result<OrderResult> {
+        // Round size to 2 decimal places (Polymarket CLOB lot size constraint)
+        let size = size.round_dp(2);
+        if size <= Decimal::ZERO {
+            anyhow::bail!("Order size too small after rounding to lot size");
+        }
+
         tracing::info!(
             token_id = %token_id,
             price = %price,
