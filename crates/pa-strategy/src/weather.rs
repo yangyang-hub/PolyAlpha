@@ -1003,6 +1003,8 @@ pub struct WeatherAlphaStrategy {
     forecast_cache: Arc<Mutex<HashMap<u64, CachedForecast>>>,
     /// NegRisk multi-outcome weather events to scan.
     neg_risk_events: Vec<NegRiskEvent>,
+    /// Scan counter for periodic diagnostics.
+    scan_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl WeatherAlphaStrategy {
@@ -1023,6 +1025,7 @@ impl WeatherAlphaStrategy {
             get_position,
             forecast_cache: Arc::new(Mutex::new(HashMap::new())),
             neg_risk_events,
+            scan_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -1487,6 +1490,11 @@ impl Strategy for WeatherAlphaStrategy {
         markets: &[MarketInfo],
     ) -> pa_core::Result<Vec<ArbitrageOpportunity>> {
         let mut opportunities = Vec::new();
+        let count = self.scan_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let log_diag = count % 600 == 0;
+
+        let mut binary_weather = 0u32;
+        let mut neg_risk_weather = 0u32;
 
         // 1. Scan binary weather markets (existing logic)
         for market in markets {
@@ -1499,6 +1507,8 @@ impl Strategy for WeatherAlphaStrategy {
                 None => continue, // Not a weather market
             };
 
+            binary_weather += 1;
+
             if let Some(opp) = self.detect_weather_opportunity(market, &parsed).await {
                 opportunities.push(opp);
             }
@@ -1506,11 +1516,22 @@ impl Strategy for WeatherAlphaStrategy {
 
         // 2. Scan NegRisk weather events
         for event in &self.neg_risk_events {
-            if let Some((metric, location)) = parse_weather_event_title(&event.title)
-                && let Some(opp) = self.detect_neg_risk_weather(event, metric, &location).await
-            {
-                opportunities.push(opp);
+            if let Some((metric, location)) = parse_weather_event_title(&event.title) {
+                neg_risk_weather += 1;
+                if let Some(opp) = self.detect_neg_risk_weather(event, metric, &location).await {
+                    opportunities.push(opp);
+                }
             }
+        }
+
+        if log_diag {
+            tracing::info!(
+                total_events = self.neg_risk_events.len(),
+                binary_weather,
+                neg_risk_weather,
+                opportunities = opportunities.len(),
+                "[Weather] scan diagnostics"
+            );
         }
 
         Ok(opportunities)

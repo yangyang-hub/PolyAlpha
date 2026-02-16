@@ -618,6 +618,8 @@ pub struct CryptoAlphaStrategy {
     get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
     price_cache: Arc<Mutex<HashMap<String, CachedPrice>>>,
     neg_risk_events: Vec<NegRiskEvent>,
+    /// Scan counter for periodic diagnostics (every ~600 scans ≈ 1 min at 100ms interval).
+    scan_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CryptoAlphaStrategy {
@@ -643,6 +645,7 @@ impl CryptoAlphaStrategy {
             get_position,
             price_cache: Arc::new(Mutex::new(HashMap::new())),
             neg_risk_events,
+            scan_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -1002,11 +1005,22 @@ impl Strategy for CryptoAlphaStrategy {
         markets: &[MarketInfo],
     ) -> pa_core::Result<Vec<ArbitrageOpportunity>> {
         let mut opportunities = Vec::new();
+        let count = self.scan_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let log_diag = count % 600 == 0; // ~every 60s at 100ms interval
+
+        let mut binary_crypto = 0u32;
+        let mut neg_risk_matched = 0u32;
+        let mut neg_risk_expired = 0u32;
+        let mut neg_risk_no_date = 0u32;
 
         // 1. Binary markets (existing)
         for market in markets {
             if !market.active || market.neg_risk {
                 continue;
+            }
+
+            if parse_crypto_question(&market.question).is_some() {
+                binary_crypto += 1;
             }
 
             if let Some(opp) = self.detect_crypto_opportunity(market).await {
@@ -1022,10 +1036,43 @@ impl Strategy for CryptoAlphaStrategy {
                     .map(|d| (d - now_date).num_days())
                     .unwrap_or(0);
                 if days <= 0 {
+                    if target_date.is_some() {
+                        neg_risk_expired += 1;
+                    } else {
+                        neg_risk_no_date += 1;
+                    }
                     continue;
                 }
+                neg_risk_matched += 1;
                 if let Some(opp) = self.detect_crypto_neg_risk(event, asset, days as f64).await {
                     opportunities.push(opp);
+                }
+            }
+        }
+
+        if log_diag {
+            tracing::info!(
+                total_events = self.neg_risk_events.len(),
+                neg_risk_matched,
+                neg_risk_expired,
+                neg_risk_no_date,
+                binary_crypto,
+                opportunities = opportunities.len(),
+                "[CryptoAlpha] scan diagnostics"
+            );
+            // Log a few matched event titles for visibility
+            let mut shown = 0u32;
+            for event in &self.neg_risk_events {
+                if shown >= 3 { break; }
+                if let Some((asset, date)) = parse_crypto_event_title(&event.title) {
+                    tracing::info!(
+                        title = %event.title,
+                        asset = asset.name,
+                        date = ?date,
+                        outcomes = event.markets.len(),
+                        "[CryptoAlpha] sample NegRisk event"
+                    );
+                    shown += 1;
                 }
             }
         }

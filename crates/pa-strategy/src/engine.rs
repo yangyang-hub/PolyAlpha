@@ -123,6 +123,13 @@ impl StrategyEngine {
         for strategy in &self.strategies {
             match strategy.scan(markets).await {
                 Ok(opportunities) => {
+                    if !opportunities.is_empty() {
+                        tracing::info!(
+                            strategy = strategy.name(),
+                            found = opportunities.len(),
+                            "Strategy scan found opportunities"
+                        );
+                    }
                     for opp in opportunities {
                         // Apply event calendar position filter
                         if let Some(ref ec) = self.event_calendar {
