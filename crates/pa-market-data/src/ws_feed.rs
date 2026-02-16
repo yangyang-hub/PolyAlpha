@@ -115,8 +115,10 @@ impl WebSocketFeed {
                 let stream = match ws_client.subscribe_orderbook(subscribe_ids.clone()) {
                     Ok(s) => {
                         backoff = Duration::from_secs(1); // Reset on success
-                        ws_connected.store(true, Ordering::Relaxed);
-                        tracing::info!("WebSocket stream connected");
+                        // NOTE: subscribe_orderbook returning Ok means the stream was created,
+                        // NOT that the underlying TCP/WS connection is established. The SDK
+                        // connects lazily in a background task.
+                        tracing::info!("WebSocket stream created (awaiting first message for data confirmation)");
                         s
                     }
                     Err(e) => {
@@ -132,6 +134,7 @@ impl WebSocketFeed {
                     }
                 };
                 let mut stream = Box::pin(stream);
+                let mut awaiting_first = true;
 
                 loop {
                     tokio::select! {
@@ -140,16 +143,25 @@ impl WebSocketFeed {
                             ws_connected.store(false, Ordering::Relaxed);
                             return;
                         }
+                        _ = tokio::time::sleep(Duration::from_secs(15)), if awaiting_first => {
+                            tracing::warn!(
+                                "WebSocket: no data received after 15s — SDK may be failing to \
+                                 connect to the server. Check network/DNS and SDK debug logs."
+                            );
+                            awaiting_first = false;
+                        }
                         item = stream.next() => {
+                            awaiting_first = false;
                             match item {
                                 Some(Ok(book_update)) => {
                                     total_messages += 1;
                                     if total_messages == 1 {
+                                        ws_connected.store(true, Ordering::Relaxed);
                                         tracing::info!(
                                             asset_id = %book_update.asset_id,
                                             bids = book_update.bids.len(),
                                             asks = book_update.asks.len(),
-                                            "WebSocket first message received"
+                                            "WebSocket CONNECTED — first message received"
                                         );
                                     } else if total_messages % 5000 == 0 {
                                         tracing::info!(
