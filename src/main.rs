@@ -138,15 +138,31 @@ async fn main() -> Result<()> {
     pa_monitor::metrics::MONITORED_MARKETS.set(markets.len() as f64);
 
     // --- Subscribe to WebSocket order book updates ---
-    let mut token_ids = GammaFeed::extract_token_ids(&markets);
-    let neg_risk_token_ids = GammaFeed::extract_neg_risk_token_ids(&neg_risk_events);
-    // Merge NegRisk token IDs (some may overlap with binary market tokens)
+    // Binary markets first: the observer & YesNo strategy need BOTH YES+NO books.
+    // NegRisk markets dominate high-liquidity slots; without reordering, all binary
+    // tokens get truncated when ws_max_instruments=500.
+    let binary_token_ids: Vec<_> = markets
+        .iter()
+        .filter(|m| !m.neg_risk)
+        .flat_map(|m| m.tokens.iter().map(|t| t.token_id))
+        .collect();
+    let neg_risk_token_ids: Vec<_> = markets
+        .iter()
+        .filter(|m| m.neg_risk)
+        .flat_map(|m| m.tokens.iter().map(|t| t.token_id))
+        .collect();
+    let mut token_ids = binary_token_ids.clone();
     for tid in &neg_risk_token_ids {
         if !token_ids.contains(tid) {
             token_ids.push(*tid);
         }
     }
-    tracing::info!(tokens = token_ids.len(), "Subscribing to order book updates");
+    tracing::info!(
+        tokens = token_ids.len(),
+        binary = binary_token_ids.len(),
+        neg_risk = neg_risk_token_ids.len(),
+        "Subscribing to order book updates (binary-first ordering)"
+    );
     market_data.subscribe(&token_ids).await?;
     pa_monitor::metrics::ACTIVE_SUBSCRIPTIONS.set(token_ids.len() as f64);
 
@@ -366,6 +382,7 @@ async fn main() -> Result<()> {
                         with_orderbook = has_book,
                         missing_asks = no_asks,
                         missing_bids = no_bids,
+                        cache_size = observer_cache.len(),
                         "━━━ Market Spread Observer ━━━"
                     );
                     tracing::info!(

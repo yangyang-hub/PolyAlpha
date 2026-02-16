@@ -109,6 +109,7 @@ impl WebSocketFeed {
         let handle = tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
             let max_backoff = Duration::from_secs(60);
+            let mut total_messages: u64 = 0;
 
             loop {
                 let stream = match ws_client.subscribe_orderbook(subscribe_ids.clone()) {
@@ -142,6 +143,22 @@ impl WebSocketFeed {
                         item = stream.next() => {
                             match item {
                                 Some(Ok(book_update)) => {
+                                    total_messages += 1;
+                                    if total_messages == 1 {
+                                        tracing::info!(
+                                            asset_id = %book_update.asset_id,
+                                            bids = book_update.bids.len(),
+                                            asks = book_update.asks.len(),
+                                            "WebSocket first message received"
+                                        );
+                                    } else if total_messages % 5000 == 0 {
+                                        tracing::info!(
+                                            total_messages,
+                                            cache_size = cache.len(),
+                                            "WebSocket message throughput"
+                                        );
+                                    }
+
                                     let token_id = book_update.asset_id;
                                     let timestamp = timestamp_ms_to_datetime(book_update.timestamp);
 
