@@ -336,6 +336,23 @@ pub fn parse_target_date(text: &str) -> Option<NaiveDate> {
         }
     }
 
+    // "in February" / "by end of February" — bare month name without day
+    // Default to the last day of the month.
+    for &(name, month_num) in MONTHS {
+        if lower.contains(name) {
+            let year = today.year();
+            // Last day of month: go to 1st of next month, subtract 1 day
+            let next_month = if month_num == 12 {
+                NaiveDate::from_ymd_opt(year + 1, 1, 1)
+            } else {
+                NaiveDate::from_ymd_opt(year, month_num + 1, 1)
+            };
+            if let Some(first_next) = next_month {
+                return Some(first_next - chrono::Duration::days(1));
+            }
+        }
+    }
+
     None
 }
 
@@ -1873,6 +1890,23 @@ mod tests {
     #[test]
     fn test_parse_target_date_none() {
         assert!(parse_target_date("Will it rain this week?").is_none());
+    }
+
+    #[test]
+    fn test_parse_target_date_bare_month() {
+        // "in February" without a day → last day of February
+        let date = parse_target_date("What price will Solana hit in February?").unwrap();
+        assert_eq!(date.month(), 2);
+        // Last day: Feb 28 or 29 depending on leap year
+        assert!(date.day() == 28 || date.day() == 29);
+    }
+
+    #[test]
+    fn test_parse_target_date_by_end_of_month() {
+        // "by end of March" → last day of March
+        let date = parse_target_date("Will BTC reach $200k by end of March?").unwrap();
+        assert_eq!(date.month(), 3);
+        assert_eq!(date.day(), 31);
     }
 
     #[test]

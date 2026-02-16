@@ -46,7 +46,7 @@ alert_webhook = ""
 min_liquidity = 100.0
 min_volume_24h = 500.0
 max_markets = 500
-ws_max_instruments = 1000
+ws_max_instruments = 500
 
 [weather]
 min_edge_bps = 500
