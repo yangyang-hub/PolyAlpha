@@ -90,21 +90,94 @@ impl GammaFeed {
             "Raw market discovery complete"
         );
 
-        // Filter and sort by liquidity descending (keep best markets when truncating)
-        let mut filtered: Vec<MarketInfo> = all_markets
-            .into_iter()
-            .filter(|m| m.active)
-            .collect();
+        // Partition into strategy-relevant (weather/crypto keywords) vs general markets.
+        // Strategy-relevant markets are always included regardless of liquidity ranking.
+        let mut strategy_markets = Vec::new();
+        let mut general_markets = Vec::new();
 
-        filtered.sort_by(|a, b| b.liquidity.cmp(&a.liquidity));
-        filtered.truncate(self.max_markets);
+        for m in all_markets {
+            if !m.active {
+                continue;
+            }
+            if Self::is_strategy_relevant(&m.question) {
+                strategy_markets.push(m);
+            } else {
+                general_markets.push(m);
+            }
+        }
+
+        // Sort general markets by liquidity descending, fill remaining slots
+        general_markets.sort_by(|a, b| b.liquidity.cmp(&a.liquidity));
+        let remaining_slots = self.max_markets.saturating_sub(strategy_markets.len());
+        general_markets.truncate(remaining_slots);
+
+        let mut filtered = strategy_markets;
+        let strategy_count = filtered.len();
+        filtered.extend(general_markets);
 
         tracing::info!(
             filtered_count = filtered.len(),
+            strategy_relevant = strategy_count,
             "Market discovery complete after filtering"
         );
 
         Ok(filtered)
+    }
+
+    /// Check if a market question is relevant to active strategies.
+    /// These markets are always included regardless of liquidity ranking.
+    fn is_strategy_relevant(question: &str) -> bool {
+        let lower = question.to_lowercase();
+
+        // Weather: only strong unambiguous keywords
+        // Avoid short words like "rain", "snow", "wind" which cause false positives
+        // ("Jonas Wind", "Snow White", "Ukraine" contains "rain", etc.)
+        let weather = lower.contains("temperature")
+            || lower.contains("fahrenheit")
+            || lower.contains("celsius")
+            || lower.contains("rainfall")
+            || lower.contains("snowfall")
+            || lower.contains("wind speed")
+            || lower.contains("inches of rain")
+            || lower.contains("inches of snow");
+
+        if weather {
+            return true;
+        }
+
+        // Crypto price markets: asset keyword + price indicator
+        // Only use unambiguous keywords — avoid short/common words that collide with
+        // sports teams ("avalanche"=NHL), government ("doge"=DOGE dept), people ("ada", "pol"), etc.
+        let crypto_assets = [
+            "bitcoin", "btc", "ethereum", "eth", "solana",
+            "bnb", "xrp", "ripple", "dogecoin",
+            "cardano", "avax", "polkadot", "polygon", "matic",
+        ];
+        let has_crypto_asset = crypto_assets.iter().any(|kw| {
+            if let Some(pos) = lower.find(kw) {
+                let before_ok = pos == 0 || !lower.as_bytes()[pos - 1].is_ascii_alphabetic();
+                let after = pos + kw.len();
+                let after_ok =
+                    after >= lower.len() || !lower.as_bytes()[after].is_ascii_alphabetic();
+                before_ok && after_ok
+            } else {
+                false
+            }
+        });
+        // Exclude "gas price" false positive (Ethereum gas fee ≠ ETH price)
+        let gas_price = lower.contains("gas price") || lower.contains("gas fee");
+        let has_price_indicator = lower.contains('$')
+            || lower.contains("price")
+            || lower.contains("reach")
+            || lower.contains("hit")
+            || lower.contains("exceed")
+            || lower.contains("dip");
+
+        if has_crypto_asset && has_price_indicator && !gas_price {
+            return true;
+        }
+
+        false
     }
 
     /// Convert a Gamma SDK `Market` into our internal `MarketInfo`.
@@ -145,15 +218,18 @@ impl GammaFeed {
         let neg_risk = event_neg_risk || market.neg_risk.unwrap_or(false);
         let neg_risk_market_id = event_neg_risk_market_id.or(market.neg_risk_market_id);
 
-        // Apply liquidity/volume filters
+        // Apply liquidity/volume filters (relaxed for strategy-relevant markets)
         let liquidity = market.liquidity.unwrap_or(Decimal::ZERO);
         let volume_24h = market.volume_24hr.unwrap_or(Decimal::ZERO);
+        let strategy_relevant = Self::is_strategy_relevant(&question);
 
-        if liquidity < self.min_liquidity {
-            return None;
-        }
-        if volume_24h < self.min_volume_24h {
-            return None;
+        if !strategy_relevant {
+            if liquidity < self.min_liquidity {
+                return None;
+            }
+            if volume_24h < self.min_volume_24h {
+                return None;
+            }
         }
 
         Some(MarketInfo {

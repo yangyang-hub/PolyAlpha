@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use alloy::primitives::U256;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -27,6 +29,7 @@ pub struct ResolutionConvergenceStrategy {
     get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
     get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
     get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
+    scan_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ResolutionConvergenceStrategy {
@@ -43,6 +46,7 @@ impl ResolutionConvergenceStrategy {
             get_orderbook,
             get_available_capital,
             get_position,
+            scan_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -188,15 +192,87 @@ impl Strategy for ResolutionConvergenceStrategy {
         markets: &[MarketInfo],
     ) -> pa_core::Result<Vec<ArbitrageOpportunity>> {
         let mut opportunities = Vec::new();
+        let count = self.scan_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let log_diag = count.is_multiple_of(600);
+
+        let now = Utc::now();
+        let max_days = self.config.max_days_to_resolution as f64;
+        let mut with_end_date = 0u32;
+        let mut within_days = 0u32;
+        let mut above_threshold = 0u32;
+        let mut best_edge_bps: i32 = 0;
+        let mut best_edge_market: Option<String> = None;
 
         for market in markets {
             if !market.active || market.neg_risk {
                 continue;
             }
 
+            // Track diagnostic stats
+            if let Some(end_date) = market.end_date {
+                if end_date > now {
+                    with_end_date += 1;
+                    let days = (end_date.signed_duration_since(now).num_hours() as f64) / 24.0;
+                    if days <= max_days {
+                        within_days += 1;
+
+                        // Check if any side is above price threshold
+                        if market.tokens.len() == 2 {
+                            let yes_ask = (self.get_orderbook)(market.tokens[0].token_id)
+                                .and_then(|b| b.best_ask().map(|a| a.price));
+                            let no_ask = (self.get_orderbook)(market.tokens[1].token_id)
+                                .and_then(|b| b.best_ask().map(|a| a.price));
+
+                            let high_ask = match (yes_ask, no_ask) {
+                                (Some(y), Some(n)) => Some(y.max(n)),
+                                (Some(y), None) => Some(y),
+                                (None, Some(n)) => Some(n),
+                                _ => None,
+                            };
+
+                            if let Some(ask) = high_ask {
+                                if ask >= self.config.min_price_threshold {
+                                    above_threshold += 1;
+                                }
+                                // Track best edge even for markets below threshold
+                                let model_prob_f64 = if self.config.time_decay_boost {
+                                    1.0 - (days / max_days) * 0.03
+                                } else {
+                                    0.99
+                                };
+                                if let Some(mp) = Decimal::from_f64_retain(model_prob_f64) {
+                                    use rust_decimal::prelude::ToPrimitive;
+                                    let edge = mp - ask;
+                                    let ebps = (edge * dec!(10000)).to_i32().unwrap_or(0);
+                                    if ebps > best_edge_bps {
+                                        best_edge_bps = ebps;
+                                        best_edge_market =
+                                            Some(market.question.chars().take(50).collect());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if let Some(opp) = self.detect_convergence(market) {
                 opportunities.push(opp);
             }
+        }
+
+        if log_diag {
+            tracing::info!(
+                with_end_date,
+                within_days,
+                above_threshold,
+                best_edge_bps,
+                best_edge_market = best_edge_market.as_deref().unwrap_or("none"),
+                min_price_threshold = %self.config.min_price_threshold,
+                max_days = self.config.max_days_to_resolution,
+                opportunities = opportunities.len(),
+                "[Convergence] scan diagnostics"
+            );
         }
 
         Ok(opportunities)

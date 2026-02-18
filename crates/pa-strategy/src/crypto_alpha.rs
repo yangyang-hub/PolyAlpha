@@ -37,13 +37,13 @@ pub static CRYPTO_ASSETS: &[CryptoAsset] = &[
     },
     CryptoAsset {
         name: "Ethereum",
-        keywords: &["ethereum", "eth", "ether"],
+        keywords: &["ethereum", "eth"],
         binance_symbol: "ETHUSDT",
         coingecko_id: "ethereum",
     },
     CryptoAsset {
         name: "Solana",
-        keywords: &["solana", "sol"],
+        keywords: &["solana"],
         binance_symbol: "SOLUSDT",
         coingecko_id: "solana",
     },
@@ -61,31 +61,31 @@ pub static CRYPTO_ASSETS: &[CryptoAsset] = &[
     },
     CryptoAsset {
         name: "Dogecoin",
-        keywords: &["doge", "dogecoin"],
+        keywords: &["dogecoin"],
         binance_symbol: "DOGEUSDT",
         coingecko_id: "dogecoin",
     },
     CryptoAsset {
         name: "Cardano",
-        keywords: &["ada", "cardano"],
+        keywords: &["cardano"],
         binance_symbol: "ADAUSDT",
         coingecko_id: "cardano",
     },
     CryptoAsset {
         name: "Avalanche",
-        keywords: &["avax", "avalanche"],
+        keywords: &["avax"],
         binance_symbol: "AVAXUSDT",
         coingecko_id: "avalanche-2",
     },
     CryptoAsset {
         name: "Polkadot",
-        keywords: &["polkadot", "dot"],
+        keywords: &["polkadot"],
         binance_symbol: "DOTUSDT",
         coingecko_id: "polkadot",
     },
     CryptoAsset {
         name: "Polygon",
-        keywords: &["polygon", "pol", "matic"],
+        keywords: &["polygon", "matic"],
         binance_symbol: "POLUSDT",
         coingecko_id: "polygon-ecosystem-token",
     },
@@ -94,6 +94,16 @@ pub static CRYPTO_ASSETS: &[CryptoAsset] = &[
 /// Find a matching crypto asset from question text.
 pub fn find_asset(question: &str) -> Option<&'static CryptoAsset> {
     let lower = question.to_lowercase();
+
+    // Exclude non-price markets that happen to contain crypto asset names
+    if lower.contains("gas price") || lower.contains("gas fee")
+        || lower.contains("volatility index")
+        || lower.contains("dominance")
+        || lower.contains("kimchi premium")
+    {
+        return None;
+    }
+
     CRYPTO_ASSETS
         .iter()
         .find(|asset| asset.keywords.iter().any(|kw| contains_word(&lower, kw)))
@@ -196,7 +206,7 @@ pub fn parse_crypto_question(question: &str) -> Option<CryptoQuestion> {
         || contains_word(&lower, "reach")
         || contains_word(&lower, "hit")
         || contains_word(&lower, "exceed")
-        || contains_word(&lower, "trade");
+        || contains_word(&lower, "dip");
 
     if !has_price_indicator {
         return None;
@@ -241,8 +251,8 @@ pub fn parse_crypto_event_title(title: &str) -> Option<(&'static CryptoAsset, Op
         || lower.contains('$')
         || lower.contains("value")
         || contains_word(&lower, "worth")
-        || contains_word(&lower, "trade")
-        || contains_word(&lower, "be");
+        || contains_word(&lower, "hit")
+        || contains_word(&lower, "dip");
     if !has_price_indicator {
         return None;
     }
@@ -621,6 +631,8 @@ pub struct CryptoAlphaStrategy {
     binary_event_groups: Vec<BinaryEventGroup>,
     /// Scan counter for periodic diagnostics (every ~600 scans ≈ 1 min at 100ms interval).
     scan_count: Arc<std::sync::atomic::AtomicU64>,
+    /// Best near-miss edge (bps) seen since last diagnostic — shows how close to threshold.
+    near_miss_edge_bps: std::sync::atomic::AtomicU32,
 }
 
 impl CryptoAlphaStrategy {
@@ -649,6 +661,7 @@ impl CryptoAlphaStrategy {
             neg_risk_events,
             binary_event_groups,
             scan_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            near_miss_edge_bps: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -769,6 +782,18 @@ impl CryptoAlphaStrategy {
             (edge * dec!(10000)).to_u32().unwrap_or(0)
         };
         if edge_bps < self.config.min_edge_bps {
+            self.near_miss_edge_bps
+                .fetch_max(edge_bps, std::sync::atomic::Ordering::Relaxed);
+            tracing::debug!(
+                question = %market.question,
+                asset = question.asset.name,
+                current_price = price_data.current_price,
+                model_prob = %prob_for_sizing,
+                ask = %ask_price,
+                edge_bps,
+                min_edge_bps = self.config.min_edge_bps,
+                "[CryptoAlpha] near-miss: edge below threshold"
+            );
             return None;
         }
 
@@ -927,6 +952,17 @@ impl CryptoAlphaStrategy {
             (edge * dec!(10000)).to_u32().unwrap_or(0)
         };
         if edge_bps < self.config.min_edge_bps {
+            self.near_miss_edge_bps
+                .fetch_max(edge_bps, std::sync::atomic::Ordering::Relaxed);
+            tracing::debug!(
+                event_title = %event.title,
+                asset = asset.name,
+                model_prob = %effective_prob,
+                ask = %ask_price,
+                edge_bps,
+                min_edge_bps = self.config.min_edge_bps,
+                "[CryptoAlpha] NegRisk near-miss: edge below threshold"
+            );
             return None;
         }
 
@@ -1130,6 +1166,17 @@ impl CryptoAlphaStrategy {
 
         // Check minimum edge threshold
         if edge_bps < self.config.min_edge_bps {
+            self.near_miss_edge_bps
+                .fetch_max(edge_bps, std::sync::atomic::Ordering::Relaxed);
+            tracing::debug!(
+                group_title = %group.title,
+                question = %market.question,
+                model_prob = %effective_prob,
+                ask = %ask_price,
+                edge_bps,
+                min_edge_bps = self.config.min_edge_bps,
+                "[CryptoAlpha] group near-miss: edge below threshold"
+            );
             return None;
         }
 
@@ -1290,6 +1337,9 @@ impl Strategy for CryptoAlphaStrategy {
         }
 
         if log_diag {
+            let best_near_miss = self
+                .near_miss_edge_bps
+                .swap(0, std::sync::atomic::Ordering::Relaxed);
             tracing::info!(
                 binary_groups = self.binary_event_groups.len(),
                 binary_group_crypto,
@@ -1299,6 +1349,8 @@ impl Strategy for CryptoAlphaStrategy {
                 neg_risk_expired,
                 neg_risk_no_date,
                 opportunities = opportunities.len(),
+                best_near_miss_bps = best_near_miss,
+                min_edge_bps = self.config.min_edge_bps,
                 "[CryptoAlpha] scan diagnostics"
             );
             // Log sample binary event group titles
@@ -1471,7 +1523,7 @@ mod tests {
     #[test]
     fn test_parse_crypto_event_title_eth() {
         let (asset, _date) =
-            parse_crypto_event_title("What will ETH be on February 28?").unwrap();
+            parse_crypto_event_title("Ethereum price on February 28?").unwrap();
         assert_eq!(asset.name, "Ethereum");
     }
 
