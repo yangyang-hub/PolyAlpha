@@ -185,6 +185,13 @@ pub struct ConvergenceConfig {
     /// Confidence boost: higher model probability for markets closer to resolution.
     #[serde(default = "default_time_decay_boost")]
     pub time_decay_boost: bool,
+    /// Time-decay rate: how much to discount from perfect certainty at max_days.
+    /// model_prob = 1.0 - time_decay_rate * (days_remaining / max_days)
+    /// Higher values = less confident at max_days, lower values = more aggressive.
+    /// Break-even analysis: for price P, fee ≈ 2%×P, so need edge > 200 bps.
+    /// Default 0.03 gives max 300 bps edge at max_days (97% confidence).
+    #[serde(default = "default_time_decay_rate")]
+    pub time_decay_rate: f64,
 }
 
 fn default_min_price_threshold() -> Decimal { Decimal::new(93, 2) }
@@ -192,6 +199,7 @@ fn default_max_days_to_resolution() -> u32 { 7 }
 fn default_conv_max_position() -> Decimal { Decimal::from(100) }
 fn default_conv_kelly() -> Decimal { Decimal::new(25, 2) }
 fn default_time_decay_boost() -> bool { true }
+fn default_time_decay_rate() -> f64 { 0.03 }
 
 impl Default for ConvergenceConfig {
     fn default() -> Self {
@@ -201,6 +209,7 @@ impl Default for ConvergenceConfig {
             max_position_usdc: default_conv_max_position(),
             kelly_fraction: default_conv_kelly(),
             time_decay_boost: default_time_decay_boost(),
+            time_decay_rate: default_time_decay_rate(),
         }
     }
 }

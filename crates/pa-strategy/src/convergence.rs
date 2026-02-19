@@ -103,8 +103,8 @@ impl ResolutionConvergenceStrategy {
         let max_days = self.config.max_days_to_resolution as f64;
         let model_prob_f64 = if self.config.time_decay_boost {
             // Closer to resolution → higher confidence
-            // Range: ~0.97 (at max_days) to ~0.999 (at 0 days)
-            1.0 - (days_remaining / max_days) * 0.03
+            // Range: (1-rate) at max_days to ~1.0 at 0 days
+            1.0 - (days_remaining / max_days) * self.config.time_decay_rate
         } else {
             0.99
         };
@@ -202,6 +202,9 @@ impl Strategy for ResolutionConvergenceStrategy {
         let mut above_threshold = 0u32;
         let mut best_edge_bps: i32 = 0;
         let mut best_edge_market: Option<String> = None;
+        // Fee-adjusted profitability tracking
+        let mut best_net_edge_bps: i32 = i32::MIN;
+        let mut best_net_edge_info: Option<String> = None;
 
         for market in markets {
             if !market.active || market.neg_risk {
@@ -236,7 +239,7 @@ impl Strategy for ResolutionConvergenceStrategy {
                                 }
                                 // Track best edge even for markets below threshold
                                 let model_prob_f64 = if self.config.time_decay_boost {
-                                    1.0 - (days / max_days) * 0.03
+                                    1.0 - (days / max_days) * self.config.time_decay_rate
                                 } else {
                                     0.99
                                 };
@@ -248,6 +251,19 @@ impl Strategy for ResolutionConvergenceStrategy {
                                         best_edge_bps = ebps;
                                         best_edge_market =
                                             Some(market.question.chars().take(50).collect());
+                                    }
+                                    // Fee-adjusted net edge: edge - fee
+                                    let fee = self.profit_calc.capped_fee(ask, market.fee_rate_bps);
+                                    let net_edge = edge - fee;
+                                    let net_ebps = (net_edge * dec!(10000)).to_i32().unwrap_or(0);
+                                    if net_ebps > best_net_edge_bps {
+                                        best_net_edge_bps = net_ebps;
+                                        let fee_bps = (fee * dec!(10000)).to_i32().unwrap_or(0);
+                                        best_net_edge_info = Some(format!(
+                                            "{} (ask:{}, edge:{}bps, fee:{}bps, net:{}bps, days:{:.0})",
+                                            &market.question[..market.question.len().min(40)],
+                                            ask, ebps, fee_bps, net_ebps, days,
+                                        ));
                                     }
                                 }
                             }
@@ -268,11 +284,16 @@ impl Strategy for ResolutionConvergenceStrategy {
                 above_threshold,
                 best_edge_bps,
                 best_edge_market = best_edge_market.as_deref().unwrap_or("none"),
+                best_net_edge_bps,
                 min_price_threshold = %self.config.min_price_threshold,
                 max_days = self.config.max_days_to_resolution,
+                time_decay_rate = self.config.time_decay_rate,
                 opportunities = opportunities.len(),
                 "[Convergence] scan diagnostics"
             );
+            if let Some(ref info) = best_net_edge_info {
+                tracing::info!(info = %info, "[Convergence] best net-edge opportunity");
+            }
         }
 
         Ok(opportunities)
@@ -298,6 +319,7 @@ mod tests {
             max_position_usdc: dec!(100),
             kelly_fraction: dec!(0.25),
             time_decay_boost: true,
+            time_decay_rate: 0.03,
         }
     }
 
@@ -472,11 +494,12 @@ mod tests {
         // 1 day remaining → higher model_prob than 7 days
         let config = default_config();
         let max_days = config.max_days_to_resolution as f64;
+        let rate = config.time_decay_rate;
 
         let days_1 = 1.0_f64;
         let days_7 = 7.0_f64;
-        let prob_1 = 1.0 - (days_1 / max_days) * 0.03;
-        let prob_7 = 1.0 - (days_7 / max_days) * 0.03;
+        let prob_1 = 1.0 - (days_1 / max_days) * rate;
+        let prob_7 = 1.0 - (days_7 / max_days) * rate;
 
         assert!(
             prob_1 > prob_7,

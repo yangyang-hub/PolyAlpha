@@ -95,7 +95,7 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 
 `ForecastErrorConfig` — 每指标预报误差σ: `temperature_sigma_f(3.0°F)`, `precipitation_sigma_in(0.3in)`, `snowfall_sigma_in(2.0in)`, `wind_sigma_mph(5.0mph)`
 
-`ConvergenceConfig` fields: `min_price_threshold(0.93)`, `max_days_to_resolution(7)`, `max_position_usdc(100)`, `kelly_fraction(0.25)`, `time_decay_boost(true)`
+`ConvergenceConfig` fields: `min_price_threshold(0.93)`, `max_days_to_resolution(7)`, `max_position_usdc(100)`, `kelly_fraction(0.25)`, `time_decay_boost(true)`, `time_decay_rate(0.03)`
 
 `CryptoAlphaConfig` fields: `min_edge_bps(500)`, `max_position_usdc(100)`, `kelly_fraction(0.25)`, `refresh_interval_secs(300)`, `coingecko_api_key("")`
 
