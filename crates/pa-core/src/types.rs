@@ -52,6 +52,12 @@ pub struct MarketInfo {
     /// Used for smart WS subscription ordering (filter extreme prices, prioritize mid-range).
     #[serde(default)]
     pub outcome_prices: Option<Vec<Decimal>>,
+    /// Best bid price from Gamma API (CLOB top-of-book at discovery time, YES side).
+    #[serde(default)]
+    pub gamma_best_bid: Option<Decimal>,
+    /// Best ask price from Gamma API (CLOB top-of-book at discovery time, YES side).
+    #[serde(default)]
+    pub gamma_best_ask: Option<Decimal>,
 }
 
 /// A NegRisk event containing multiple outcome markets.

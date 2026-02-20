@@ -258,6 +258,8 @@ impl GammaFeed {
             end_date: market.end_date,
             category: market.category.clone(),
             outcome_prices: market.outcome_prices.clone(),
+            gamma_best_bid: market.best_bid,
+            gamma_best_ask: market.best_ask,
         })
     }
 
@@ -407,6 +409,8 @@ mod tests {
             end_date: None,
             category: None,
             outcome_prices: None,
+            gamma_best_bid: None,
+            gamma_best_ask: None,
         }
     }
 

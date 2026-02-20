@@ -353,6 +353,8 @@ mod tests {
             end_date,
             category: None,
             outcome_prices: None,
+            gamma_best_bid: None,
+            gamma_best_ask: None,
         }
     }
 

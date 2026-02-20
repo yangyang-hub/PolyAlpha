@@ -1725,6 +1725,8 @@ mod tests {
             end_date: None,
             category: Some("crypto".into()),
             outcome_prices: None,
+            gamma_best_bid: None,
+            gamma_best_ask: None,
         };
         let market2 = MarketInfo {
             question: "Will Bitcoin reach $150,000?".into(),

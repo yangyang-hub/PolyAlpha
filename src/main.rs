@@ -138,6 +138,85 @@ async fn main() -> Result<()> {
     // Update metrics
     pa_monitor::metrics::MONITORED_MARKETS.set(markets.len() as f64);
 
+    // --- Seed OrderBookCache with gamma best_bid/best_ask ---
+    // Directional strategies (crypto, weather, convergence) need order book prices to
+    // detect edges. The WS subscription can only hold 500 instruments (~250 markets),
+    // but we discover 500+ markets. By seeding the cache with gamma API best_bid/best_ask,
+    // ALL markets have baseline price data for strategy evaluation.
+    // WS updates will overwrite these with real-time data for subscribed markets.
+    {
+        let seed_cache = market_data.cache().clone();
+        let mut seeded_bid_ask = 0u32;
+        let mut seeded_outcome = 0u32;
+        let mut no_price_data = 0u32;
+
+        for m in &markets {
+            if m.tokens.len() < 2 {
+                continue;
+            }
+
+            // Prefer gamma best_bid/best_ask (actual CLOB top-of-book) over outcome_prices (last trade)
+            let (yes_bid, yes_ask) = if let (Some(bid), Some(ask)) = (m.gamma_best_bid, m.gamma_best_ask) {
+                if ask > Decimal::ZERO && ask <= Decimal::ONE && bid > Decimal::ZERO {
+                    seeded_bid_ask += 1;
+                    (bid, ask)
+                } else {
+                    // Invalid bid/ask, try outcome_prices
+                    match m.outcome_prices.as_ref().and_then(|p| p.first().copied()) {
+                        Some(yp) if yp > Decimal::ZERO && yp < Decimal::ONE => {
+                            seeded_outcome += 1;
+                            ((yp - dec!(0.01)).max(dec!(0.01)), yp)
+                        }
+                        _ => { no_price_data += 1; continue; }
+                    }
+                }
+            } else {
+                // No bid/ask from gamma, try outcome_prices as fallback
+                match m.outcome_prices.as_ref().and_then(|p| p.first().copied()) {
+                    Some(yp) if yp > Decimal::ZERO && yp < Decimal::ONE => {
+                        seeded_outcome += 1;
+                        ((yp - dec!(0.01)).max(dec!(0.01)), yp)
+                    }
+                    _ => { no_price_data += 1; continue; }
+                }
+            };
+
+            // Compute NO side prices (approximate: NO ≈ 1 - YES)
+            let no_ask = (Decimal::ONE - yes_bid).min(dec!(0.99));
+            let no_bid = (Decimal::ONE - yes_ask).max(dec!(0.01));
+
+            // Seed YES token order book
+            seed_cache.update(
+                m.tokens[0].token_id,
+                pa_core::types::OrderBook {
+                    token_id: m.tokens[0].token_id,
+                    bids: vec![pa_core::types::PriceLevel { price: yes_bid, size: dec!(1000) }],
+                    asks: vec![pa_core::types::PriceLevel { price: yes_ask, size: dec!(1000) }],
+                    timestamp: Utc::now(),
+                },
+            );
+
+            // Seed NO token order book
+            seed_cache.update(
+                m.tokens[1].token_id,
+                pa_core::types::OrderBook {
+                    token_id: m.tokens[1].token_id,
+                    bids: vec![pa_core::types::PriceLevel { price: no_bid, size: dec!(1000) }],
+                    asks: vec![pa_core::types::PriceLevel { price: no_ask, size: dec!(1000) }],
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+
+        tracing::info!(
+            seeded_bid_ask,
+            seeded_outcome,
+            no_price_data,
+            total = seeded_bid_ask + seeded_outcome,
+            "OrderBookCache seeded with gamma prices"
+        );
+    }
+
     // --- Subscribe to WebSocket order book updates ---
     // Smart ordering: filter extreme prices for ALL markets, then prioritize by strategy relevance + mid-ness.
     let ws_max = settings.market_filter.ws_max_instruments;
@@ -152,9 +231,14 @@ async fn main() -> Result<()> {
             continue;
         }
 
-        let yes_price = m.outcome_prices.as_ref()
-            .and_then(|p| p.first().copied())
-            .and_then(|p| p.to_f64());
+        // Use gamma_best_ask (actual CLOB state) for filtering, fallback to outcome_prices
+        let yes_price = m.gamma_best_ask
+            .and_then(|p| p.to_f64())
+            .or_else(|| {
+                m.outcome_prices.as_ref()
+                    .and_then(|p| p.first().copied())
+                    .and_then(|p| p.to_f64())
+            });
 
         // Filter extreme prices for ALL markets (including strategy-relevant)
         // Markets with YES < 0.05 or > 0.95 have extreme order books (0.001/0.999)
@@ -244,6 +328,10 @@ async fn main() -> Result<()> {
                     let mut recorded = 0u64;
                     for token_id in &token_ids {
                         if let Some(book) = snapshot_cache.get(token_id) {
+                            // Skip gamma-seeded synthetic books (size=1000 marker)
+                            if book.asks.first().map(|a| a.size) == Some(dec!(1000)) {
+                                continue;
+                            }
                             let bids_json = price_levels_to_json(&book.bids);
                             let asks_json = price_levels_to_json(&book.asks);
                             let row = OrderBookSnapshotRow {
@@ -353,14 +441,21 @@ async fn main() -> Result<()> {
                                     .and_then(|p| p.first())
                                     .map(|p| p.to_string())
                                     .unwrap_or("-".into());
+                                let gamma_ask = market.gamma_best_ask
+                                    .map(|p| p.to_string())
+                                    .unwrap_or("-".into());
+                                // Detect if book is gamma-seeded (size=1000) vs WS-sourced
+                                let source = if yes_ask.size == dec!(1000) { "gamma" } else { "ws" };
                                 sample_prices.push(format!(
-                                    "{}.. Y:{}/{} N:{}/{} fee:{}bps gamma_yes:{}",
+                                    "{}.. Y:{}/{} N:{}/{} fee:{}bps src:{} gamma_ask:{} outcome:{}",
                                     q,
                                     yes_book.best_bid().map(|b| b.price.to_string()).unwrap_or("-".into()),
                                     yes_ask.price,
                                     no_book.best_bid().map(|b| b.price.to_string()).unwrap_or("-".into()),
                                     no_ask.price,
                                     market.fee_rate_bps,
+                                    source,
+                                    gamma_ask,
                                     gamma_yes,
                                 ));
                             }

@@ -108,6 +108,8 @@ impl DataLoader {
                 end_date: None,
                 category: None,
                 outcome_prices: None,
+                gamma_best_bid: None,
+                gamma_best_ask: None,
             });
         }
 
