@@ -1,6 +1,7 @@
 use alloy::primitives::U256;
 use alloy::signers::local::PrivateKeySigner;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::Normal;
@@ -59,6 +60,52 @@ impl ClobExecutor {
         Ok(Self { client, signer })
     }
 
+    /// Adjust order size so that `price * size` (USDC cost) has at most 2 decimal places.
+    ///
+    /// The Polymarket CLOB API requires maker_amount (USDC) to have max 2dp precision.
+    /// Without this, orders like price=0.984 * size=22.67 = 22.30728 (5dp) get rejected.
+    ///
+    /// Uses GCD-based arithmetic to find the largest valid size ≤ the input.
+    /// For price = N / 10^scale, we need `N * S / 10^scale` to be integer (where S = size * 100).
+    /// This requires S to be a multiple of `10^scale / gcd(N, 10^scale)`.
+    fn adjust_size_for_cost_precision(price: Decimal, size: Decimal) -> Decimal {
+        let cost = price * size;
+        if cost == cost.round_dp(2) {
+            return size;
+        }
+
+        // Express price = numer / denom where denom = 10^scale
+        let scale = price.scale();
+        let denom = 10u64.pow(scale);
+        let numer = (price * Decimal::from(denom))
+            .round()
+            .to_u64()
+            .unwrap_or(1);
+
+        if numer == 0 {
+            return size;
+        }
+
+        // For cost to have ≤ 2dp with size having 2dp (size = S/100):
+        //   cost * 100 = numer * S / denom must be integer
+        //   → S must be a multiple of denom / gcd(numer, denom)
+        let g = gcd(numer, denom);
+        let s_step = denom / g;
+
+        // Round S down to nearest multiple of s_step
+        let s_val = (size * Decimal::from(100u64))
+            .round()
+            .to_u64()
+            .unwrap_or(0);
+
+        if s_step == 0 || s_val < s_step {
+            return Decimal::ZERO;
+        }
+
+        let s_rounded = (s_val / s_step) * s_step;
+        Decimal::new(s_rounded as i64, 2)
+    }
+
     /// Place a FOK (Fill-Or-Kill) buy order for a given token.
     ///
     /// Builds a limit order via the SDK's order builder, signs it, and posts it.
@@ -72,6 +119,8 @@ impl ClobExecutor {
     ) -> anyhow::Result<OrderResult> {
         // Round size to 2 decimal places (Polymarket CLOB lot size constraint)
         let size = size.round_dp(2);
+        // Ensure price * size (USDC cost) has at most 2 decimal places
+        let size = Self::adjust_size_for_cost_precision(price, size);
         if size <= Decimal::ZERO {
             anyhow::bail!("Order size too small after rounding to lot size");
         }
@@ -116,6 +165,7 @@ impl ClobExecutor {
     ) -> anyhow::Result<OrderResult> {
         // Round size to 2 decimal places (Polymarket CLOB lot size constraint)
         let size = size.round_dp(2);
+        let size = Self::adjust_size_for_cost_precision(price, size);
         if size <= Decimal::ZERO {
             anyhow::bail!("Order size too small after rounding to lot size");
         }
@@ -161,6 +211,7 @@ impl ClobExecutor {
     ) -> anyhow::Result<OrderResult> {
         // Round size to 2 decimal places (Polymarket CLOB lot size constraint)
         let size = size.round_dp(2);
+        let size = Self::adjust_size_for_cost_precision(price, size);
         if size <= Decimal::ZERO {
             anyhow::bail!("Order size too small after rounding to lot size");
         }
@@ -198,6 +249,7 @@ impl ClobExecutor {
     ) -> anyhow::Result<OrderResult> {
         // Round size to 2 decimal places (Polymarket CLOB lot size constraint)
         let size = size.round_dp(2);
+        let size = Self::adjust_size_for_cost_precision(price, size);
         if size <= Decimal::ZERO {
             anyhow::bail!("Order size too small after rounding to lot size");
         }
@@ -344,4 +396,105 @@ pub enum OrderFillStatus {
     PartialFill,
     NoFill,
     Rejected,
+}
+
+/// Greatest common divisor (Euclidean algorithm).
+fn gcd(a: u64, b: u64) -> u64 {
+    let (mut a, mut b) = (a, b);
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    /// Verify that `price * adjusted_size` has at most 2 decimal places.
+    fn assert_valid_cost(price: Decimal, original_size: Decimal) {
+        let adjusted = ClobExecutor::adjust_size_for_cost_precision(price, original_size);
+        let cost = price * adjusted;
+        assert_eq!(
+            cost,
+            cost.round_dp(2),
+            "price={} size={} adjusted={} cost={} has >2dp",
+            price,
+            original_size,
+            adjusted,
+            cost,
+        );
+        assert!(
+            adjusted <= original_size,
+            "adjusted {} > original {}",
+            adjusted,
+            original_size,
+        );
+        assert!(
+            adjusted > Decimal::ZERO || original_size <= Decimal::ZERO,
+            "adjusted is zero for non-trivial original_size={}",
+            original_size,
+        );
+    }
+
+    #[test]
+    fn test_cost_precision_already_valid() {
+        // 0.50 * 22.66 = 11.33 (exactly 2dp)
+        let result = ClobExecutor::adjust_size_for_cost_precision(dec!(0.50), dec!(22.66));
+        assert_eq!(result, dec!(22.66));
+    }
+
+    #[test]
+    fn test_cost_precision_3dp_price() {
+        // price=0.984 (3dp), size=22.67 → cost=22.30728 (5dp)
+        // Expected: step_s = 1000/gcd(984,1000) = 1000/8 = 125
+        // s_val=2267, rounded=2250 → size=22.50
+        // check: 0.984 * 22.50 = 22.14 (2dp) ✓
+        assert_valid_cost(dec!(0.984), dec!(22.67));
+        let result = ClobExecutor::adjust_size_for_cost_precision(dec!(0.984), dec!(22.67));
+        assert_eq!(result, dec!(22.50));
+    }
+
+    #[test]
+    fn test_cost_precision_2dp_prices() {
+        // Common convergence prices
+        assert_valid_cost(dec!(0.95), dec!(20.00));
+        assert_valid_cost(dec!(0.95), dec!(22.67));
+        assert_valid_cost(dec!(0.97), dec!(22.67));
+        assert_valid_cost(dec!(0.98), dec!(22.67));
+        assert_valid_cost(dec!(0.99), dec!(22.67));
+        assert_valid_cost(dec!(0.80), dec!(50.00));
+        assert_valid_cost(dec!(0.01), dec!(100.00));
+    }
+
+    #[test]
+    fn test_cost_precision_extreme_prices() {
+        assert_valid_cost(dec!(0.50), dec!(10.00));
+        assert_valid_cost(dec!(0.25), dec!(10.00));
+        assert_valid_cost(dec!(0.10), dec!(10.00));
+        assert_valid_cost(dec!(0.01), dec!(10.00));
+        assert_valid_cost(dec!(0.99), dec!(10.00));
+    }
+
+    #[test]
+    fn test_cost_precision_various_3dp() {
+        assert_valid_cost(dec!(0.123), dec!(50.00));
+        assert_valid_cost(dec!(0.456), dec!(33.33));
+        assert_valid_cost(dec!(0.789), dec!(12.34));
+        assert_valid_cost(dec!(0.001), dec!(100.00));
+        assert_valid_cost(dec!(0.999), dec!(100.00));
+    }
+
+    #[test]
+    fn test_gcd() {
+        assert_eq!(gcd(984, 1000), 8);
+        assert_eq!(gcd(50, 100), 50);
+        assert_eq!(gcd(97, 100), 1);
+        assert_eq!(gcd(0, 100), 100);
+        assert_eq!(gcd(100, 0), 100);
+        assert_eq!(gcd(12, 18), 6);
+    }
 }
