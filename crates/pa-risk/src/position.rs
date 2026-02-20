@@ -5,6 +5,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use pa_core::types::StrategyType;
 
+/// Loaded position entry: (token_id, size, avg_cost, strategy_type, condition_id).
+pub type LoadedPosition = (U256, Decimal, Decimal, Option<StrategyType>, Option<B256>);
+
 /// Tracks current token positions across all markets.
 #[derive(Debug, Clone)]
 pub struct PositionTracker {
@@ -116,17 +119,18 @@ impl PositionTracker {
     pub fn market_count_by_strategy(&self, st: StrategyType) -> usize {
         let mut markets: HashSet<B256> = HashSet::new();
         for entry in self.positions.iter() {
-            if entry.value().strategy_type == Some(st) && entry.value().size > Decimal::ZERO {
-                if let Some(cid) = entry.value().condition_id {
-                    markets.insert(cid);
-                }
+            if entry.value().strategy_type == Some(st)
+                && entry.value().size > Decimal::ZERO
+                && let Some(cid) = entry.value().condition_id
+            {
+                markets.insert(cid);
             }
         }
         markets.len()
     }
 
     /// Bulk-load positions from external data (e.g. DB) at startup.
-    pub fn load_initial(&self, entries: Vec<(U256, Decimal, Decimal, Option<StrategyType>, Option<B256>)>) {
+    pub fn load_initial(&self, entries: Vec<LoadedPosition>) {
         for (token_id, size, avg_cost, strategy_type, condition_id) in entries {
             if size > Decimal::ZERO {
                 self.positions.insert(token_id, PositionEntry { size, avg_cost, strategy_type, condition_id });

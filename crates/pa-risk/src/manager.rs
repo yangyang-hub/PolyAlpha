@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use alloy::primitives::{B256, U256};
+use alloy::primitives::U256;
 use rust_decimal::Decimal;
 use pa_core::config::RiskConfig;
 use pa_core::traits::RiskManager;
@@ -37,7 +37,7 @@ impl RiskManagerImpl {
     }
 
     /// Load initial positions from external data (DB rows).
-    pub fn load_initial_positions(&self, entries: Vec<(U256, Decimal, Decimal, Option<StrategyType>, Option<B256>)>) {
+    pub fn load_initial_positions(&self, entries: Vec<crate::position::LoadedPosition>) {
         self.positions.load_initial(entries);
     }
 
@@ -114,6 +114,7 @@ impl RiskManager for RiskManagerImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::primitives::B256;
     use chrono::Utc;
     use rust_decimal_macros::dec;
     use uuid::Uuid;

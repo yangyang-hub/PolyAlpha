@@ -72,9 +72,10 @@ CREATE INDEX IF NOT EXISTS idx_trades_opp ON trades(opportunity_id);
 -- Positions
 CREATE TABLE IF NOT EXISTS positions (
     token_id        TEXT PRIMARY KEY,
-    condition_id    BYTEA REFERENCES markets(condition_id),
+    condition_id    BYTEA,
     size            DECIMAL NOT NULL DEFAULT 0,
     avg_cost        DECIMAL NOT NULL DEFAULT 0,
+    strategy_type   TEXT,
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 
