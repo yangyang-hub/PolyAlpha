@@ -126,7 +126,7 @@ impl GammaFeed {
 
     /// Check if a market question is relevant to active strategies.
     /// These markets are always included regardless of liquidity ranking.
-    fn is_strategy_relevant(question: &str) -> bool {
+    pub fn is_strategy_relevant(question: &str) -> bool {
         let lower = question.to_lowercase();
 
         // Weather: only strong unambiguous keywords
@@ -257,6 +257,7 @@ impl GammaFeed {
             event_title,
             end_date: market.end_date,
             category: market.category.clone(),
+            outcome_prices: market.outcome_prices.clone(),
         })
     }
 
@@ -405,6 +406,7 @@ mod tests {
             event_title: event_title.map(String::from),
             end_date: None,
             category: None,
+            outcome_prices: None,
         }
     }
 

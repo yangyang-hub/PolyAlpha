@@ -1724,6 +1724,7 @@ mod tests {
             event_title: Some("What price will Bitcoin hit in 2026?".into()),
             end_date: None,
             category: Some("crypto".into()),
+            outcome_prices: None,
         };
         let market2 = MarketInfo {
             question: "Will Bitcoin reach $150,000?".into(),

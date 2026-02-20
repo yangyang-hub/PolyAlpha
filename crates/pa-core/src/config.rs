@@ -20,6 +20,8 @@ pub struct Settings {
     pub crypto_alpha: CryptoAlphaConfig,
     #[serde(default)]
     pub event_calendar: EventCalendarConfig,
+    #[serde(default)]
+    pub market_making: MarketMakingConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -327,6 +329,51 @@ pub struct StaticEventConfig {
     pub impact: String,
     #[serde(default)]
     pub keywords: Vec<String>,
+}
+
+/// Configuration for the Market Making background task.
+///
+/// Places GTC limit orders on both sides of the book to earn the bid-ask spread.
+/// Runs as a background task separate from the strategy engine.
+#[derive(Debug, Deserialize, Clone)]
+pub struct MarketMakingConfig {
+    /// Whether market making is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Target half-spread in basis points. Orders placed at midpoint +/- half_spread.
+    #[serde(default = "default_mm_target_spread")]
+    pub target_spread_bps: u32,
+    /// Maximum position per market in USDC.
+    #[serde(default = "default_mm_max_position")]
+    pub max_position_per_market: Decimal,
+    /// Maximum number of markets to make simultaneously.
+    #[serde(default = "default_mm_max_markets")]
+    pub max_markets: usize,
+    /// How often to refresh quotes (seconds).
+    #[serde(default = "default_mm_refresh")]
+    pub quote_refresh_secs: u64,
+    /// Inventory skew factor (0.0-1.0). Widens spread on heavy side.
+    #[serde(default = "default_mm_skew")]
+    pub inventory_skew_factor: Decimal,
+}
+
+fn default_mm_target_spread() -> u32 { 300 }
+fn default_mm_max_position() -> Decimal { Decimal::from(50) }
+fn default_mm_max_markets() -> usize { 5 }
+fn default_mm_refresh() -> u64 { 30 }
+fn default_mm_skew() -> Decimal { Decimal::new(50, 2) } // 0.50
+
+impl Default for MarketMakingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target_spread_bps: default_mm_target_spread(),
+            max_position_per_market: default_mm_max_position(),
+            max_markets: default_mm_max_markets(),
+            quote_refresh_secs: default_mm_refresh(),
+            inventory_skew_factor: default_mm_skew(),
+        }
+    }
 }
 
 impl Settings {

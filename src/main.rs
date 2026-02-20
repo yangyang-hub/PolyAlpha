@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -138,30 +139,78 @@ async fn main() -> Result<()> {
     pa_monitor::metrics::MONITORED_MARKETS.set(markets.len() as f64);
 
     // --- Subscribe to WebSocket order book updates ---
-    // Binary markets first: the observer & YesNo strategy need BOTH YES+NO books.
-    // NegRisk markets dominate high-liquidity slots; without reordering, all binary
-    // tokens get truncated when ws_max_instruments=500.
-    let binary_token_ids: Vec<_> = markets
-        .iter()
-        .filter(|m| !m.neg_risk)
-        .flat_map(|m| m.tokens.iter().map(|t| t.token_id))
-        .collect();
+    // Smart ordering: strategy-relevant first, then filter extreme prices, sort by mid-ness.
+    let ws_max = settings.market_filter.ws_max_instruments;
+
+    let mut strategy_tokens: Vec<alloy::primitives::U256> = Vec::new();
+    let mut mid_range_markets: Vec<(alloy::primitives::U256, alloy::primitives::U256, f64)> = Vec::new(); // (yes_tid, no_tid, distance_from_mid)
+    let mut extreme_filtered = 0u32;
+
+    for m in &markets {
+        if m.neg_risk || m.tokens.len() != 2 || !m.active {
+            continue;
+        }
+
+        // Strategy-relevant markets: always include
+        if GammaFeed::is_strategy_relevant(&m.question) {
+            strategy_tokens.push(m.tokens[0].token_id);
+            strategy_tokens.push(m.tokens[1].token_id);
+            continue;
+        }
+
+        // Use Gamma outcome_prices to filter extreme markets
+        let yes_price = m.outcome_prices.as_ref()
+            .and_then(|p| p.first().copied())
+            .and_then(|p| p.to_f64());
+
+        if let Some(yp) = yes_price {
+            // Filter extreme: YES price < 0.05 or > 0.95
+            if yp < 0.05 || yp > 0.95 {
+                extreme_filtered += 1;
+                continue;
+            }
+            // Sort by distance from 0.50 (closer = higher priority)
+            let dist = (yp - 0.50_f64).abs();
+            mid_range_markets.push((m.tokens[0].token_id, m.tokens[1].token_id, dist));
+        } else {
+            // No price data: include with worst priority
+            mid_range_markets.push((m.tokens[0].token_id, m.tokens[1].token_id, 1.0));
+        }
+    }
+
+    // Sort by mid-ness (closest to 0.50 first)
+    mid_range_markets.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut token_ids: Vec<alloy::primitives::U256> = strategy_tokens.clone();
+    for (yes_tid, no_tid, _) in &mid_range_markets {
+        token_ids.push(*yes_tid);
+        token_ids.push(*no_tid);
+    }
+
+    // Append NegRisk tokens after binary
     let neg_risk_token_ids: Vec<_> = markets
         .iter()
         .filter(|m| m.neg_risk)
         .flat_map(|m| m.tokens.iter().map(|t| t.token_id))
         .collect();
-    let mut token_ids = binary_token_ids.clone();
     for tid in &neg_risk_token_ids {
         if !token_ids.contains(tid) {
             token_ids.push(*tid);
         }
     }
+
+    // Truncate to WS limit
+    let total_before_trunc = token_ids.len();
+    token_ids.truncate(ws_max);
+
     tracing::info!(
         tokens = token_ids.len(),
-        binary = binary_token_ids.len(),
+        strategy_priority = strategy_tokens.len(),
+        mid_range_binary = mid_range_markets.len() * 2,
         neg_risk = neg_risk_token_ids.len(),
-        "Subscribing to order book updates (binary-first ordering)"
+        extreme_filtered,
+        truncated = total_before_trunc.saturating_sub(ws_max),
+        "Subscribing to order book updates (smart ordering)"
     );
     market_data.subscribe(&token_ids).await?;
     pa_monitor::metrics::ACTIVE_SUBSCRIPTIONS.set(token_ids.len() as f64);
@@ -288,14 +337,19 @@ async fn main() -> Result<()> {
                             // Sample first 5 markets for price diagnostics
                             if sample_prices.len() < 5 {
                                 let q = &market.question[..market.question.len().min(30)];
+                                let gamma_yes = market.outcome_prices.as_ref()
+                                    .and_then(|p| p.first())
+                                    .map(|p| p.to_string())
+                                    .unwrap_or("-".into());
                                 sample_prices.push(format!(
-                                    "{}.. Y:{}/{} N:{}/{} fee:{}bps",
+                                    "{}.. Y:{}/{} N:{}/{} fee:{}bps gamma_yes:{}",
                                     q,
                                     yes_book.best_bid().map(|b| b.price.to_string()).unwrap_or("-".into()),
                                     yes_ask.price,
                                     no_book.best_bid().map(|b| b.price.to_string()).unwrap_or("-".into()),
                                     no_ask.price,
                                     market.fee_rate_bps,
+                                    gamma_yes,
                                 ));
                             }
 
@@ -644,10 +698,222 @@ async fn main() -> Result<()> {
     );
 
     // --- Run trading loop with graceful shutdown ---
+    let all_markets_for_mm = markets.clone(); // clone before markets is moved into engine
     let engine_cancel = cancel.clone();
     let engine_handle = tokio::spawn(async move {
         engine.run(&markets, update_rx, engine_cancel).await;
     });
+
+    // --- Market Making background task ---
+    if settings.market_making.enabled && trading_enabled {
+        let mm_config = settings.market_making.clone();
+        let mm_cache = market_data.cache().clone();
+        let mm_cancel = cancel.clone();
+        let mm_rm = Arc::clone(&risk_manager_impl);
+        let mm_markets = all_markets_for_mm;
+        let mm_private_key = private_key.clone();
+
+        // Create a second CLOB executor for MM to avoid request contention
+        let mm_clob_host = settings.clob.host.clone();
+        let mm_sig_type = settings.clob.signature_type;
+        let mm_chain_id = settings.chain.chain_id;
+        tokio::spawn(async move {
+            // Authenticate a separate CLOB client for market making
+            let mm_signer = match PrivateKeySigner::from_str(&mm_private_key) {
+                Ok(s) => s.with_chain_id(Some(mm_chain_id)),
+                Err(e) => {
+                    tracing::error!(error = %e, "MM: failed to parse signer");
+                    return;
+                }
+            };
+            let mm_clob = match ClobExecutor::connect(&mm_clob_host, mm_signer, mm_sig_type).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!(error = %e, "MM: CLOB authentication failed, market making disabled");
+                    return;
+                }
+            };
+            tracing::info!("MM: CLOB authenticated, starting market making");
+
+            // Select top N mid-range, non-NegRisk markets by outcome price proximity to 0.50
+            let mut candidates: Vec<&pa_core::types::MarketInfo> = mm_markets
+                .iter()
+                .filter(|m| {
+                    !m.neg_risk
+                        && m.active
+                        && m.tokens.len() == 2
+                        && m.outcome_prices
+                            .as_ref()
+                            .and_then(|p| p.first())
+                            .and_then(|p| p.to_f64())
+                            .map(|yp| yp >= 0.20 && yp <= 0.80)
+                            .unwrap_or(false)
+                })
+                .collect();
+            candidates.sort_by(|a, b| {
+                let ya = a.outcome_prices.as_ref().and_then(|p| p.first()).and_then(|p| p.to_f64()).unwrap_or(0.5);
+                let yb = b.outcome_prices.as_ref().and_then(|p| p.first()).and_then(|p| p.to_f64()).unwrap_or(0.5);
+                let da = (ya - 0.5_f64).abs();
+                let db = (yb - 0.5_f64).abs();
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            candidates.truncate(mm_config.max_markets);
+
+            if candidates.is_empty() {
+                tracing::warn!("MM: no suitable markets found for market making");
+                return;
+            }
+
+            // Collect market data for the MM loop
+            let mm_market_infos: Vec<pa_core::types::MarketInfo> = candidates.into_iter().cloned().collect();
+            pa_monitor::metrics::MM_ACTIVE_MARKETS.set(mm_market_infos.len() as f64);
+
+            tracing::info!(
+                markets = mm_market_infos.len(),
+                questions = ?mm_market_infos.iter().map(|m| &m.question[..m.question.len().min(40)]).collect::<Vec<_>>(),
+                "MM: selected markets"
+            );
+
+            // Track outstanding order IDs per market: condition_id -> (bid_order_id, ask_order_id)
+            let mut outstanding_orders: std::collections::HashMap<
+                alloy::primitives::B256,
+                (Option<String>, Option<String>),
+            > = std::collections::HashMap::new();
+
+            let half_spread = Decimal::new(mm_config.target_spread_bps as i64, 4) / Decimal::TWO;
+            let mut interval = tokio::time::interval(Duration::from_secs(mm_config.quote_refresh_secs));
+
+            loop {
+                tokio::select! {
+                    _ = mm_cancel.cancelled() => {
+                        // Cancel all MM orders on shutdown
+                        let all_ids: Vec<String> = outstanding_orders.values()
+                            .flat_map(|(bid, ask)| bid.iter().chain(ask.iter()).cloned())
+                            .collect();
+                        if !all_ids.is_empty() {
+                            let refs: Vec<&str> = all_ids.iter().map(|s| s.as_str()).collect();
+                            if let Err(e) = mm_clob.cancel_orders(&refs).await {
+                                tracing::warn!(error = %e, "MM: failed to cancel orders on shutdown");
+                            }
+                            pa_monitor::metrics::MM_ORDERS_CANCELLED.inc_by(all_ids.len() as u64);
+                        }
+                        tracing::info!("MM: shutdown, cancelled {} orders", all_ids.len());
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        for market in &mm_market_infos {
+                            let cid = market.condition_id;
+                            let yes_tid = market.tokens[0].token_id;
+                            let _no_tid = market.tokens[1].token_id;
+
+                            // Cancel previous orders for this market
+                            if let Some((bid_id, ask_id)) = outstanding_orders.remove(&cid) {
+                                let ids: Vec<String> = bid_id.into_iter().chain(ask_id).collect();
+                                if !ids.is_empty() {
+                                    let refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+                                    let _ = mm_clob.cancel_orders(&refs).await;
+                                    pa_monitor::metrics::MM_ORDERS_CANCELLED.inc_by(ids.len() as u64);
+                                }
+                            }
+
+                            // Get midpoint from order book cache
+                            let midpoint = match mm_cache.get(&yes_tid) {
+                                Some(book) => match book.midpoint() {
+                                    Some(mid) => mid,
+                                    None => continue,
+                                },
+                                None => continue,
+                            };
+
+                            // Compute inventory skew
+                            let position = mm_rm.get_position_size(&yes_tid);
+                            let skew = if mm_config.max_position_per_market > Decimal::ZERO {
+                                (position / mm_config.max_position_per_market) * mm_config.inventory_skew_factor
+                            } else {
+                                Decimal::ZERO
+                            };
+
+                            // Compute bid/ask prices with inventory skew
+                            // Positive position → widen bid (lower), tighten ask (higher)
+                            let bid_price = (midpoint - half_spread - skew * half_spread)
+                                .round_dp(2)
+                                .max(Decimal::new(1, 2)); // min 0.01
+                            let ask_price = (midpoint + half_spread - skew * half_spread)
+                                .round_dp(2)
+                                .min(Decimal::new(99, 2)); // max 0.99
+
+                            if bid_price >= ask_price {
+                                continue; // spread too tight after skew
+                            }
+
+                            // Check position limit
+                            let remaining = mm_config.max_position_per_market - position;
+                            if remaining <= Decimal::ZERO {
+                                // At max position, skip bid (buy) side
+                                continue;
+                            }
+                            let order_size = remaining.min(Decimal::from(10)).round_dp(2);
+                            if order_size < Decimal::ONE {
+                                continue;
+                            }
+
+                            // Place GTC bid (buy YES)
+                            let bid_result = mm_clob.buy_limit(yes_tid, bid_price, order_size).await;
+                            let bid_order_id = match bid_result {
+                                Ok(r) => {
+                                    pa_monitor::metrics::MM_ORDERS_PLACED.inc();
+                                    Some(r.order_id)
+                                }
+                                Err(e) => {
+                                    tracing::debug!(error = %e, market = %cid, "MM: bid order failed");
+                                    None
+                                }
+                            };
+
+                            // Place GTC ask (sell YES) only if holding inventory
+                            let ask_order_id = if position > Decimal::ZERO {
+                                let sell_size = position.min(Decimal::from(10)).round_dp(2);
+                                if sell_size >= Decimal::ONE {
+                                    match mm_clob.sell_limit(yes_tid, ask_price, sell_size).await {
+                                        Ok(r) => {
+                                            pa_monitor::metrics::MM_ORDERS_PLACED.inc();
+                                            Some(r.order_id)
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!(error = %e, market = %cid, "MM: ask order failed");
+                                            None
+                                        }
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+
+                            outstanding_orders.insert(cid, (bid_order_id, ask_order_id));
+                        }
+
+                        let active = outstanding_orders.values()
+                            .filter(|(b, a)| b.is_some() || a.is_some())
+                            .count();
+                        tracing::debug!(
+                            active_markets = active,
+                            "MM: quote refresh complete"
+                        );
+                    }
+                }
+            }
+        });
+        tracing::info!(
+            max_markets = settings.market_making.max_markets,
+            spread_bps = settings.market_making.target_spread_bps,
+            refresh_secs = settings.market_making.quote_refresh_secs,
+            "Market making task started"
+        );
+    } else if settings.market_making.enabled && !trading_enabled {
+        tracing::warn!("Market making enabled but CLOB auth failed — MM disabled");
+    }
 
     // --- Daily circuit breaker reset at midnight UTC ---
     let daily_rm = Arc::clone(&risk_manager);

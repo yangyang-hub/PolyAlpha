@@ -352,6 +352,7 @@ mod tests {
             event_title: None,
             end_date,
             category: None,
+            outcome_prices: None,
         }
     }
 

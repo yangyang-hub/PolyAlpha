@@ -8,7 +8,7 @@ Polymarket 量化套利交易机器人（Rust）。通过实时订单簿监控�
 
 - **语言**: Rust Edition 2024, MSRV 1.88.0
 - **工具链**: rustc 1.93.0, cargo 1.93.0
-- **代码量**: ~9400 行 Rust
+- **代码量**: ~9700 行 Rust
 - **测试**: 125 个（全部通过）
 
 ## 常用命令
@@ -63,7 +63,7 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 
 | 类型 | 说明 |
 |------|------|
-| `MarketInfo` | 市场元数据（condition_id, tokens, fee_rate_bps, event_title, end_date, category） |
+| `MarketInfo` | 市场元数据（condition_id, tokens, fee_rate_bps, event_title, end_date, category, outcome_prices） |
 | `OrderBook` | 订单簿快照（bids 降序, asks 升序） |
 | `ArbitrageOpportunity` | 检测到的套利机会（含 ExecutionPlan） |
 | `ExecutionPlan` | 枚举: BuyAndMerge / SplitAndSell / NegRiskConvert / CrossMarket / DirectionalBuy |
@@ -89,7 +89,7 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 2. `config/{RUN_MODE}.toml`
 3. `config/default.toml`
 
-关键结构: `Settings { chain, clob, gamma, strategy, risk, database, monitor, market_filter, weather, convergence, crypto_alpha, event_calendar }`
+关键结构: `Settings { chain, clob, gamma, strategy, risk, database, monitor, market_filter, weather, convergence, crypto_alpha, event_calendar, market_making }`
 
 `WeatherConfig` fields: `min_edge_bps`, `max_position_usdc`, `kelly_fraction`, `forecast_error: ForecastErrorConfig`, `refresh_interval_secs`
 
@@ -97,9 +97,11 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 
 `ConvergenceConfig` fields: `min_price_threshold(0.93)`, `max_days_to_resolution(7)`, `max_position_usdc(100)`, `kelly_fraction(0.25)`, `time_decay_boost(true)`, `time_decay_rate(0.03)`
 
-`CryptoAlphaConfig` fields: `min_edge_bps(500)`, `max_position_usdc(100)`, `kelly_fraction(0.25)`, `refresh_interval_secs(300)`, `coingecko_api_key("")`
+`CryptoAlphaConfig` fields: `min_edge_bps(500, config default 100)`, `max_position_usdc(100)`, `kelly_fraction(0.25)`, `refresh_interval_secs(300)`, `coingecko_api_key("")`
 
 `EventCalendarConfig` fields: `enabled(false)`, `finnhub_api_key("")`, `coinmarketcal_api_key("")`, `refresh_interval_secs(3600)`, `pre_event_hours(4)`, `post_event_hours(2)`, `high_impact_multiplier(0.25)`, `medium_impact_multiplier(0.50)`, `low_impact_multiplier(0.75)`, `static_events([])`
+
+`MarketMakingConfig` fields: `enabled(false)`, `target_spread_bps(300)`, `max_position_per_market(50)`, `max_markets(5)`, `quote_refresh_secs(30)`, `inventory_skew_factor(0.50)`
 
 ## 策略模式
 
@@ -236,6 +238,37 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 - `CrossMarket` → `tokio::join!` 并发执行两条腿
 - `DirectionalBuy` → 单笔 CLOB FOK 买入（Weather 策略，无链上操作）
 
+### Market Making 后台任务
+
+被动做市赚取 bid-ask 价差。作为**后台任务**运行（非 Strategy trait — MM 需要持续管理订单，非一次性检测执行）。
+
+**设计决策**:
+- 独立 CLOB 连接: 避免与策略执行的请求竞争
+- Cancel-then-replace: 每周期取消全部市场订单再重新报价
+- Buy-only start: 只有持仓时才挂 ask 卖单（避免裸空头）
+- Inventory skew: 持仓偏重时加宽该侧价差，鼓励再平衡
+
+**流程** (每 `quote_refresh_secs`):
+1. 取消该市场上一周期的 bid/ask 订单
+2. 从 OrderBookCache 获取 midpoint
+3. 计算 bid/ask = midpoint ± half_spread, 含 inventory skew
+4. 挂 GTC buy limit（bid 价）
+5. 如有持仓，挂 GTC sell limit（ask 价）
+6. 跟踪 order_ids 用于下周期取消
+
+**市场选择**: 非 NegRisk, outcome_prices 在 0.20-0.80 范围, 按接近 0.50 排序, 取前 N 个
+
+**启用**: 在 `config/default.toml` 设置 `[market_making] enabled = true`
+
+### Smart WS 订阅
+
+基于 Gamma API `outcome_prices` 智能排序 WebSocket 订阅:
+1. 策略相关市场（weather/crypto 关键词）: 最高优先
+2. 过滤极端市场: YES price < 0.05 或 > 0.95
+3. 按 "mid-ness" 排序: 越接近 0.50 优先级越高
+4. NegRisk tokens 追加在二元市场之后
+5. 截断至 `ws_max_instruments` 限制
+
 ## WebSocket 断线重连
 
 `ws_feed.rs` 中的 subscribe 使用指数退避重连:
@@ -261,9 +294,9 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 
 ## 监控（pa-monitor）
 
-14 个 Prometheus 指标（`LazyLock` + 全局 `REGISTRY`）:
-- Counters: opportunities_detected, opportunities_rejected, executions, execution_errors, ws_reconnect, snapshots_recorded, event_filter_applied
-- Gauges: realized_pnl_usd, active_ws_subscriptions, monitored_markets, circuit_breaker_active, total_exposure_usd
+17 个 Prometheus 指标（`LazyLock` + 全局 `REGISTRY`）:
+- Counters: opportunities_detected, opportunities_rejected, executions, execution_errors, ws_reconnect, snapshots_recorded, event_filter_applied, mm_orders_placed, mm_orders_cancelled
+- Gauges: realized_pnl_usd, active_ws_subscriptions, monitored_markets, circuit_breaker_active, total_exposure_usd, mm_active_markets
 - Histograms: execution_latency_seconds, scan_latency_seconds
 
 HTTP 端点（Axum, health_port 18381）:
@@ -335,7 +368,7 @@ Chain ID: 137, ~2s blocks, ~$0.01 gas, ERC-1155 approval required for CTF ops.
 
 | 文件 | 职责 |
 |------|------|
-| `src/main.rs` | 入口: 配置→签名→DB→市场发现→WS订阅→快照录制→执行层→策略引擎→交易循环 |
+| `src/main.rs` | 入口: 配置→签名→DB→市场发现→Smart WS订阅→快照录制→执行层→策略引擎→做市任务→交易循环 |
 | `src/bin/backtest.rs` | 回测CLI: clap参数→DB连接→BacktestEngine→Report输出 |
 | `crates/pa-core/src/types.rs` | 所有领域类型定义 |
 | `crates/pa-core/src/traits.rs` | 4 个核心 trait |
@@ -364,7 +397,7 @@ Chain ID: 137, ~2s blocks, ~$0.01 gas, ERC-1155 approval required for CTF ops.
 | `crates/pa-backtest/src/simulator.rs` | TradeSimulator (滑点+手续费模拟) |
 | `crates/pa-backtest/src/report.rs` | BacktestResult + Display |
 | `crates/pa-backtest/src/data_loader.rs` | DB → SnapshotFrame 加载 |
-| `crates/pa-monitor/src/metrics.rs` | 14 个 Prometheus 指标 |
+| `crates/pa-monitor/src/metrics.rs` | 17 个 Prometheus 指标 |
 | `crates/pa-monitor/src/health.rs` | Health/Ready/Metrics HTTP 服务 |
 | `config/default.toml` | 默认配置 |
 | `docker/docker-compose.yml` | 全栈 Docker 部署 |

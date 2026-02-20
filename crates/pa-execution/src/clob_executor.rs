@@ -238,6 +238,33 @@ impl ClobExecutor {
         Ok(())
     }
 
+    /// Cancel a single order by its ID.
+    pub async fn cancel_order(&self, order_id: &str) -> anyhow::Result<()> {
+        let response = self.client.cancel_order(order_id).await?;
+        if !response.not_canceled.is_empty() {
+            tracing::warn!(
+                order_id,
+                errors = ?response.not_canceled,
+                "Order cancel partially failed"
+            );
+        }
+        Ok(())
+    }
+
+    /// Cancel multiple orders by their IDs.
+    pub async fn cancel_orders(&self, order_ids: &[&str]) -> anyhow::Result<()> {
+        if order_ids.is_empty() {
+            return Ok(());
+        }
+        let response = self.client.cancel_orders(order_ids).await?;
+        tracing::debug!(
+            cancelled = response.canceled.len(),
+            not_cancelled = response.not_canceled.len(),
+            "Batch cancel complete"
+        );
+        Ok(())
+    }
+
     /// Query available USDC collateral balance from the CLOB API.
     ///
     /// This returns the balance held in the Polymarket proxy wallet,

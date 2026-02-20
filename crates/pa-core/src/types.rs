@@ -48,6 +48,10 @@ pub struct MarketInfo {
     /// Market category hint (e.g. "crypto", "politics"). Used by event calendar filter.
     #[serde(default)]
     pub category: Option<String>,
+    /// YES/NO outcome prices at discovery time (from Gamma API).
+    /// Used for smart WS subscription ordering (filter extreme prices, prioritize mid-range).
+    #[serde(default)]
+    pub outcome_prices: Option<Vec<Decimal>>,
 }
 
 /// A NegRisk event containing multiple outcome markets.

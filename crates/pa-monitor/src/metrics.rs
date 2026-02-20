@@ -116,3 +116,24 @@ pub static EVENT_FILTER_APPLIED: LazyLock<IntCounter> = LazyLock::new(|| {
     REGISTRY.register(Box::new(counter.clone())).unwrap();
     counter
 });
+
+/// Number of markets actively being market-made.
+pub static MM_ACTIVE_MARKETS: LazyLock<Gauge> = LazyLock::new(|| {
+    let gauge = Gauge::new("mm_active_markets", "Number of markets being market-made").unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});
+
+/// Total market making orders placed.
+pub static MM_ORDERS_PLACED: LazyLock<IntCounter> = LazyLock::new(|| {
+    let counter = IntCounter::new("mm_orders_placed_total", "Market making orders placed").unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
+/// Total market making orders cancelled.
+pub static MM_ORDERS_CANCELLED: LazyLock<IntCounter> = LazyLock::new(|| {
+    let counter = IntCounter::new("mm_orders_cancelled_total", "Market making orders cancelled").unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});

@@ -69,7 +69,7 @@ time_decay_boost = true
 time_decay_rate = 0.05
 
 [crypto_alpha]
-min_edge_bps = 200
+min_edge_bps = 100
 max_position_usdc = 100.0
 kelly_fraction = 0.25
 refresh_interval_secs = 300
@@ -85,3 +85,11 @@ post_event_hours = 2
 high_impact_multiplier = 0.25
 medium_impact_multiplier = 0.50
 low_impact_multiplier = 0.75
+
+[market_making]
+enabled = false
+target_spread_bps = 300
+max_position_per_market = 50.0
+max_markets = 5
+quote_refresh_secs = 30
+inventory_skew_factor = 0.50
