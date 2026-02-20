@@ -1,7 +1,9 @@
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-use crate::models::{MarketRow, OpportunityRow, OrderBookSnapshotRow, TokenRow, TradeRow};
+use rust_decimal::Decimal;
+
+use crate::models::{MarketRow, OpportunityRow, OrderBookSnapshotRow, PositionRow, TokenRow, TradeRow};
 
 /// Repository for database operations.
 #[derive(Clone)]
@@ -199,5 +201,45 @@ impl Repository {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
+    /// Load all non-zero positions from the database.
+    pub async fn load_positions(&self) -> anyhow::Result<Vec<PositionRow>> {
+        let rows = sqlx::query_as::<_, PositionRow>(
+            r#"SELECT token_id, size, avg_cost, updated_at
+            FROM positions WHERE size > 0"#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Upsert a position row. Sets condition_id = NULL (FK to markets may not exist).
+    pub async fn upsert_position(
+        &self,
+        token_id: &str,
+        size: Decimal,
+        avg_cost: Decimal,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"INSERT INTO positions (token_id, size, avg_cost, updated_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (token_id) DO UPDATE
+            SET size = $2, avg_cost = $3, updated_at = NOW()"#,
+        )
+        .bind(token_id)
+        .bind(size)
+        .bind(avg_cost)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Delete positions with zero or negative size.
+    pub async fn cleanup_zero_positions(&self) -> anyhow::Result<u64> {
+        let result = sqlx::query("DELETE FROM positions WHERE size <= 0")
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
     }
 }

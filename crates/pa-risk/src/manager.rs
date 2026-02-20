@@ -33,6 +33,16 @@ impl RiskManagerImpl {
     pub fn get_position_size(&self, token_id: &U256) -> Decimal {
         self.positions.get_size(token_id)
     }
+
+    /// Load initial positions from external data (DB rows).
+    pub fn load_initial_positions(&self, entries: Vec<(U256, Decimal, Decimal)>) {
+        self.positions.load_initial(entries);
+    }
+
+    /// Snapshot all current positions for persistence.
+    pub fn snapshot_positions(&self) -> Vec<(U256, crate::position::PositionEntry)> {
+        self.positions.snapshot_all()
+    }
 }
 
 #[async_trait]

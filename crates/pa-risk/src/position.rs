@@ -64,6 +64,23 @@ impl PositionTracker {
             None => Decimal::ZERO,
         }
     }
+
+    /// Bulk-load positions from external data (e.g. DB) at startup.
+    pub fn load_initial(&self, entries: Vec<(U256, Decimal, Decimal)>) {
+        for (token_id, size, avg_cost) in entries {
+            if size > Decimal::ZERO {
+                self.positions.insert(token_id, PositionEntry { size, avg_cost });
+            }
+        }
+    }
+
+    /// Snapshot all positions for persistence (including zeros, so DB can clean up stale rows).
+    pub fn snapshot_all(&self) -> Vec<(U256, PositionEntry)> {
+        self.positions
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().clone()))
+            .collect()
+    }
 }
 
 impl Default for PositionTracker {

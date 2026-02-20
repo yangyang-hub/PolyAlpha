@@ -16,6 +16,7 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 
 use pa_core::config::Settings;
 use pa_core::traits::MarketDataFeed;
+use pa_core::traits::RiskManager as _;
 use pa_execution::clob_executor::ClobExecutor;
 use pa_execution::ctf_executor::CtfExecutor;
 use pa_execution::orchestrator::HybridOrchestrator;
@@ -659,6 +660,26 @@ async fn main() -> Result<()> {
 
     // --- Initialize risk manager ---
     let risk_manager_impl = Arc::new(RiskManagerImpl::new(settings.risk.clone()));
+
+    // --- Load positions from DB ---
+    let position_rows = repo.load_positions().await
+        .context("Failed to load positions from database")?;
+    let initial_positions: Vec<_> = position_rows
+        .iter()
+        .filter_map(|row| {
+            alloy::primitives::U256::from_str(&row.token_id)
+                .ok()
+                .map(|tid| (tid, row.size, row.avg_cost))
+        })
+        .collect();
+    let loaded_count = initial_positions.len();
+    risk_manager_impl.load_initial_positions(initial_positions);
+    tracing::info!(
+        loaded = loaded_count,
+        exposure = %risk_manager_impl.total_exposure(),
+        "Positions loaded from DB"
+    );
+
     let risk_manager: Arc<dyn pa_core::traits::RiskManager> =
         Arc::clone(&risk_manager_impl) as Arc<dyn pa_core::traits::RiskManager>;
     tracing::info!("Risk manager initialized");
@@ -1048,6 +1069,27 @@ async fn main() -> Result<()> {
         }
     });
 
+    // --- Position persistence background task (every 10s) ---
+    let persist_rm = Arc::clone(&risk_manager_impl);
+    let persist_repo = repo.clone();
+    let persist_cancel = cancel.clone();
+    let persist_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            tokio::select! {
+                _ = persist_cancel.cancelled() => {
+                    // Final flush on shutdown
+                    persist_positions(&persist_rm, &persist_repo).await;
+                    tracing::info!("Position persistence: final flush complete");
+                    break;
+                }
+                _ = interval.tick() => {
+                    persist_positions(&persist_rm, &persist_repo).await;
+                }
+            }
+        }
+    });
+
     // Wait for Ctrl+C
     tokio::signal::ctrl_c().await?;
     tracing::info!("Shutdown signal received");
@@ -1063,6 +1105,9 @@ async fn main() -> Result<()> {
 
     // Wait for engine to finish
     let _ = engine_handle.await;
+
+    // Wait for position persistence final flush
+    let _ = persist_handle.await;
 
     tracing::info!("PolyAlpha shutdown complete");
     Ok(())
@@ -1113,5 +1158,18 @@ impl pa_core::traits::Executor for DryRunExecutor {
 
     async fn cancel_all(&self) -> pa_core::Result<()> {
         Ok(())
+    }
+}
+
+/// Persist all non-zero positions from risk manager to database.
+async fn persist_positions(rm: &RiskManagerImpl, repo: &Repository) {
+    let positions = rm.snapshot_positions();
+    for (token_id, entry) in &positions {
+        if let Err(e) = repo.upsert_position(&token_id.to_string(), entry.size, entry.avg_cost).await {
+            tracing::warn!(error = %e, token_id = %token_id, "Failed to persist position");
+        }
+    }
+    if let Err(e) = repo.cleanup_zero_positions().await {
+        tracing::warn!(error = %e, "Failed to cleanup zero positions");
     }
 }

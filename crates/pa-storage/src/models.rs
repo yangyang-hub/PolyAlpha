@@ -73,6 +73,15 @@ pub struct OrderBookSnapshotRow {
     pub midpoint: Option<Decimal>,
 }
 
+/// Database model for the `positions` table.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PositionRow {
+    pub token_id: String,
+    pub size: Decimal,
+    pub avg_cost: Decimal,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// Database model for the `pnl_log` table.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct PnlLogRow {
