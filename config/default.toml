@@ -69,7 +69,7 @@ time_decay_boost = true
 time_decay_rate = 0.05
 
 [crypto_alpha]
-min_edge_bps = 100
+min_edge_bps = 50
 max_position_usdc = 100.0
 kelly_fraction = 0.25
 refresh_interval_secs = 300

@@ -139,50 +139,61 @@ async fn main() -> Result<()> {
     pa_monitor::metrics::MONITORED_MARKETS.set(markets.len() as f64);
 
     // --- Subscribe to WebSocket order book updates ---
-    // Smart ordering: strategy-relevant first, then filter extreme prices, sort by mid-ness.
+    // Smart ordering: filter extreme prices for ALL markets, then prioritize by strategy relevance + mid-ness.
     let ws_max = settings.market_filter.ws_max_instruments;
 
-    let mut strategy_tokens: Vec<alloy::primitives::U256> = Vec::new();
-    let mut mid_range_markets: Vec<(alloy::primitives::U256, alloy::primitives::U256, f64)> = Vec::new(); // (yes_tid, no_tid, distance_from_mid)
+    let mut strategy_mid: Vec<(alloy::primitives::U256, alloy::primitives::U256, f64)> = Vec::new(); // strategy-relevant, mid-range
+    let mut general_mid: Vec<(alloy::primitives::U256, alloy::primitives::U256, f64)> = Vec::new();  // non-strategy, mid-range
     let mut extreme_filtered = 0u32;
+    let mut strategy_extreme = 0u32;
 
     for m in &markets {
         if m.neg_risk || m.tokens.len() != 2 || !m.active {
             continue;
         }
 
-        // Strategy-relevant markets: always include
-        if GammaFeed::is_strategy_relevant(&m.question) {
-            strategy_tokens.push(m.tokens[0].token_id);
-            strategy_tokens.push(m.tokens[1].token_id);
-            continue;
-        }
-
-        // Use Gamma outcome_prices to filter extreme markets
         let yes_price = m.outcome_prices.as_ref()
             .and_then(|p| p.first().copied())
             .and_then(|p| p.to_f64());
 
+        // Filter extreme prices for ALL markets (including strategy-relevant)
+        // Markets with YES < 0.05 or > 0.95 have extreme order books (0.001/0.999)
         if let Some(yp) = yes_price {
-            // Filter extreme: YES price < 0.05 or > 0.95
             if yp < 0.05 || yp > 0.95 {
+                if GammaFeed::is_strategy_relevant(&m.question) {
+                    strategy_extreme += 1;
+                }
                 extreme_filtered += 1;
                 continue;
             }
-            // Sort by distance from 0.50 (closer = higher priority)
             let dist = (yp - 0.50_f64).abs();
-            mid_range_markets.push((m.tokens[0].token_id, m.tokens[1].token_id, dist));
+            if GammaFeed::is_strategy_relevant(&m.question) {
+                strategy_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, dist));
+            } else {
+                general_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, dist));
+            }
         } else {
-            // No price data: include with worst priority
-            mid_range_markets.push((m.tokens[0].token_id, m.tokens[1].token_id, 1.0));
+            // No price data: include with worst priority in appropriate group
+            if GammaFeed::is_strategy_relevant(&m.question) {
+                strategy_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, 1.0));
+            } else {
+                general_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, 1.0));
+            }
         }
     }
 
-    // Sort by mid-ness (closest to 0.50 first)
-    mid_range_markets.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+    // Sort each group by mid-ness (closest to 0.50 first)
+    strategy_mid.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+    general_mid.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
 
-    let mut token_ids: Vec<alloy::primitives::U256> = strategy_tokens.clone();
-    for (yes_tid, no_tid, _) in &mid_range_markets {
+    // Build token list: strategy-relevant first, then general
+    let mut token_ids: Vec<alloy::primitives::U256> = Vec::new();
+    for (yes_tid, no_tid, _) in &strategy_mid {
+        token_ids.push(*yes_tid);
+        token_ids.push(*no_tid);
+    }
+    let strategy_token_count = token_ids.len();
+    for (yes_tid, no_tid, _) in &general_mid {
         token_ids.push(*yes_tid);
         token_ids.push(*no_tid);
     }
@@ -205,8 +216,9 @@ async fn main() -> Result<()> {
 
     tracing::info!(
         tokens = token_ids.len(),
-        strategy_priority = strategy_tokens.len(),
-        mid_range_binary = mid_range_markets.len() * 2,
+        strategy_mid = strategy_token_count,
+        strategy_extreme,
+        general_mid = general_mid.len() * 2,
         neg_risk = neg_risk_token_ids.len(),
         extreme_filtered,
         truncated = total_before_trunc.saturating_sub(ws_max),
