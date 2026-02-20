@@ -11,12 +11,12 @@ use uuid::Uuid;
 use pa_core::traits::Executor;
 use pa_core::types::{
     ArbitrageOpportunity, CrossMarketLeg, CrossMarketOp, ExecutionPlan, ExecutionResult,
-    ExecutionStatus, OrderBook, TradeRecord, TradeSide, TxType,
+    ExecutionStatus, OrderBook, StrategyType, TradeRecord, TradeSide, TxType,
 };
 use pa_core::Result;
 use pa_strategy::profitability::ProfitCalculator;
 
-use alloy::primitives::U256;
+use alloy::primitives::{B256, U256};
 
 /// Configuration for simulated trade execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +80,7 @@ impl TradeSimulator {
         yes_price: Decimal,
         no_price: Decimal,
         merge_amount: Decimal,
+        condition_id: B256,
         opportunity_id: Uuid,
     ) -> ExecutionResult {
         let books = self.books.read().unwrap();
@@ -105,6 +106,7 @@ impl TradeSimulator {
         if filled <= Decimal::ZERO {
             return ExecutionResult {
                 opportunity_id,
+                strategy_type: StrategyType::YesNoMerge,
                 status: ExecutionStatus::NoFill,
                 trades: vec![],
                 realized_profit: Decimal::ZERO,
@@ -130,6 +132,7 @@ impl TradeSimulator {
             TradeRecord {
                 id: Uuid::now_v7(),
                 token_id: yes_token_id,
+                condition_id,
                 side: TradeSide::Buy,
                 price: actual_yes,
                 size: merge_amount,
@@ -141,6 +144,7 @@ impl TradeSimulator {
             TradeRecord {
                 id: Uuid::now_v7(),
                 token_id: no_token_id,
+                condition_id,
                 side: TradeSide::Buy,
                 price: actual_no,
                 size: merge_amount,
@@ -159,6 +163,7 @@ impl TradeSimulator {
 
         ExecutionResult {
             opportunity_id,
+            strategy_type: StrategyType::YesNoMerge,
             status,
             trades,
             realized_profit,
@@ -176,6 +181,7 @@ impl TradeSimulator {
         yes_price: Decimal,
         no_price: Decimal,
         split_amount: Decimal,
+        condition_id: B256,
         opportunity_id: Uuid,
     ) -> ExecutionResult {
         let books = self.books.read().unwrap();
@@ -201,6 +207,7 @@ impl TradeSimulator {
         if filled <= Decimal::ZERO {
             return ExecutionResult {
                 opportunity_id,
+                strategy_type: StrategyType::YesNoMerge,
                 status: ExecutionStatus::NoFill,
                 trades: vec![],
                 realized_profit: Decimal::ZERO,
@@ -226,6 +233,7 @@ impl TradeSimulator {
             TradeRecord {
                 id: Uuid::now_v7(),
                 token_id: yes_token_id,
+                condition_id,
                 side: TradeSide::Sell,
                 price: actual_yes,
                 size: split_amount,
@@ -237,6 +245,7 @@ impl TradeSimulator {
             TradeRecord {
                 id: Uuid::now_v7(),
                 token_id: no_token_id,
+                condition_id,
                 side: TradeSide::Sell,
                 price: actual_no,
                 size: split_amount,
@@ -257,6 +266,7 @@ impl TradeSimulator {
 
         ExecutionResult {
             opportunity_id,
+            strategy_type: StrategyType::YesNoMerge,
             status,
             trades,
             realized_profit,
@@ -290,6 +300,7 @@ impl TradeSimulator {
         if min_filled <= Decimal::ZERO {
             return ExecutionResult {
                 opportunity_id,
+                strategy_type: StrategyType::YesNoMerge,
                 status: ExecutionStatus::NoFill,
                 trades: vec![],
                 realized_profit: Decimal::ZERO,
@@ -312,6 +323,7 @@ impl TradeSimulator {
             trades.push(TradeRecord {
                 id: Uuid::now_v7(),
                 token_id: leg.token_id,
+                condition_id: leg.condition_id,
                 side: TradeSide::Buy,
                 price: actual_price,
                 size: amount,
@@ -334,6 +346,7 @@ impl TradeSimulator {
 
         ExecutionResult {
             opportunity_id,
+            strategy_type: StrategyType::YesNoMerge,
             status,
             trades,
             realized_profit,
@@ -358,6 +371,7 @@ impl TradeSimulator {
                 leg_a.yes_price,
                 leg_a.no_price,
                 amount,
+                leg_a.condition_id,
                 opportunity_id,
             ),
             CrossMarketOp::SplitAndSell => self.simulate_split_and_sell(
@@ -366,6 +380,7 @@ impl TradeSimulator {
                 leg_a.yes_price,
                 leg_a.no_price,
                 amount,
+                leg_a.condition_id,
                 opportunity_id,
             ),
         };
@@ -377,6 +392,7 @@ impl TradeSimulator {
                 leg_b.yes_price,
                 leg_b.no_price,
                 amount,
+                leg_b.condition_id,
                 opportunity_id,
             ),
             CrossMarketOp::SplitAndSell => self.simulate_split_and_sell(
@@ -385,6 +401,7 @@ impl TradeSimulator {
                 leg_b.yes_price,
                 leg_b.no_price,
                 amount,
+                leg_b.condition_id,
                 opportunity_id,
             ),
         };
@@ -406,6 +423,7 @@ impl TradeSimulator {
 
         ExecutionResult {
             opportunity_id,
+            strategy_type: StrategyType::YesNoMerge,
             status,
             trades,
             realized_profit,
@@ -422,6 +440,7 @@ impl TradeSimulator {
         side: TradeSide,
         price: Decimal,
         size: Decimal,
+        condition_id: B256,
         opportunity_id: Uuid,
     ) -> ExecutionResult {
         let books = self.books.read().unwrap();
@@ -445,6 +464,7 @@ impl TradeSimulator {
         if filled <= Decimal::ZERO {
             return ExecutionResult {
                 opportunity_id,
+                strategy_type: StrategyType::YesNoMerge,
                 status: ExecutionStatus::NoFill,
                 trades: vec![],
                 realized_profit: Decimal::ZERO,
@@ -469,6 +489,7 @@ impl TradeSimulator {
         let trades = vec![TradeRecord {
             id: Uuid::now_v7(),
             token_id,
+            condition_id,
             side,
             price: actual_price,
             size,
@@ -486,6 +507,7 @@ impl TradeSimulator {
 
         ExecutionResult {
             opportunity_id,
+            strategy_type: StrategyType::YesNoMerge,
             status,
             trades,
             realized_profit,
@@ -499,20 +521,21 @@ impl TradeSimulator {
 #[async_trait]
 impl Executor for TradeSimulator {
     async fn execute(&self, opp: &ArbitrageOpportunity) -> Result<ExecutionResult> {
-        let result = match &opp.execution_plan {
+        let mut result = match &opp.execution_plan {
             ExecutionPlan::BuyAndMerge {
                 yes_token_id,
                 no_token_id,
                 yes_price,
                 no_price,
                 merge_amount,
-                ..
+                condition_id,
             } => self.simulate_buy_and_merge(
                 *yes_token_id,
                 *no_token_id,
                 *yes_price,
                 *no_price,
                 *merge_amount,
+                *condition_id,
                 opp.id,
             ),
             ExecutionPlan::SplitAndSell {
@@ -521,13 +544,14 @@ impl Executor for TradeSimulator {
                 yes_price,
                 no_price,
                 split_amount,
-                ..
+                condition_id,
             } => self.simulate_split_and_sell(
                 *yes_token_id,
                 *no_token_id,
                 *yes_price,
                 *no_price,
                 *split_amount,
+                *condition_id,
                 opp.id,
             ),
             ExecutionPlan::NegRiskArbitrage { legs, amount, .. } => {
@@ -544,9 +568,10 @@ impl Executor for TradeSimulator {
                 side,
                 price,
                 size,
-                ..
-            } => self.simulate_directional_buy(*token_id, *side, *price, *size, opp.id),
+                condition_id,
+            } => self.simulate_directional_buy(*token_id, *side, *price, *size, *condition_id, opp.id),
         };
+        result.strategy_type = opp.strategy_type;
         Ok(result)
     }
 

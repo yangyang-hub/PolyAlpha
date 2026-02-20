@@ -265,6 +265,21 @@ pub enum ExecutionPlan {
     },
 }
 
+impl ExecutionPlan {
+    /// Approximate per-unit entry price for exposure estimation.
+    pub fn entry_price(&self) -> Option<Decimal> {
+        match self {
+            ExecutionPlan::DirectionalBuy { price, .. } => Some(*price),
+            ExecutionPlan::BuyAndMerge { yes_price, no_price, .. } => Some(*yes_price + *no_price),
+            ExecutionPlan::SplitAndSell { .. } => Some(Decimal::ONE),
+            ExecutionPlan::NegRiskArbitrage { legs, .. } => {
+                Some(legs.iter().map(|l| l.price).sum())
+            }
+            ExecutionPlan::CrossMarket { .. } => Some(Decimal::ONE),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NegRiskLeg {
     pub token_id: U256,
@@ -309,6 +324,7 @@ pub enum CrossMarketOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionResult {
     pub opportunity_id: Uuid,
+    pub strategy_type: StrategyType,
     pub status: ExecutionStatus,
     pub trades: Vec<TradeRecord>,
     pub realized_profit: Decimal,
@@ -329,6 +345,7 @@ pub enum ExecutionStatus {
 pub struct TradeRecord {
     pub id: Uuid,
     pub token_id: U256,
+    pub condition_id: B256,
     pub side: TradeSide,
     pub price: Decimal,
     pub size: Decimal,
@@ -364,6 +381,8 @@ pub enum RiskRejectReason {
     InsufficientBalance,
     CircuitBroken,
     ExceedsSlippage,
+    ExceedsStrategyExposure,
+    ExceedsStrategyMarketCount,
 }
 
 // ──── Profit Estimation ────

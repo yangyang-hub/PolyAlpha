@@ -137,3 +137,10 @@ pub static MM_ORDERS_CANCELLED: LazyLock<IntCounter> = LazyLock::new(|| {
     REGISTRY.register(Box::new(counter.clone())).unwrap();
     counter
 });
+
+/// Total exit trades executed (model reversal / capital efficiency).
+pub static EXIT_TRADES: LazyLock<IntCounter> = LazyLock::new(|| {
+    let counter = IntCounter::new("exit_trades_total", "Exit trades executed").unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});

@@ -27,6 +27,8 @@ pub struct StrategyEngine {
     /// Cooldown map: (condition_id, strategy_type) → expiry time.
     /// Prevents retry flooding when the same opportunity is detected repeatedly.
     cooldowns: Mutex<HashMap<(B256, StrategyType), Instant>>,
+    /// Global execution pause until this time (e.g. after balance/allowance failure).
+    execution_paused_until: Mutex<Instant>,
 }
 
 impl StrategyEngine {
@@ -44,6 +46,7 @@ impl StrategyEngine {
             scan_interval: Duration::from_millis(scan_interval_ms),
             event_calendar,
             cooldowns: Mutex::new(HashMap::new()),
+            execution_paused_until: Mutex::new(Instant::now()),
         }
     }
 
@@ -122,6 +125,12 @@ impl StrategyEngine {
             return;
         }
         pa_monitor::metrics::CIRCUIT_BREAKER_ACTIVE.set(0.0);
+
+        // Global execution pause (e.g. after balance/allowance failure)
+        if Instant::now() < *self.execution_paused_until.lock().unwrap() {
+            tracing::debug!("Execution paused due to recent balance/allowance failure");
+            return;
+        }
 
         let timer = pa_monitor::metrics::SCAN_LATENCY.start_timer();
 
@@ -215,8 +224,15 @@ impl StrategyEngine {
             }
             Err(e) => {
                 timer.observe_duration();
-                tracing::error!(id = %opp.id, error = %e, "Execution failed");
+                let err_msg = e.to_string();
+                tracing::error!(id = %opp.id, error = %err_msg, "Execution failed");
                 pa_monitor::metrics::EXECUTION_ERRORS.inc();
+                // Pause all execution for 5 minutes on balance/allowance failures
+                if err_msg.contains("balance") || err_msg.contains("allowance") {
+                    tracing::warn!("Balance/allowance error detected — pausing execution for 5 minutes");
+                    *self.execution_paused_until.lock().unwrap() =
+                        Instant::now() + Duration::from_secs(300);
+                }
                 self.set_cooldown(opp.condition_id, opp.strategy_type, 60);
             }
         }

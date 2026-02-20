@@ -1,0 +1,1 @@
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS strategy_type TEXT;

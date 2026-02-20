@@ -227,6 +227,42 @@ impl ProfitCalculator {
             roi,
         }
     }
+
+    /// Calculate profit for a directional sell (exit).
+    ///
+    /// Sells existing position at the best bid price.
+    /// Revenue = sell_price × size, Cost = avg_cost × size.
+    /// Note: net_profit can be negative (stop-loss). This is intentional —
+    /// exiting a losing position early is better than waiting for resolution to zero.
+    pub fn directional_sell_profit(
+        &self,
+        sell_price: Decimal,
+        avg_cost: Decimal,
+        size: Decimal,
+        fee_rate_bps: u32,
+    ) -> ProfitEstimate {
+        let revenue = sell_price * size;
+        let cost = avg_cost * size;
+        let gross_profit = revenue - cost;
+        let fee = self.capped_fee(sell_price, fee_rate_bps);
+        let total_fees = fee * size;
+        let total_gas = Decimal::ZERO; // CLOB-only
+
+        let net_profit = gross_profit - total_fees;
+        let roi = if cost > Decimal::ZERO {
+            net_profit / cost
+        } else {
+            Decimal::ZERO
+        };
+
+        ProfitEstimate {
+            gross_profit,
+            fees: total_fees,
+            gas: total_gas,
+            net_profit,
+            roi,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -349,5 +385,25 @@ mod tests {
         // gross = (0.45 - 0.50) * 100 = -5.00
         assert!(est.gross_profit < Decimal::ZERO);
         assert!(est.net_profit < Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_directional_sell_profit_positive() {
+        // Bought at 0.50, sell at 0.80 → gross profit = (0.80 - 0.50) * 100 = 30.00
+        let est = calc().directional_sell_profit(dec!(0.80), dec!(0.50), dec!(100), 200);
+        assert_eq!(est.gross_profit, dec!(30.00));
+        assert!(est.net_profit > Decimal::ZERO, "Expected positive net profit, got {}", est.net_profit);
+        assert_eq!(est.gas, Decimal::ZERO); // CLOB-only
+        assert!(est.roi > Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_directional_sell_profit_at_loss() {
+        // Bought at 0.70, sell at 0.40 → gross profit = (0.40 - 0.70) * 100 = -30.00
+        let est = calc().directional_sell_profit(dec!(0.40), dec!(0.70), dec!(100), 200);
+        assert_eq!(est.gross_profit, dec!(-30.00));
+        assert!(est.net_profit < Decimal::ZERO, "Expected negative net profit (stop-loss), got {}", est.net_profit);
+        assert_eq!(est.gas, Decimal::ZERO); // CLOB-only
+        assert!(est.roi < Decimal::ZERO);
     }
 }

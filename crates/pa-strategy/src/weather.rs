@@ -769,6 +769,53 @@ impl OpenMeteoClient {
             return Err(anyhow::anyhow!("Empty forecast data"));
         }
 
+        // Validate temperature is in expected Fahrenheit range.
+        // Open-Meteo sometimes ignores temperature_unit param and returns Celsius.
+        // Fahrenheit range: roughly -60°F to 140°F. Celsius would typically be -50°C to 60°C.
+        if matches!(
+            metric,
+            WeatherMetric::TemperatureMax | WeatherMetric::TemperatureMin | WeatherMetric::TemperatureAvg
+        ) {
+            for &v in &values {
+                if v < -60.0 || v > 140.0 {
+                    tracing::warn!(
+                        value = v, metric = ?metric,
+                        "Forecast temperature out of Fahrenheit range [-60, 140], possible unit mismatch"
+                    );
+                }
+            }
+            // Heuristic: if all values < 60 and we requested Fahrenheit, likely got Celsius.
+            // Most US weather markets deal with temps > 0°F. If max temp < -10°F for any US location
+            // in forecast season, that's unusual. But better to check if ALL values look like Celsius.
+            let all_below_celsius_range = values.iter().all(|&v| v >= -50.0 && v <= 60.0);
+            let any_extreme_f = values.iter().any(|&v| v > 60.0 || v < -50.0);
+            if all_below_celsius_range && !any_extreme_f && values.iter().any(|&v| v < 30.0) {
+                // All values in [-50, 60] and some below 30 — very likely Celsius
+                tracing::warn!(
+                    mean = values.iter().sum::<f64>() / values.len() as f64,
+                    metric = ?metric,
+                    "All forecast values in Celsius range despite requesting Fahrenheit — converting to Fahrenheit"
+                );
+                // Convert C → F: F = C * 9/5 + 32
+                let values_f: Vec<f64> = values.iter().map(|&c| c * 9.0 / 5.0 + 32.0).collect();
+                let mean_f = values_f.iter().sum::<f64>() / values_f.len() as f64;
+                let variance_f = values_f.iter().map(|v| (v - mean_f).powi(2)).sum::<f64>() / values_f.len() as f64;
+                let std_dev_f = variance_f.sqrt();
+                let target_value_f = if target_date.is_some() {
+                    Some(values_f[0])
+                } else {
+                    None
+                };
+                return Ok(ForecastData {
+                    values: values_f,
+                    dates,
+                    mean: mean_f,
+                    std_dev: std_dev_f,
+                    target_value: target_value_f,
+                });
+            }
+        }
+
         let mean = values.iter().sum::<f64>() / values.len() as f64;
         let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
         let std_dev = variance.sqrt();
@@ -1017,6 +1064,8 @@ pub struct WeatherAlphaStrategy {
     get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
     /// Returns existing position size for a given token (for dedup/cap).
     get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
+    /// Returns all held positions for this strategy: (token_id, size, avg_cost).
+    get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
     forecast_cache: Arc<Mutex<HashMap<u64, CachedForecast>>>,
     /// NegRisk multi-outcome weather events to scan.
     neg_risk_events: Vec<NegRiskEvent>,
@@ -1032,6 +1081,7 @@ impl WeatherAlphaStrategy {
         get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
         get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
         neg_risk_events: Vec<NegRiskEvent>,
+        get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
     ) -> Self {
         Self {
             config,
@@ -1040,6 +1090,7 @@ impl WeatherAlphaStrategy {
             get_orderbook,
             get_available_capital,
             get_position,
+            get_held_positions,
             forecast_cache: Arc::new(Mutex::new(HashMap::new())),
             neg_risk_events,
             scan_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1381,6 +1432,17 @@ impl WeatherAlphaStrategy {
                 None => continue,
             };
 
+            tracing::debug!(
+                outcome = %market.question,
+                range_lower = ?range.lower,
+                range_upper = ?range.upper,
+                forecast_mean = forecast.mean,
+                forecast_target = ?forecast.target_value,
+                sigma = forecast_error_sigma,
+                model_prob = model_prob_f64,
+                "NegRisk weather outcome probability"
+            );
+
             let yes_token = &market.tokens[0];
             let no_token = &market.tokens[1];
 
@@ -1490,6 +1552,137 @@ impl WeatherAlphaStrategy {
             },
         })
     }
+
+    /// Scan held positions for exit conditions (model reversal or capital efficiency).
+    async fn scan_exits(&self, markets: &[MarketInfo]) -> Vec<ArbitrageOpportunity> {
+        let held = (self.get_held_positions)();
+        if held.is_empty() {
+            return vec![];
+        }
+
+        // Build reverse map: token_id → market
+        let token_to_market: std::collections::HashMap<U256, &MarketInfo> = markets
+            .iter()
+            .flat_map(|m| m.tokens.iter().map(move |t| (t.token_id, m)))
+            .collect();
+
+        let exit_buffer = Decimal::from(self.config.exit_buffer_bps) / dec!(10000);
+        let mut exits = Vec::new();
+
+        for (token_id, size, avg_cost) in &held {
+            let book = match (self.get_orderbook)(*token_id) {
+                Some(b) => b,
+                None => continue,
+            };
+            let best_bid = match book.best_bid() {
+                Some(b) => b.price,
+                None => continue,
+            };
+
+            // Capital efficiency exit: bid >= threshold
+            if best_bid >= self.config.capital_efficiency_threshold {
+                tracing::info!(
+                    token_id = %token_id,
+                    best_bid = %best_bid,
+                    "[EXIT] Capital efficiency — weather"
+                );
+                exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
+                pa_monitor::metrics::EXIT_TRADES.inc();
+                continue;
+            }
+
+            // Model reversal: recompute model_prob using cached forecast
+            let market = match token_to_market.get(token_id) {
+                Some(m) => *m,
+                None => continue,
+            };
+
+            let parsed = match parse_weather_question(&market.question) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let target_date = parse_target_date(&market.question);
+            let precipitation_unit = if matches!(parsed.metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
+                detect_precipitation_unit(&market.question)
+            } else {
+                "inch"
+            };
+
+            let forecast = match self
+                .get_forecast(&market.question, &parsed, target_date, precipitation_unit)
+                .await
+            {
+                Some(f) => f,
+                None => continue,
+            };
+
+            let forecast_error_sigma = sigma_for_metric(&self.config.forecast_error, parsed.metric);
+            let model_prob = model_probability(
+                &forecast,
+                parsed.threshold,
+                parsed.comparison,
+                forecast_error_sigma,
+                parsed.metric,
+            );
+            let model_prob_dec = match Decimal::from_f64_retain(model_prob) {
+                Some(d) => d,
+                None => continue,
+            };
+
+            // Determine which side we hold: check if this token is YES or NO
+            let is_yes = market.tokens.first().map(|t| t.token_id == *token_id).unwrap_or(false);
+            let effective_prob = if is_yes { model_prob_dec } else { Decimal::ONE - model_prob_dec };
+
+            if effective_prob < best_bid - exit_buffer {
+                tracing::info!(
+                    token_id = %token_id,
+                    effective_prob = %effective_prob,
+                    best_bid = %best_bid,
+                    "[EXIT] Model reversal — weather"
+                );
+                exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
+                pa_monitor::metrics::EXIT_TRADES.inc();
+            }
+        }
+
+        exits
+    }
+
+    /// Build an exit opportunity (sell via CLOB FOK).
+    fn build_exit_opportunity(
+        &self,
+        token_id: U256,
+        size: Decimal,
+        avg_cost: Decimal,
+        best_bid: Decimal,
+        token_to_market: &std::collections::HashMap<U256, &MarketInfo>,
+    ) -> ArbitrageOpportunity {
+        let market = token_to_market.get(&token_id);
+        let condition_id = market.map(|m| m.condition_id).unwrap_or_default();
+        let question = market.map(|m| m.question.clone()).unwrap_or_default();
+        let fee_rate_bps = market.map(|m| m.fee_rate_bps).unwrap_or(200);
+
+        let est = self.profit_calc.directional_sell_profit(best_bid, avg_cost, size, fee_rate_bps);
+
+        ArbitrageOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::Weather,
+            condition_id,
+            question: format!("[EXIT] {}", question),
+            spread: best_bid - avg_cost,
+            estimated_profit: est.net_profit,
+            size,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id,
+                side: TradeSide::Sell,
+                price: best_bid,
+                size,
+                condition_id,
+            },
+        }
+    }
 }
 
 #[async_trait]
@@ -1550,6 +1743,10 @@ impl Strategy for WeatherAlphaStrategy {
                 "[Weather] scan diagnostics"
             );
         }
+
+        // Exit scanning: check held positions for model reversal / capital efficiency
+        let exit_opps = self.scan_exits(markets).await;
+        opportunities.extend(exit_opps);
 
         Ok(opportunities)
     }
@@ -1715,6 +1912,8 @@ mod tests {
             kelly_fraction: dec!(0.25),
             forecast_error: ForecastErrorConfig::default(),
             refresh_interval_secs: 3600,
+            exit_buffer_bps: 50,
+            capital_efficiency_threshold: dec!(0.98),
         };
 
         let profit_calc = ProfitCalculator::new(Decimal::ZERO);
@@ -2165,5 +2364,191 @@ mod tests {
         let cdf = cdf_for_metric(WeatherMetric::WindSpeed, 15.0, 10.0, 3.0);
         let expected = weibull_cdf(15.0, 10.0, 3.0);
         assert!((cdf - expected).abs() < 1e-10);
+    }
+
+    // ──── Exit Tests ────
+
+    use pa_core::types::{Outcome, PriceLevel, TokenInfo};
+    use alloy::primitives::B256;
+
+    fn make_weather_market(question: &str) -> MarketInfo {
+        MarketInfo {
+            condition_id: B256::ZERO,
+            question_id: B256::ZERO,
+            question: question.to_string(),
+            neg_risk: false,
+            neg_risk_market_id: None,
+            tokens: vec![
+                TokenInfo {
+                    token_id: U256::from(1u64),
+                    outcome: Outcome::Yes,
+                    complement_id: U256::from(2u64),
+                },
+                TokenInfo {
+                    token_id: U256::from(2u64),
+                    outcome: Outcome::No,
+                    complement_id: U256::from(1u64),
+                },
+            ],
+            tick_size: dec!(0.01),
+            fee_rate_bps: 200,
+            active: true,
+            liquidity: dec!(1000),
+            event_title: None,
+            end_date: None,
+            category: None,
+            outcome_prices: None,
+            gamma_best_bid: None,
+            gamma_best_ask: None,
+        }
+    }
+
+    fn make_weather_book(token_id: U256, best_bid: Decimal) -> OrderBook {
+        OrderBook {
+            token_id,
+            bids: vec![PriceLevel { price: best_bid, size: dec!(500) }],
+            asks: vec![PriceLevel { price: best_bid + dec!(0.02), size: dec!(500) }],
+            timestamp: Utc::now(),
+        }
+    }
+
+    fn make_weather_strategy(
+        books: HashMap<U256, OrderBook>,
+        held: Vec<(U256, Decimal, Decimal)>,
+    ) -> WeatherAlphaStrategy {
+        let config = WeatherConfig {
+            min_edge_bps: 500,
+            max_position_usdc: dec!(100),
+            kelly_fraction: dec!(0.25),
+            forecast_error: ForecastErrorConfig::default(),
+            refresh_interval_secs: 3600,
+            exit_buffer_bps: 50,
+            capital_efficiency_threshold: dec!(0.98),
+        };
+        let books = Arc::new(books);
+        WeatherAlphaStrategy::new(
+            config,
+            Decimal::ZERO,
+            Box::new(move |tid| books.get(&tid).cloned()),
+            Box::new(|| Decimal::MAX),
+            Box::new(|_| Decimal::ZERO),
+            vec![],
+            Box::new(move || held.clone()),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_exit_capital_efficiency_weather() {
+        // Held YES token with bid=0.99 → should emit capital efficiency exit
+        let token_id = U256::from(1u64);
+        let question = "Will the temperature in NYC exceed 100F this summer?";
+        let market = make_weather_market(question);
+
+        let mut books = HashMap::new();
+        books.insert(token_id, make_weather_book(token_id, dec!(0.99)));
+        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.01)));
+
+        let held = vec![(token_id, dec!(50), dec!(0.30))];
+        let strategy = make_weather_strategy(books, held);
+
+        let exits = strategy.scan_exits(&[market]).await;
+        assert_eq!(exits.len(), 1);
+        assert!(exits[0].question.starts_with("[EXIT]"));
+        match &exits[0].execution_plan {
+            ExecutionPlan::DirectionalBuy { side, price, size, .. } => {
+                assert_eq!(*side, TradeSide::Sell);
+                assert_eq!(*price, dec!(0.99));
+                assert_eq!(*size, dec!(50));
+            }
+            _ => panic!("Expected DirectionalBuy with Sell side"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_exit_no_positions_weather() {
+        let question = "Will the temperature in NYC exceed 100F this summer?";
+        let market = make_weather_market(question);
+        let mut books = HashMap::new();
+        books.insert(U256::from(1u64), make_weather_book(U256::from(1u64), dec!(0.60)));
+        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.40)));
+
+        let strategy = make_weather_strategy(books, vec![]);
+
+        let exits = strategy.scan_exits(&[market]).await;
+        assert!(exits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_exit_model_reversal_weather() {
+        // Held YES token at bid=0.70, pre-populate cache with forecast that gives
+        // model_prob ≈ 0.15 (much below bid) → should trigger model reversal
+        let token_id = U256::from(1u64);
+        let question = "Will the temperature in NYC exceed 100F this summer?";
+        let market = make_weather_market(question);
+
+        let mut books = HashMap::new();
+        books.insert(token_id, make_weather_book(token_id, dec!(0.70)));
+        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.30)));
+
+        let held = vec![(token_id, dec!(50), dec!(0.30))];
+        let strategy = make_weather_strategy(books, held);
+
+        // Pre-populate forecast cache with data that makes model_prob low
+        // mean=70°F, std=5°F, threshold=100°F → z = (100-70)/5 = 6.0 → P(X>100) ≈ 0.0
+        // So model_prob_dec ≈ 0.0 < best_bid(0.70) - exit_buffer(0.005) = 0.695 → EXIT
+        let cache_key = WeatherAlphaStrategy::question_hash(question);
+        {
+            let mut cache = strategy.forecast_cache.lock().unwrap();
+            cache.insert(cache_key, CachedForecast {
+                forecast: ForecastData {
+                    values: vec![70.0],
+                    dates: vec!["2025-07-15".into()],
+                    mean: 70.0,
+                    std_dev: 5.0,
+                    target_value: Some(70.0),
+                },
+                fetched_at: Instant::now(),
+            });
+        }
+
+        let exits = strategy.scan_exits(&[market]).await;
+        assert_eq!(exits.len(), 1, "Should detect model reversal exit");
+        assert!(exits[0].question.starts_with("[EXIT]"));
+    }
+
+    #[tokio::test]
+    async fn test_exit_edge_still_positive_weather() {
+        // Held YES token at bid=0.10, model says P≈0.84 → edge still positive → no exit
+        let token_id = U256::from(1u64);
+        let question = "Will the temperature in NYC exceed 100F this summer?";
+        let market = make_weather_market(question);
+
+        let mut books = HashMap::new();
+        books.insert(token_id, make_weather_book(token_id, dec!(0.10)));
+        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.90)));
+
+        let held = vec![(token_id, dec!(50), dec!(0.08))];
+        let strategy = make_weather_strategy(books, held);
+
+        // Pre-populate with forecast: mean=99, std=3, threshold=100
+        // z = (100-99)/3 = 0.33 → P(X>100) ≈ 1 - CDF(0.33) ≈ 0.37
+        // effective_prob(YES)=0.37 > bid(0.10) - buffer(0.005) = 0.095 → NO exit
+        let cache_key = WeatherAlphaStrategy::question_hash(question);
+        {
+            let mut cache = strategy.forecast_cache.lock().unwrap();
+            cache.insert(cache_key, CachedForecast {
+                forecast: ForecastData {
+                    values: vec![99.0],
+                    dates: vec!["2025-07-15".into()],
+                    mean: 99.0,
+                    std_dev: 3.0,
+                    target_value: Some(99.0),
+                },
+                fetched_at: Instant::now(),
+            });
+        }
+
+        let exits = strategy.scan_exits(&[market]).await;
+        assert!(exits.is_empty(), "Edge still positive, should not exit");
     }
 }

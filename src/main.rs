@@ -669,7 +669,23 @@ async fn main() -> Result<()> {
         .filter_map(|row| {
             alloy::primitives::U256::from_str(&row.token_id)
                 .ok()
-                .map(|tid| (tid, row.size, row.avg_cost))
+                .map(|tid| {
+                    let cid = row.condition_id.as_ref().and_then(|bytes| {
+                        if bytes.len() == 32 {
+                            Some(alloy::primitives::B256::from_slice(bytes))
+                        } else {
+                            if !bytes.is_empty() {
+                                tracing::warn!(
+                                    token_id = %row.token_id,
+                                    len = bytes.len(),
+                                    "Position has invalid condition_id length, concentration checks disabled for this position"
+                                );
+                            }
+                            None
+                        }
+                    });
+                    (tid, row.size, row.avg_cost, parse_strategy_type(row.strategy_type.as_deref()), cid)
+                })
         })
         .collect();
     let loaded_count = initial_positions.len();
@@ -758,6 +774,7 @@ async fn main() -> Result<()> {
     if settings.strategy.enabled.contains(&"weather".to_string()) {
         let weather_cache = market_data.cache().clone();
         let rm_pos = Arc::clone(&risk_manager_impl);
+        let rm_held = Arc::clone(&risk_manager_impl);
         let weather_strategy = pa_strategy::weather::WeatherAlphaStrategy::new(
             settings.weather.clone(),
             dec!(0.00), // no gas for CLOB-only
@@ -765,6 +782,7 @@ async fn main() -> Result<()> {
             make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
             Box::new(move |tid: alloy::primitives::U256| rm_pos.get_position_size(&tid)),
             neg_risk_events.clone(),
+            Box::new(move || rm_held.positions_by_strategy(pa_core::types::StrategyType::Weather)),
         );
         strategies.push(Box::new(weather_strategy));
         tracing::info!("Weather alpha strategy enabled (binary + NegRisk)");
@@ -774,12 +792,14 @@ async fn main() -> Result<()> {
     if settings.strategy.enabled.contains(&"convergence".to_string()) {
         let conv_cache = market_data.cache().clone();
         let rm_pos_conv = Arc::clone(&risk_manager_impl);
+        let rm_held_conv = Arc::clone(&risk_manager_impl);
         let convergence = pa_strategy::convergence::ResolutionConvergenceStrategy::new(
             settings.convergence.clone(),
             dec!(0.00), // no gas for CLOB-only
             Box::new(move |token_id| conv_cache.get(&token_id)),
             make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
             Box::new(move |tid: alloy::primitives::U256| rm_pos_conv.get_position_size(&tid)),
+            Box::new(move || rm_held_conv.positions_by_strategy(pa_core::types::StrategyType::ResolutionConvergence)),
         );
         strategies.push(Box::new(convergence));
         tracing::info!("Resolution convergence strategy enabled");
@@ -789,6 +809,7 @@ async fn main() -> Result<()> {
     if settings.strategy.enabled.contains(&"crypto".to_string()) {
         let crypto_cache = market_data.cache().clone();
         let rm_pos_crypto = Arc::clone(&risk_manager_impl);
+        let rm_held_crypto = Arc::clone(&risk_manager_impl);
         let crypto = pa_strategy::crypto_alpha::CryptoAlphaStrategy::new(
             settings.crypto_alpha.clone(),
             dec!(0.00), // no gas for CLOB-only
@@ -797,6 +818,7 @@ async fn main() -> Result<()> {
             Box::new(move |tid: alloy::primitives::U256| rm_pos_crypto.get_position_size(&tid)),
             neg_risk_events.clone(),
             binary_event_groups.clone(),
+            Box::new(move || rm_held_crypto.positions_by_strategy(pa_core::types::StrategyType::CryptoAlpha)),
         );
         strategies.push(Box::new(crypto));
         tracing::info!("Crypto alpha strategy enabled");
@@ -1147,6 +1169,7 @@ impl pa_core::traits::Executor for DryRunExecutor {
         );
         Ok(pa_core::types::ExecutionResult {
             opportunity_id: opportunity.id,
+            strategy_type: opportunity.strategy_type,
             status: pa_core::types::ExecutionStatus::NoFill,
             trades: vec![],
             realized_profit: rust_decimal::Decimal::ZERO,
@@ -1165,11 +1188,34 @@ impl pa_core::traits::Executor for DryRunExecutor {
 async fn persist_positions(rm: &RiskManagerImpl, repo: &Repository) {
     let positions = rm.snapshot_positions();
     for (token_id, entry) in &positions {
-        if let Err(e) = repo.upsert_position(&token_id.to_string(), entry.size, entry.avg_cost).await {
+        let st_str = entry.strategy_type.map(|st| format!("{:?}", st));
+        let cid_bytes: Option<Vec<u8>> = entry.condition_id.map(|cid| cid.as_slice().to_vec());
+        if let Err(e) = repo.upsert_position(
+            &token_id.to_string(),
+            entry.size,
+            entry.avg_cost,
+            st_str.as_deref(),
+            cid_bytes.as_deref(),
+        ).await {
             tracing::warn!(error = %e, token_id = %token_id, "Failed to persist position");
         }
     }
     if let Err(e) = repo.cleanup_zero_positions().await {
         tracing::warn!(error = %e, "Failed to cleanup zero positions");
+    }
+}
+
+/// Parse a strategy type string from the database back to StrategyType enum.
+fn parse_strategy_type(s: Option<&str>) -> Option<pa_core::types::StrategyType> {
+    use pa_core::types::StrategyType;
+    match s? {
+        "Weather" => Some(StrategyType::Weather),
+        "CryptoAlpha" => Some(StrategyType::CryptoAlpha),
+        "ResolutionConvergence" => Some(StrategyType::ResolutionConvergence),
+        "YesNoMerge" => Some(StrategyType::YesNoMerge),
+        "YesNoSplit" => Some(StrategyType::YesNoSplit),
+        "NegRiskConvert" => Some(StrategyType::NegRiskConvert),
+        "CrossMarket" => Some(StrategyType::CrossMarket),
+        _ => None,
     }
 }

@@ -206,7 +206,7 @@ impl Repository {
     /// Load all non-zero positions from the database.
     pub async fn load_positions(&self) -> anyhow::Result<Vec<PositionRow>> {
         let rows = sqlx::query_as::<_, PositionRow>(
-            r#"SELECT token_id, size, avg_cost, updated_at
+            r#"SELECT token_id, size, avg_cost, updated_at, strategy_type, condition_id
             FROM positions WHERE size > 0"#,
         )
         .fetch_all(&self.pool)
@@ -214,22 +214,29 @@ impl Repository {
         Ok(rows)
     }
 
-    /// Upsert a position row. Sets condition_id = NULL (FK to markets may not exist).
+    /// Upsert a position row. Uses COALESCE to preserve existing condition_id/strategy_type.
     pub async fn upsert_position(
         &self,
         token_id: &str,
         size: Decimal,
         avg_cost: Decimal,
+        strategy_type: Option<&str>,
+        condition_id: Option<&[u8]>,
     ) -> anyhow::Result<()> {
         sqlx::query(
-            r#"INSERT INTO positions (token_id, size, avg_cost, updated_at)
-            VALUES ($1, $2, $3, NOW())
+            r#"INSERT INTO positions (token_id, size, avg_cost, strategy_type, condition_id, updated_at)
+            VALUES ($1, $2, $3, $4, $5, NOW())
             ON CONFLICT (token_id) DO UPDATE
-            SET size = $2, avg_cost = $3, updated_at = NOW()"#,
+            SET size = $2, avg_cost = $3,
+                strategy_type = COALESCE($4, positions.strategy_type),
+                condition_id = COALESCE($5, positions.condition_id),
+                updated_at = NOW()"#,
         )
         .bind(token_id)
         .bind(size)
         .bind(avg_cost)
+        .bind(strategy_type)
+        .bind(condition_id)
         .execute(&self.pool)
         .await?;
         Ok(())

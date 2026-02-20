@@ -29,6 +29,8 @@ pub struct ResolutionConvergenceStrategy {
     get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
     get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
     get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
+    /// Returns all held positions for this strategy: (token_id, size, avg_cost).
+    get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
     scan_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -39,6 +41,7 @@ impl ResolutionConvergenceStrategy {
         get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
         get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
         get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
+        get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
     ) -> Self {
         Self {
             config,
@@ -46,6 +49,7 @@ impl ResolutionConvergenceStrategy {
             get_orderbook,
             get_available_capital,
             get_position,
+            get_held_positions,
             scan_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
@@ -175,6 +179,119 @@ impl ResolutionConvergenceStrategy {
             },
         })
     }
+
+    /// Scan held positions for exit conditions (model reversal or capital efficiency).
+    fn scan_exits(&self, markets: &[MarketInfo]) -> Vec<ArbitrageOpportunity> {
+        let held = (self.get_held_positions)();
+        if held.is_empty() {
+            return vec![];
+        }
+
+        // Build reverse map: token_id → market
+        let token_to_market: std::collections::HashMap<U256, &MarketInfo> = markets
+            .iter()
+            .flat_map(|m| m.tokens.iter().map(move |t| (t.token_id, m)))
+            .collect();
+
+        let exit_buffer = Decimal::from(self.config.exit_buffer_bps) / dec!(10000);
+        let mut exits = Vec::new();
+
+        for (token_id, size, avg_cost) in &held {
+            let book = match (self.get_orderbook)(*token_id) {
+                Some(b) => b,
+                None => continue,
+            };
+            let best_bid = match book.best_bid() {
+                Some(b) => b.price,
+                None => continue,
+            };
+
+            // Capital efficiency exit: bid >= threshold
+            if best_bid >= self.config.capital_efficiency_threshold {
+                tracing::info!(
+                    token_id = %token_id,
+                    best_bid = %best_bid,
+                    threshold = %self.config.capital_efficiency_threshold,
+                    "[EXIT] Capital efficiency — convergence"
+                );
+                exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
+                pa_monitor::metrics::EXIT_TRADES.inc();
+                continue;
+            }
+
+            // Model reversal: recompute model_prob for this market
+            let market = match token_to_market.get(token_id) {
+                Some(m) => *m,
+                None => continue,
+            };
+
+            let end_date = match market.end_date {
+                Some(d) if d > Utc::now() => d,
+                _ => continue,
+            };
+            let days_remaining = (end_date.signed_duration_since(Utc::now()).num_hours() as f64) / 24.0;
+            let max_days = self.config.max_days_to_resolution as f64;
+
+            let model_prob_f64 = if self.config.time_decay_boost {
+                1.0 - (days_remaining / max_days).min(1.0) * self.config.time_decay_rate
+            } else {
+                0.99
+            };
+            let model_prob = match Decimal::from_f64_retain(model_prob_f64) {
+                Some(d) => d,
+                None => continue,
+            };
+
+            if model_prob < best_bid - exit_buffer {
+                tracing::info!(
+                    token_id = %token_id,
+                    model_prob = %model_prob,
+                    best_bid = %best_bid,
+                    exit_buffer = %exit_buffer,
+                    "[EXIT] Model reversal — convergence"
+                );
+                exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
+                pa_monitor::metrics::EXIT_TRADES.inc();
+            }
+        }
+
+        exits
+    }
+
+    /// Build an exit opportunity (sell via CLOB FOK).
+    fn build_exit_opportunity(
+        &self,
+        token_id: U256,
+        size: Decimal,
+        avg_cost: Decimal,
+        best_bid: Decimal,
+        token_to_market: &std::collections::HashMap<U256, &MarketInfo>,
+    ) -> ArbitrageOpportunity {
+        let market = token_to_market.get(&token_id);
+        let condition_id = market.map(|m| m.condition_id).unwrap_or_default();
+        let question = market.map(|m| m.question.clone()).unwrap_or_default();
+        let fee_rate_bps = market.map(|m| m.fee_rate_bps).unwrap_or(200);
+
+        let est = self.profit_calc.directional_sell_profit(best_bid, avg_cost, size, fee_rate_bps);
+
+        ArbitrageOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::ResolutionConvergence,
+            condition_id,
+            question: format!("[EXIT] {}", question),
+            spread: best_bid - avg_cost,
+            estimated_profit: est.net_profit,
+            size,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id,
+                side: TradeSide::Sell,
+                price: best_bid,
+                size,
+                condition_id,
+            },
+        }
+    }
 }
 
 #[async_trait]
@@ -296,6 +413,10 @@ impl Strategy for ResolutionConvergenceStrategy {
             }
         }
 
+        // Exit scanning: check held positions for model reversal / capital efficiency
+        let exit_opps = self.scan_exits(markets);
+        opportunities.extend(exit_opps);
+
         Ok(opportunities)
     }
 }
@@ -320,6 +441,8 @@ mod tests {
             kelly_fraction: dec!(0.25),
             time_decay_boost: true,
             time_decay_rate: 0.03,
+            exit_buffer_bps: 50,
+            capital_efficiency_threshold: dec!(0.98),
         }
     }
 
@@ -386,6 +509,7 @@ mod tests {
             Box::new(move |tid| books.get(&tid).cloned()),
             Box::new(|| Decimal::MAX),
             Box::new(move |_| *pos.lock().unwrap()),
+            Box::new(|| vec![]), // no held positions in tests
         )
     }
 
@@ -546,5 +670,118 @@ mod tests {
         let strategy = make_strategy(default_config(), books, Decimal::ZERO);
 
         assert!(strategy.detect_convergence(&market).is_none());
+    }
+
+    // ──── Exit Tests ────
+
+    fn make_strategy_with_exits(
+        config: ConvergenceConfig,
+        books: HashMap<U256, OrderBook>,
+        held: Vec<(U256, Decimal, Decimal)>,
+    ) -> ResolutionConvergenceStrategy {
+        let books = Arc::new(books);
+        ResolutionConvergenceStrategy::new(
+            config,
+            dec!(0.00),
+            Box::new(move |tid| books.get(&tid).cloned()),
+            Box::new(|| Decimal::MAX),
+            Box::new(|_| Decimal::ZERO),
+            Box::new(move || held.clone()),
+        )
+    }
+
+    fn make_book_with_bid(token_id: U256, best_bid: Decimal) -> OrderBook {
+        OrderBook {
+            token_id,
+            bids: vec![PriceLevel {
+                price: best_bid,
+                size: dec!(500),
+            }],
+            asks: vec![PriceLevel {
+                price: best_bid + dec!(0.02),
+                size: dec!(500),
+            }],
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_exit_capital_efficiency() {
+        // Held token with bid=0.99 → above threshold 0.98 → should emit exit
+        let token_id = U256::from(1u64);
+        let market = make_market(Some(Utc::now() + Duration::days(3)), false);
+        let mut books = HashMap::new();
+        books.insert(token_id, make_book_with_bid(token_id, dec!(0.99)));
+        books.insert(U256::from(2u64), make_book_with_bid(U256::from(2u64), dec!(0.01)));
+
+        let held = vec![(token_id, dec!(50), dec!(0.95))];
+        let strategy = make_strategy_with_exits(default_config(), books, held);
+
+        let exits = strategy.scan_exits(&[market]);
+        assert_eq!(exits.len(), 1);
+        assert!(exits[0].question.starts_with("[EXIT]"));
+        match &exits[0].execution_plan {
+            ExecutionPlan::DirectionalBuy { side, price, size, .. } => {
+                assert_eq!(*side, TradeSide::Sell);
+                assert_eq!(*price, dec!(0.99));
+                assert_eq!(*size, dec!(50));
+            }
+            _ => panic!("Expected DirectionalBuy with Sell side"),
+        }
+    }
+
+    #[test]
+    fn test_exit_model_reversal() {
+        // Market far from resolution (days_remaining=6.9 out of 7) → model_prob ~0.97
+        // bid=0.985 → model_prob(0.97) < bid(0.985) - buffer(0.005) = 0.98 → should exit
+        let token_id = U256::from(1u64);
+        let market = make_market(
+            Some(Utc::now() + Duration::hours(24 * 7 - 2)), // ~6.9 days
+            false,
+        );
+        let mut books = HashMap::new();
+        books.insert(token_id, make_book_with_bid(token_id, dec!(0.985)));
+        books.insert(U256::from(2u64), make_book_with_bid(U256::from(2u64), dec!(0.015)));
+
+        let held = vec![(token_id, dec!(30), dec!(0.94))];
+        let strategy = make_strategy_with_exits(default_config(), books, held);
+
+        let exits = strategy.scan_exits(&[market]);
+        assert_eq!(exits.len(), 1, "Should detect model reversal exit");
+        assert!(exits[0].question.starts_with("[EXIT]"));
+    }
+
+    #[test]
+    fn test_exit_no_positions() {
+        // No held positions → no exits
+        let market = make_market(Some(Utc::now() + Duration::days(3)), false);
+        let mut books = HashMap::new();
+        books.insert(U256::from(1u64), make_book_with_bid(U256::from(1u64), dec!(0.95)));
+        books.insert(U256::from(2u64), make_book_with_bid(U256::from(2u64), dec!(0.05)));
+
+        let strategy = make_strategy_with_exits(default_config(), books, vec![]);
+
+        let exits = strategy.scan_exits(&[market]);
+        assert!(exits.is_empty());
+    }
+
+    #[test]
+    fn test_exit_edge_still_positive() {
+        // Market close to resolution (1 day) → model_prob ~0.9957
+        // bid=0.96 → model_prob(0.9957) > bid(0.96) - buffer(0.005) = 0.955 → no exit
+        let token_id = U256::from(1u64);
+        let market = make_market(
+            Some(Utc::now() + Duration::days(1)),
+            false,
+        );
+        let mut books = HashMap::new();
+        books.insert(token_id, make_book_with_bid(token_id, dec!(0.96)));
+        books.insert(U256::from(2u64), make_book_with_bid(U256::from(2u64), dec!(0.04)));
+
+        let held = vec![(token_id, dec!(50), dec!(0.94))];
+        let strategy = make_strategy_with_exits(default_config(), books, held);
+
+        let exits = strategy.scan_exits(&[market]);
+        assert!(exits.is_empty(), "Edge still positive, should not exit");
     }
 }

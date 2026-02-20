@@ -124,6 +124,21 @@ impl ClobExecutor {
         if size <= Decimal::ZERO {
             anyhow::bail!("Order size too small after rounding to lot size");
         }
+        // Polymarket minimum marketable order cost is $1.00
+        let cost = price * size;
+        if cost < Decimal::ONE {
+            tracing::warn!(
+                token_id = %token_id, price = %price, size = %size, cost = %cost,
+                "Order cost below $1.00 minimum, skipping"
+            );
+            return Ok(OrderResult {
+                order_id: String::new(),
+                filled_size: Decimal::ZERO,
+                avg_price: price,
+                status: OrderFillStatus::Rejected,
+                tx_hashes: vec![],
+            });
+        }
 
         tracing::info!(
             token_id = %token_id,
@@ -168,6 +183,20 @@ impl ClobExecutor {
         let size = Self::adjust_size_for_cost_precision(price, size);
         if size <= Decimal::ZERO {
             anyhow::bail!("Order size too small after rounding to lot size");
+        }
+        let cost = price * size;
+        if cost < Decimal::ONE {
+            tracing::warn!(
+                token_id = %token_id, price = %price, size = %size, cost = %cost,
+                "Order cost below $1.00 minimum, skipping"
+            );
+            return Ok(OrderResult {
+                order_id: String::new(),
+                filled_size: Decimal::ZERO,
+                avg_price: price,
+                status: OrderFillStatus::Rejected,
+                tx_hashes: vec![],
+            });
         }
 
         tracing::info!(
@@ -215,6 +244,20 @@ impl ClobExecutor {
         if size <= Decimal::ZERO {
             anyhow::bail!("Order size too small after rounding to lot size");
         }
+        let cost = price * size;
+        if cost < Decimal::ONE {
+            tracing::warn!(
+                token_id = %token_id, price = %price, size = %size, cost = %cost,
+                "Order cost below $1.00 minimum, skipping"
+            );
+            return Ok(OrderResult {
+                order_id: String::new(),
+                filled_size: Decimal::ZERO,
+                avg_price: price,
+                status: OrderFillStatus::Rejected,
+                tx_hashes: vec![],
+            });
+        }
 
         tracing::info!(
             token_id = %token_id,
@@ -252,6 +295,20 @@ impl ClobExecutor {
         let size = Self::adjust_size_for_cost_precision(price, size);
         if size <= Decimal::ZERO {
             anyhow::bail!("Order size too small after rounding to lot size");
+        }
+        let cost = price * size;
+        if cost < Decimal::ONE {
+            tracing::warn!(
+                token_id = %token_id, price = %price, size = %size, cost = %cost,
+                "Order cost below $1.00 minimum, skipping"
+            );
+            return Ok(OrderResult {
+                order_id: String::new(),
+                filled_size: Decimal::ZERO,
+                avg_price: price,
+                status: OrderFillStatus::Rejected,
+                tx_hashes: vec![],
+            });
         }
 
         tracing::info!(

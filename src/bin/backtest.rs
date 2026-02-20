@@ -167,5 +167,7 @@ fn default_risk_config() -> pa_core::config::RiskConfig {
         max_slippage_bps: 50,
         min_order_usdc: dec!(1),
         min_profit_usdc: dec!(0.01),
+        max_exposure_per_strategy: dec!(5000),
+        max_markets_per_strategy: 50,
     }
 }

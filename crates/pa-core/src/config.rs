@@ -72,6 +72,12 @@ pub struct RiskConfig {
     /// Minimum profit in USDC to execute a trade (overrides hard-coded value).
     #[serde(default = "default_min_profit_usdc")]
     pub min_profit_usdc: Decimal,
+    /// Maximum total USDC exposure per strategy (across all markets).
+    #[serde(default = "default_max_exposure_per_strategy")]
+    pub max_exposure_per_strategy: Decimal,
+    /// Maximum number of distinct markets a single strategy can hold positions in.
+    #[serde(default = "default_max_markets_per_strategy")]
+    pub max_markets_per_strategy: usize,
 }
 
 fn default_min_order_usdc() -> Decimal {
@@ -80,6 +86,14 @@ fn default_min_order_usdc() -> Decimal {
 
 fn default_min_profit_usdc() -> Decimal {
     Decimal::new(20, 2) // 0.20
+}
+
+fn default_max_exposure_per_strategy() -> Decimal {
+    Decimal::from(5000)
+}
+
+fn default_max_markets_per_strategy() -> usize {
+    50
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -122,7 +136,16 @@ pub struct WeatherConfig {
     pub forecast_error: ForecastErrorConfig,
     /// How often to refresh forecasts (seconds).
     pub refresh_interval_secs: u64,
+    /// Exit buffer in basis points. Sell when model_prob < best_bid - exit_buffer.
+    #[serde(default = "default_exit_buffer_bps")]
+    pub exit_buffer_bps: u32,
+    /// Sell when best_bid >= this threshold (capital efficiency exit).
+    #[serde(default = "default_capital_efficiency_threshold")]
+    pub capital_efficiency_threshold: Decimal,
 }
+
+fn default_exit_buffer_bps() -> u32 { 50 }
+fn default_capital_efficiency_threshold() -> Decimal { Decimal::new(98, 2) } // 0.98
 
 impl Default for WeatherConfig {
     fn default() -> Self {
@@ -132,6 +155,8 @@ impl Default for WeatherConfig {
             kelly_fraction: Decimal::new(25, 2), // 0.25 (quarter Kelly)
             forecast_error: ForecastErrorConfig::default(),
             refresh_interval_secs: 3600,
+            exit_buffer_bps: default_exit_buffer_bps(),
+            capital_efficiency_threshold: default_capital_efficiency_threshold(),
         }
     }
 }
@@ -194,6 +219,12 @@ pub struct ConvergenceConfig {
     /// Default 0.03 gives max 300 bps edge at max_days (97% confidence).
     #[serde(default = "default_time_decay_rate")]
     pub time_decay_rate: f64,
+    /// Exit buffer in basis points. Sell when model_prob < best_bid - exit_buffer.
+    #[serde(default = "default_exit_buffer_bps")]
+    pub exit_buffer_bps: u32,
+    /// Sell when best_bid >= this threshold (capital efficiency exit).
+    #[serde(default = "default_capital_efficiency_threshold")]
+    pub capital_efficiency_threshold: Decimal,
 }
 
 fn default_min_price_threshold() -> Decimal { Decimal::new(93, 2) }
@@ -212,6 +243,8 @@ impl Default for ConvergenceConfig {
             kelly_fraction: default_conv_kelly(),
             time_decay_boost: default_time_decay_boost(),
             time_decay_rate: default_time_decay_rate(),
+            exit_buffer_bps: default_exit_buffer_bps(),
+            capital_efficiency_threshold: default_capital_efficiency_threshold(),
         }
     }
 }
@@ -236,6 +269,12 @@ pub struct CryptoAlphaConfig {
     /// CoinGecko Demo API key (empty = fallback disabled).
     #[serde(default)]
     pub coingecko_api_key: String,
+    /// Exit buffer in basis points. Sell when model_prob < best_bid - exit_buffer.
+    #[serde(default = "default_exit_buffer_bps")]
+    pub exit_buffer_bps: u32,
+    /// Sell when best_bid >= this threshold (capital efficiency exit).
+    #[serde(default = "default_capital_efficiency_threshold")]
+    pub capital_efficiency_threshold: Decimal,
 }
 
 fn default_crypto_min_edge() -> u32 { 500 }
@@ -251,6 +290,8 @@ impl Default for CryptoAlphaConfig {
             kelly_fraction: default_crypto_kelly(),
             refresh_interval_secs: default_crypto_refresh(),
             coingecko_api_key: String::new(),
+            exit_buffer_bps: default_exit_buffer_bps(),
+            capital_efficiency_threshold: default_capital_efficiency_threshold(),
         }
     }
 }

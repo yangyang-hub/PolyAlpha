@@ -8,7 +8,7 @@ use uuid::Uuid;
 use pa_core::traits::Executor;
 use pa_core::types::{
     ArbitrageOpportunity, CrossMarketLeg, CrossMarketOp, ExecutionPlan, ExecutionResult,
-    ExecutionStatus, NegRiskLeg, TradeRecord, TradeSide, TxType,
+    ExecutionStatus, NegRiskLeg, StrategyType, TradeRecord, TradeSide, TxType,
 };
 use pa_core::Result;
 
@@ -63,6 +63,7 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
         trades.push(TradeRecord {
             id: Uuid::now_v7(),
             token_id: yes_token_id,
+            condition_id,
             side: TradeSide::Buy,
             price: yes_price,
             size,
@@ -75,6 +76,7 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
         trades.push(TradeRecord {
             id: Uuid::now_v7(),
             token_id: no_token_id,
+            condition_id,
             side: TradeSide::Buy,
             price: no_price,
             size,
@@ -90,6 +92,7 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
         if merge_amount <= Decimal::ZERO {
             return Ok(ExecutionResult {
                 opportunity_id,
+                strategy_type: StrategyType::YesNoMerge,
                 status: ExecutionStatus::NoFill,
                 trades,
                 realized_profit: Decimal::ZERO,
@@ -112,6 +115,7 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
         trades.push(TradeRecord {
             id: Uuid::now_v7(),
             token_id: U256::ZERO, // merge is not token-specific
+            condition_id,
             side: TradeSide::Buy,
             price: Decimal::ONE,
             size: merge_amount,
@@ -134,6 +138,7 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
 
         Ok(ExecutionResult {
             opportunity_id,
+            strategy_type: StrategyType::YesNoMerge,
             status,
             trades,
             realized_profit,
@@ -178,6 +183,7 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
         trades.push(TradeRecord {
             id: Uuid::now_v7(),
             token_id: U256::ZERO,
+            condition_id,
             side: TradeSide::Buy,
             price: Decimal::ONE,
             size,
@@ -199,6 +205,7 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
         trades.push(TradeRecord {
             id: Uuid::now_v7(),
             token_id: yes_token_id,
+            condition_id,
             side: TradeSide::Sell,
             price: yes_price,
             size,
@@ -211,6 +218,7 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
         trades.push(TradeRecord {
             id: Uuid::now_v7(),
             token_id: no_token_id,
+            condition_id,
             side: TradeSide::Sell,
             price: no_price,
             size,
@@ -236,6 +244,7 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
 
         Ok(ExecutionResult {
             opportunity_id,
+            strategy_type: StrategyType::YesNoMerge,
             status,
             trades,
             realized_profit,
@@ -287,6 +296,7 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
 
         Ok(ExecutionResult {
             opportunity_id,
+            strategy_type: StrategyType::YesNoMerge,
             status,
             trades,
             realized_profit,
@@ -375,6 +385,7 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
                     trades.push(TradeRecord {
                         id: Uuid::now_v7(),
                         token_id: leg.token_id,
+                        condition_id: leg.condition_id,
                         side: TradeSide::Buy,
                         price: leg.price,
                         size: amount,
@@ -415,6 +426,7 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
 
         Ok(ExecutionResult {
             opportunity_id,
+            strategy_type: StrategyType::YesNoMerge,
             status,
             trades,
             realized_profit,
@@ -431,6 +443,7 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
         side: TradeSide,
         price: Decimal,
         size: Decimal,
+        condition_id: B256,
         opportunity_id: Uuid,
     ) -> Result<ExecutionResult> {
         tracing::info!(
@@ -452,6 +465,7 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
         let trades = vec![TradeRecord {
             id: Uuid::now_v7(),
             token_id,
+            condition_id,
             side,
             price,
             size,
@@ -471,6 +485,7 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
 
         Ok(ExecutionResult {
             opportunity_id,
+            strategy_type: StrategyType::YesNoMerge,
             status,
             trades,
             realized_profit: Decimal::ZERO, // Unknown until market resolution
@@ -484,7 +499,7 @@ impl<P: Provider + Clone> HybridOrchestrator<P> {
 #[async_trait]
 impl<P: Provider + Clone + Send + Sync> Executor for HybridOrchestrator<P> {
     async fn execute(&self, opp: &ArbitrageOpportunity) -> Result<ExecutionResult> {
-        match &opp.execution_plan {
+        let mut result = match &opp.execution_plan {
             ExecutionPlan::BuyAndMerge {
                 yes_token_id,
                 no_token_id,
@@ -545,12 +560,14 @@ impl<P: Provider + Clone + Send + Sync> Executor for HybridOrchestrator<P> {
                 side,
                 price,
                 size,
-                ..
+                condition_id,
             } => {
-                self.execute_directional_buy(*token_id, *side, *price, *size, opp.id)
+                self.execute_directional_buy(*token_id, *side, *price, *size, *condition_id, opp.id)
                     .await
             }
-        }
+        }?;
+        result.strategy_type = opp.strategy_type;
+        Ok(result)
     }
 
     async fn cancel_all(&self) -> Result<()> {

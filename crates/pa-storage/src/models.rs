@@ -80,6 +80,8 @@ pub struct PositionRow {
     pub size: Decimal,
     pub avg_cost: Decimal,
     pub updated_at: DateTime<Utc>,
+    pub strategy_type: Option<String>,
+    pub condition_id: Option<Vec<u8>>,
 }
 
 /// Database model for the `pnl_log` table.

@@ -626,6 +626,8 @@ pub struct CryptoAlphaStrategy {
     get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
     get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
     get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
+    /// Returns all held positions for this strategy: (token_id, size, avg_cost).
+    get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
     price_cache: Arc<Mutex<HashMap<String, CachedPrice>>>,
     neg_risk_events: Vec<NegRiskEvent>,
     binary_event_groups: Vec<BinaryEventGroup>,
@@ -644,6 +646,7 @@ impl CryptoAlphaStrategy {
         get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
         neg_risk_events: Vec<NegRiskEvent>,
         binary_event_groups: Vec<BinaryEventGroup>,
+        get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
     ) -> Self {
         let coingecko_key = if config.coingecko_api_key.is_empty() {
             None
@@ -657,6 +660,7 @@ impl CryptoAlphaStrategy {
             get_orderbook,
             get_available_capital,
             get_position,
+            get_held_positions,
             price_cache: Arc::new(Mutex::new(HashMap::new())),
             neg_risk_events,
             binary_event_groups,
@@ -1244,6 +1248,140 @@ impl CryptoAlphaStrategy {
     }
 }
 
+impl CryptoAlphaStrategy {
+    /// Scan held positions for exit conditions (model reversal or capital efficiency).
+    async fn scan_exits(&self, markets: &[MarketInfo]) -> Vec<ArbitrageOpportunity> {
+        let held = (self.get_held_positions)();
+        if held.is_empty() {
+            return vec![];
+        }
+
+        // Build reverse map: token_id → market
+        let token_to_market: HashMap<U256, &MarketInfo> = markets
+            .iter()
+            .flat_map(|m| m.tokens.iter().map(move |t| (t.token_id, m)))
+            .collect();
+
+        let exit_buffer = Decimal::from(self.config.exit_buffer_bps) / dec!(10000);
+        let mut exits = Vec::new();
+
+        for (token_id, size, avg_cost) in &held {
+            let book = match (self.get_orderbook)(*token_id) {
+                Some(b) => b,
+                None => continue,
+            };
+            let best_bid = match book.best_bid() {
+                Some(b) => b.price,
+                None => continue,
+            };
+
+            // Capital efficiency exit: bid >= threshold
+            if best_bid >= self.config.capital_efficiency_threshold {
+                tracing::info!(
+                    token_id = %token_id,
+                    best_bid = %best_bid,
+                    "[EXIT] Capital efficiency — crypto"
+                );
+                exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
+                pa_monitor::metrics::EXIT_TRADES.inc();
+                continue;
+            }
+
+            // Model reversal: recompute model probability
+            let market = match token_to_market.get(token_id) {
+                Some(m) => *m,
+                None => continue,
+            };
+
+            let parsed = match parse_crypto_question(&market.question) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let price_data = match self.get_price_data(parsed.asset).await {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            let (mu, sigma) = match calculate_volatility(&price_data.daily_closes) {
+                Some(v) => v,
+                None => continue,
+            };
+            if sigma <= 0.0 {
+                continue;
+            }
+
+            let target_date = parsed.target_date.unwrap_or_else(|| {
+                (Utc::now() + chrono::Duration::days(30)).date_naive()
+            });
+            let days_to_target = (target_date - Utc::now().date_naive()).num_days().max(1) as f64;
+            let t = days_to_target / 365.0;
+
+            let model_prob = gbm_probability(price_data.current_price, parsed.threshold, mu, sigma, t);
+            let effective_prob = match parsed.direction {
+                PriceDirection::Above => model_prob,
+                PriceDirection::Below => 1.0 - model_prob,
+            };
+
+            // Determine which side we hold: YES = tokens[0], NO = tokens[1]
+            let is_yes = market.tokens.first().map(|t| t.token_id == *token_id).unwrap_or(false);
+            let held_side_prob = if is_yes { effective_prob } else { 1.0 - effective_prob };
+            let model_prob_dec = match Decimal::from_f64_retain(held_side_prob) {
+                Some(d) => d,
+                None => continue,
+            };
+
+            if model_prob_dec < best_bid - exit_buffer {
+                tracing::info!(
+                    token_id = %token_id,
+                    model_prob = %model_prob_dec,
+                    best_bid = %best_bid,
+                    "[EXIT] Model reversal — crypto"
+                );
+                exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
+                pa_monitor::metrics::EXIT_TRADES.inc();
+            }
+        }
+
+        exits
+    }
+
+    /// Build an exit opportunity (sell via CLOB FOK).
+    fn build_exit_opportunity(
+        &self,
+        token_id: U256,
+        size: Decimal,
+        avg_cost: Decimal,
+        best_bid: Decimal,
+        token_to_market: &HashMap<U256, &MarketInfo>,
+    ) -> ArbitrageOpportunity {
+        let market = token_to_market.get(&token_id);
+        let condition_id = market.map(|m| m.condition_id).unwrap_or_default();
+        let question = market.map(|m| m.question.clone()).unwrap_or_default();
+        let fee_rate_bps = market.map(|m| m.fee_rate_bps).unwrap_or(200);
+
+        let est = self.profit_calc.directional_sell_profit(best_bid, avg_cost, size, fee_rate_bps);
+
+        ArbitrageOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id,
+            question: format!("[EXIT] {}", question),
+            spread: best_bid - avg_cost,
+            estimated_profit: est.net_profit,
+            size,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id,
+                side: TradeSide::Sell,
+                price: best_bid,
+                size,
+                condition_id,
+            },
+        }
+    }
+}
+
 #[async_trait]
 impl Strategy for CryptoAlphaStrategy {
     fn name(&self) -> &str {
@@ -1370,6 +1508,10 @@ impl Strategy for CryptoAlphaStrategy {
                 tracing::info!(idx = i, question = %q, "[CryptoAlpha] ungrouped binary crypto");
             }
         }
+
+        // Exit scanning: check held positions for model reversal / capital efficiency
+        let exit_opps = self.scan_exits(markets).await;
+        opportunities.extend(exit_opps);
 
         Ok(opportunities)
     }
@@ -1741,5 +1883,140 @@ mod tests {
         assert_eq!(group.markets.len(), 2);
         assert!(find_asset(&group.title).is_some());
         assert_eq!(find_asset(&group.title).unwrap().name, "Bitcoin");
+    }
+
+    // ──── Exit Tests ────
+
+    use pa_core::types::{Outcome, PriceLevel, TokenInfo};
+    use alloy::primitives::B256;
+
+    fn make_crypto_market(question: &str) -> MarketInfo {
+        MarketInfo {
+            condition_id: B256::ZERO,
+            question_id: B256::ZERO,
+            question: question.to_string(),
+            neg_risk: false,
+            neg_risk_market_id: None,
+            tokens: vec![
+                TokenInfo {
+                    token_id: U256::from(1u64),
+                    outcome: Outcome::Yes,
+                    complement_id: U256::from(2u64),
+                },
+                TokenInfo {
+                    token_id: U256::from(2u64),
+                    outcome: Outcome::No,
+                    complement_id: U256::from(1u64),
+                },
+            ],
+            tick_size: dec!(0.01),
+            fee_rate_bps: 200,
+            active: true,
+            liquidity: dec!(1000),
+            event_title: None,
+            end_date: None,
+            category: Some("crypto".into()),
+            outcome_prices: None,
+            gamma_best_bid: None,
+            gamma_best_ask: None,
+        }
+    }
+
+    fn make_crypto_book(token_id: U256, best_bid: Decimal) -> OrderBook {
+        OrderBook {
+            token_id,
+            bids: vec![PriceLevel { price: best_bid, size: dec!(500) }],
+            asks: vec![PriceLevel { price: best_bid + dec!(0.02), size: dec!(500) }],
+            timestamp: Utc::now(),
+        }
+    }
+
+    fn make_crypto_strategy(
+        books: HashMap<U256, OrderBook>,
+        held: Vec<(U256, Decimal, Decimal)>,
+    ) -> CryptoAlphaStrategy {
+        let config = CryptoAlphaConfig {
+            min_edge_bps: 500,
+            max_position_usdc: dec!(100),
+            kelly_fraction: dec!(0.25),
+            refresh_interval_secs: 300,
+            coingecko_api_key: String::new(),
+            exit_buffer_bps: 50,
+            capital_efficiency_threshold: dec!(0.98),
+        };
+        let books = Arc::new(books);
+        CryptoAlphaStrategy::new(
+            config,
+            Decimal::ZERO,
+            Box::new(move |tid| books.get(&tid).cloned()),
+            Box::new(|| Decimal::MAX),
+            Box::new(|_| Decimal::ZERO),
+            vec![],
+            vec![],
+            Box::new(move || held.clone()),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_exit_capital_efficiency_crypto() {
+        // Held YES token with bid=0.99 → should emit capital efficiency exit
+        let token_id = U256::from(1u64);
+        let question = "Will Bitcoin exceed $100,000 by December 31?";
+        let market = make_crypto_market(question);
+
+        let mut books = HashMap::new();
+        books.insert(token_id, make_crypto_book(token_id, dec!(0.99)));
+        books.insert(U256::from(2u64), make_crypto_book(U256::from(2u64), dec!(0.01)));
+
+        let held = vec![(token_id, dec!(50), dec!(0.60))];
+        let strategy = make_crypto_strategy(books, held);
+
+        let exits = strategy.scan_exits(&[market]).await;
+        assert_eq!(exits.len(), 1);
+        assert!(exits[0].question.starts_with("[EXIT]"));
+        match &exits[0].execution_plan {
+            ExecutionPlan::DirectionalBuy { side, price, size, .. } => {
+                assert_eq!(*side, TradeSide::Sell);
+                assert_eq!(*price, dec!(0.99));
+                assert_eq!(*size, dec!(50));
+            }
+            _ => panic!("Expected DirectionalBuy with Sell side"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_exit_model_reversal_crypto() {
+        // Held YES token at bid=0.80. Pre-populate cache so GBM model gives
+        // very low probability → model_prob < bid - buffer → should exit.
+        let token_id = U256::from(1u64);
+        // "Will Bitcoin exceed $500,000" with current price $95k → P very low
+        let question = "Will Bitcoin exceed $500,000 by December 31, 2026?";
+        let market = make_crypto_market(question);
+
+        let mut books = HashMap::new();
+        books.insert(token_id, make_crypto_book(token_id, dec!(0.80)));
+        books.insert(U256::from(2u64), make_crypto_book(U256::from(2u64), dec!(0.20)));
+
+        let held = vec![(token_id, dec!(30), dec!(0.50))];
+        let strategy = make_crypto_strategy(books, held);
+
+        // Pre-populate price cache with Bitcoin data: current=$95k, 30 daily closes ~$95k
+        // GBM with these numbers for $500k target → probability ≈ 0.0
+        let parsed = parse_crypto_question(question).unwrap();
+        let cache_key = parsed.asset.binance_symbol.to_string();
+        {
+            let mut cache = strategy.price_cache.lock().unwrap();
+            cache.insert(cache_key, CachedPrice {
+                data: CryptoPriceData {
+                    current_price: 95000.0,
+                    daily_closes: (0..30).map(|i| 94000.0 + (i as f64) * 100.0).collect(),
+                },
+                fetched_at: Utc::now(),
+            });
+        }
+
+        let exits = strategy.scan_exits(&[market]).await;
+        assert_eq!(exits.len(), 1, "Should detect model reversal exit");
+        assert!(exits[0].question.starts_with("[EXIT]"));
     }
 }
