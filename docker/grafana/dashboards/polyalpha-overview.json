@@ -1,7 +1,5 @@
 {
-  "annotations": {
-    "list": []
-  },
+  "annotations": { "list": [] },
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -9,60 +7,88 @@
   "links": [],
   "panels": [
     {
-      "title": "Realized PnL (USD)",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 10,
-            "gradientMode": "scheme"
-          },
-          "unit": "currencyUSD"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "realized_pnl_usd",
-          "legendFormat": "PnL",
-          "refId": "A"
-        }
-      ]
+      "title": "",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
     },
     {
-      "title": "Total Exposure (USD)",
-      "type": "gauge",
-      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 0 },
+      "title": "USDC Balance",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "green", "value": 100 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "graphMode": "area", "colorMode": "value", "textMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "expr": "usdc_balance", "legendFormat": "", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Realized PnL",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 0 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "graphMode": "area", "colorMode": "value", "textMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "expr": "realized_pnl_usd", "legendFormat": "", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Total Exposure",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "min": 0,
+          "max": 10000,
           "thresholds": {
             "steps": [
               { "color": "green", "value": null },
-              { "color": "yellow", "value": 2000 },
-              { "color": "red", "value": 5000 }
+              { "color": "yellow", "value": 3000 },
+              { "color": "orange", "value": 5000 },
+              { "color": "red", "value": 8000 }
             ]
           }
         },
         "overrides": []
       },
       "targets": [
-        {
-          "expr": "total_exposure_usd",
-          "legendFormat": "Exposure",
-          "refId": "A"
-        }
+        { "expr": "total_exposure_usd", "legendFormat": "", "refId": "A" }
       ]
     },
     {
       "title": "Circuit Breaker",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 3, "x": 18, "y": 0 },
+      "gridPos": { "h": 4, "w": 3, "x": 12, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
@@ -78,160 +104,251 @@
         },
         "overrides": []
       },
+      "options": { "graphMode": "none", "colorMode": "background", "textMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"] } },
       "targets": [
-        {
-          "expr": "circuit_breaker_active",
-          "legendFormat": "",
-          "refId": "A"
-        }
+        { "expr": "circuit_breaker_active", "legendFormat": "", "refId": "A" }
       ]
     },
     {
-      "title": "Monitored Markets",
+      "title": "Markets",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 3, "x": 21, "y": 0 },
+      "gridPos": { "h": 4, "w": 3, "x": 15, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "thresholds": {
-            "steps": [
-              { "color": "blue", "value": null }
-            ]
-          }
+          "color": { "fixedColor": "blue", "mode": "fixed" },
+          "thresholds": { "steps": [{ "color": "blue", "value": null }] }
         },
         "overrides": []
       },
+      "options": { "graphMode": "none", "colorMode": "value", "textMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"] } },
       "targets": [
-        {
-          "expr": "monitored_markets",
-          "legendFormat": "",
-          "refId": "A"
-        }
+        { "expr": "monitored_markets", "legendFormat": "", "refId": "A" }
       ]
     },
     {
-      "title": "Active Subscriptions",
+      "title": "WS Subscriptions",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 3, "x": 18, "y": 4 },
+      "gridPos": { "h": 4, "w": 3, "x": 18, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "thresholds": {
-            "steps": [
-              { "color": "blue", "value": null }
-            ]
-          }
+          "color": { "fixedColor": "blue", "mode": "fixed" },
+          "thresholds": { "steps": [{ "color": "blue", "value": null }] }
         },
         "overrides": []
       },
+      "options": { "graphMode": "none", "colorMode": "value", "textMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"] } },
       "targets": [
-        {
-          "expr": "active_ws_subscriptions",
-          "legendFormat": "",
-          "refId": "A"
-        }
+        { "expr": "active_ws_subscriptions", "legendFormat": "", "refId": "A" }
       ]
     },
     {
-      "title": "Snapshots Recorded",
+      "title": "MM Markets",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 3, "x": 21, "y": 4 },
+      "gridPos": { "h": 4, "w": 3, "x": 21, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "thresholds": {
-            "steps": [
-              { "color": "purple", "value": null }
-            ]
-          }
+          "color": { "fixedColor": "purple", "mode": "fixed" },
+          "thresholds": { "steps": [{ "color": "purple", "value": null }] }
         },
         "overrides": []
       },
+      "options": { "graphMode": "none", "colorMode": "value", "textMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"] } },
       "targets": [
-        {
-          "expr": "rate(snapshots_recorded_total[5m]) * 60",
-          "legendFormat": "/min",
-          "refId": "A"
-        }
+        { "expr": "mm_active_markets", "legendFormat": "", "refId": "A" }
       ]
     },
     {
-      "title": "Opportunities Rate",
+      "title": "Portfolio",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "PnL & Balance",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "gradientMode": "scheme",
+            "showPoints": "never"
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "USDC Balance" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } },
+              { "id": "custom.fillOpacity", "value": 5 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Realized PnL" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        { "expr": "usdc_balance", "legendFormat": "USDC Balance", "refId": "A" },
+        { "expr": "realized_pnl_usd", "legendFormat": "Realized PnL", "refId": "B" }
+      ]
+    },
+    {
+      "title": "Total Exposure",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "orange", "mode": "fixed" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "showPoints": "never",
+            "thresholdsStyle": { "mode": "line" }
+          },
+          "unit": "currencyUSD",
+          "thresholds": {
+            "steps": [
+              { "color": "transparent", "value": null },
+              { "color": "red", "value": 10000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "total_exposure_usd", "legendFormat": "Exposure", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Opportunity Pipeline",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "Opportunity Funnel (rate/s)",
+      "description": "Detected -> Rejected -> Executed -> Errors",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
           "unit": "ops"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Detected" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Rejected" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Executed" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Errors" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          }
+        ]
       },
       "targets": [
-        {
-          "expr": "rate(opportunities_detected_total[5m])",
-          "legendFormat": "Detected",
-          "refId": "A"
-        }
+        { "expr": "rate(opportunities_detected_total[5m])", "legendFormat": "Detected", "refId": "A" },
+        { "expr": "rate(opportunities_rejected_total[5m])", "legendFormat": "Rejected", "refId": "B" },
+        { "expr": "rate(executions_total[5m])", "legendFormat": "Executed", "refId": "C" },
+        { "expr": "rate(execution_errors_total[5m])", "legendFormat": "Errors", "refId": "D" }
       ]
     },
     {
-      "title": "Execution Rate & Errors",
+      "title": "Exits & Events",
+      "description": "Exit trades (model reversal/capital efficiency) and event calendar filter applications",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2, "fillOpacity": 10 },
-          "unit": "ops"
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "drawStyle": "bars",
+            "showPoints": "never"
+          },
+          "unit": "short"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Exits" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Event Filter" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "purple", "mode": "fixed" } }]
+          }
+        ]
       },
       "targets": [
-        {
-          "expr": "rate(executions_total[5m])",
-          "legendFormat": "Executions",
-          "refId": "A"
-        },
-        {
-          "expr": "rate(execution_errors_total[5m])",
-          "legendFormat": "Errors",
-          "refId": "B"
-        }
+        { "expr": "rate(exit_trades_total[5m]) * 300", "legendFormat": "Exits", "refId": "A" },
+        { "expr": "rate(event_filter_applied_total[5m]) * 300", "legendFormat": "Event Filter", "refId": "B" }
       ]
     },
     {
-      "title": "Execution Latency (P50 / P95)",
+      "title": "Latency",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "Execution Latency (P50 / P95 / P99)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
-          "custom": { "lineWidth": 2 },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never"
+          },
           "unit": "s"
         },
         "overrides": []
       },
       "targets": [
-        {
-          "expr": "histogram_quantile(0.5, rate(execution_latency_seconds_bucket[5m]))",
-          "legendFormat": "P50",
-          "refId": "A"
-        },
-        {
-          "expr": "histogram_quantile(0.95, rate(execution_latency_seconds_bucket[5m]))",
-          "legendFormat": "P95",
-          "refId": "B"
-        }
+        { "expr": "histogram_quantile(0.5, rate(execution_latency_seconds_bucket[5m]))", "legendFormat": "P50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, rate(execution_latency_seconds_bucket[5m]))", "legendFormat": "P95", "refId": "B" },
+        { "expr": "histogram_quantile(0.99, rate(execution_latency_seconds_bucket[5m]))", "legendFormat": "P99", "refId": "C" }
       ]
     },
     {
       "title": "Strategy Scan Latency",
       "type": "heatmap",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
         {
@@ -247,24 +364,86 @@
       }
     },
     {
+      "title": "Infrastructure",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
       "title": "WebSocket Reconnections",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 33 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
           "color": { "fixedColor": "orange", "mode": "fixed" },
-          "custom": { "lineWidth": 2, "fillOpacity": 20, "drawStyle": "bars" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "drawStyle": "bars",
+            "showPoints": "never"
+          },
           "unit": "short"
         },
         "overrides": []
       },
       "targets": [
-        {
-          "expr": "rate(ws_reconnect_total[5m]) * 300",
-          "legendFormat": "Reconnects / 5min",
-          "refId": "A"
-        }
+        { "expr": "rate(ws_reconnect_total[5m]) * 300", "legendFormat": "Reconnects / 5min", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Snapshots Recorded",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 33 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "super-light-blue", "mode": "fixed" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "rate(snapshots_recorded_total[5m]) * 60", "legendFormat": "Snapshots / min", "refId": "A" }
+      ]
+    },
+    {
+      "title": "Market Making Orders",
+      "description": "Orders placed and cancelled by the market making background task",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 33 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "drawStyle": "bars",
+            "showPoints": "never"
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Placed" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Cancelled" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "targets": [
+        { "expr": "rate(mm_orders_placed_total[5m]) * 300", "legendFormat": "Placed", "refId": "A" },
+        { "expr": "rate(mm_orders_cancelled_total[5m]) * 300", "legendFormat": "Cancelled", "refId": "B" }
       ]
     }
   ],
@@ -285,5 +464,5 @@
   "timezone": "browser",
   "title": "PolyAlpha Overview",
   "uid": "polyalpha-overview",
-  "version": 1
+  "version": 2
 }

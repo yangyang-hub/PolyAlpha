@@ -624,6 +624,9 @@ async fn main() -> Result<()> {
     match executor.get_balance().await {
         Ok(bal) => {
             *usdc_balance.write().unwrap() = bal;
+            if let Some(f) = bal.to_f64() {
+                pa_monitor::metrics::USDC_BALANCE.set(f);
+            }
             tracing::info!(balance_usdc = %bal, "CLOB collateral balance loaded");
         }
         Err(e) => {
@@ -648,6 +651,9 @@ async fn main() -> Result<()> {
                                 tracing::info!(balance_usdc = %bal, prev = %prev, "USDC balance updated");
                             }
                             *bal_state.write().unwrap() = bal;
+                            if let Some(f) = bal.to_f64() {
+                                pa_monitor::metrics::USDC_BALANCE.set(f);
+                            }
                         }
                         Err(e) => {
                             tracing::debug!(error = %e, "Balance refresh failed");

@@ -144,3 +144,10 @@ pub static EXIT_TRADES: LazyLock<IntCounter> = LazyLock::new(|| {
     REGISTRY.register(Box::new(counter.clone())).unwrap();
     counter
 });
+
+/// Current USDC balance in Polymarket proxy wallet.
+pub static USDC_BALANCE: LazyLock<Gauge> = LazyLock::new(|| {
+    let gauge = Gauge::new("usdc_balance", "USDC balance in Polymarket proxy wallet").unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});

@@ -294,9 +294,9 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 
 ## 监控（pa-monitor）
 
-17 个 Prometheus 指标（`LazyLock` + 全局 `REGISTRY`）:
-- Counters: opportunities_detected, opportunities_rejected, executions, execution_errors, ws_reconnect, snapshots_recorded, event_filter_applied, mm_orders_placed, mm_orders_cancelled
-- Gauges: realized_pnl_usd, active_ws_subscriptions, monitored_markets, circuit_breaker_active, total_exposure_usd, mm_active_markets
+19 个 Prometheus 指标（`LazyLock` + 全局 `REGISTRY`）:
+- Counters: opportunities_detected, opportunities_rejected, executions, execution_errors, ws_reconnect, snapshots_recorded, event_filter_applied, mm_orders_placed, mm_orders_cancelled, exit_trades
+- Gauges: realized_pnl_usd, usdc_balance, active_ws_subscriptions, monitored_markets, circuit_breaker_active, total_exposure_usd, mm_active_markets
 - Histograms: execution_latency_seconds, scan_latency_seconds
 
 HTTP 端点（Axum, health_port 18381）:
@@ -397,7 +397,7 @@ Chain ID: 137, ~2s blocks, ~$0.01 gas, ERC-1155 approval required for CTF ops.
 | `crates/pa-backtest/src/simulator.rs` | TradeSimulator (滑点+手续费模拟) |
 | `crates/pa-backtest/src/report.rs` | BacktestResult + Display |
 | `crates/pa-backtest/src/data_loader.rs` | DB → SnapshotFrame 加载 |
-| `crates/pa-monitor/src/metrics.rs` | 17 个 Prometheus 指标 |
+| `crates/pa-monitor/src/metrics.rs` | 19 个 Prometheus 指标 |
 | `crates/pa-monitor/src/health.rs` | Health/Ready/Metrics HTTP 服务 |
 | `config/default.toml` | 默认配置 |
 | `docker/docker-compose.yml` | 全栈 Docker 部署 |
