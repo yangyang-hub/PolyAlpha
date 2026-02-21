@@ -60,6 +60,12 @@ impl RiskManager for RiskManagerImpl {
             return RiskDecision::Reject(RiskRejectReason::CircuitBroken);
         }
 
+        // Exit orders (sells) reduce risk — skip all accumulation and profit checks.
+        // Only the circuit breaker applies to exits.
+        if opp.execution_plan.is_exit() {
+            return RiskDecision::Approve;
+        }
+
         // Per-market accumulated position check
         let market_size = self.positions.size_by_market(&opp.condition_id);
         if market_size + opp.size > self.config.max_position_per_market {
@@ -229,5 +235,39 @@ mod tests {
         let opp = make_opp(cid(1), StrategyType::Weather, dec!(5), dec!(0.50));
         // Should pass market count check (already in market), may pass all checks
         assert_eq!(rm.check_pre_trade(&opp), RiskDecision::Approve);
+    }
+
+    #[test]
+    fn test_exit_bypasses_all_risk_checks() {
+        let rm = RiskManagerImpl::new(test_config());
+
+        // Saturate all limits: fill 3 markets, max strategy exposure, max per-market
+        rm.positions.update(U256::from(10), dec!(95), dec!(0.70), true, Some(StrategyType::Weather), Some(cid(1)));
+        rm.positions.update(U256::from(20), dec!(95), dec!(0.70), true, Some(StrategyType::Weather), Some(cid(2)));
+        rm.positions.update(U256::from(30), dec!(95), dec!(0.70), true, Some(StrategyType::Weather), Some(cid(3)));
+
+        // A normal buy would be rejected (exceeds market position, strategy exposure, market count)
+        let buy_opp = make_opp(cid(4), StrategyType::Weather, dec!(50), dec!(0.50));
+        assert_ne!(rm.check_pre_trade(&buy_opp), RiskDecision::Approve);
+
+        // But an EXIT (sell) should always be approved — it reduces risk
+        let exit_opp = ArbitrageOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::Weather,
+            condition_id: cid(1),
+            question: "[EXIT] Test".into(),
+            spread: dec!(-0.05),
+            estimated_profit: dec!(-1.0), // negative profit (stop-loss)
+            size: dec!(50),
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(10),
+                side: TradeSide::Sell,
+                price: dec!(0.65),
+                size: dec!(50),
+                condition_id: cid(1),
+            },
+        };
+        assert_eq!(rm.check_pre_trade(&exit_opp), RiskDecision::Approve);
     }
 }

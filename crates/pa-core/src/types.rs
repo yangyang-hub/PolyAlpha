@@ -266,6 +266,11 @@ pub enum ExecutionPlan {
 }
 
 impl ExecutionPlan {
+    /// Returns true if this is an exit/sell order (reduces risk, not increases it).
+    pub fn is_exit(&self) -> bool {
+        matches!(self, ExecutionPlan::DirectionalBuy { side: TradeSide::Sell, .. })
+    }
+
     /// Approximate per-unit entry price for exposure estimation.
     pub fn entry_price(&self) -> Option<Decimal> {
         match self {

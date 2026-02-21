@@ -145,6 +145,13 @@ impl StrategyEngine {
                         );
                     }
                     for opp in opportunities {
+                        // Check execution pause inside opportunity loop too —
+                        // a balance/allowance failure on opp N should stop opp N+1
+                        if Instant::now() < *self.execution_paused_until.lock().unwrap() {
+                            tracing::debug!("Execution paused mid-batch, skipping remaining opportunities");
+                            break;
+                        }
+
                         // Skip cooled-down opportunities (prevents retry flooding)
                         if self.is_cooled_down(opp.condition_id, opp.strategy_type) {
                             continue;
