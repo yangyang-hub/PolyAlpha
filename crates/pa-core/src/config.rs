@@ -56,6 +56,9 @@ pub struct StrategyConfig {
     pub min_profit_usdc: Decimal,
     pub max_trade_size_usdc: Decimal,
     pub order_type: String,
+    /// Only trade markets with end_date within this many days. None = no filter.
+    #[serde(default)]
+    pub max_market_end_days: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

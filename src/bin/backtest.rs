@@ -154,6 +154,7 @@ fn default_strategy_config() -> pa_core::config::StrategyConfig {
         min_profit_usdc: dec!(0.50),
         max_trade_size_usdc: dec!(100),
         order_type: "FOK".into(),
+        max_market_end_days: None,
     }
 }
 

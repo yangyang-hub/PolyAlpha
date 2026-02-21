@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use alloy::primitives::{B256, U256};
-use chrono::Utc;
+use chrono::{TimeDelta, Utc};
 use rust_decimal::Decimal;
 use pa_core::traits::{Executor, RiskManager, Strategy};
-use pa_core::types::{ArbitrageOpportunity, ExecutionPlan, MarketInfo, RiskDecision, StrategyType};
+use pa_core::types::{ArbitrageOpportunity, ExecutionPlan, MarketInfo, OrderBook, RiskDecision, StrategyType};
 use pa_market_data::event_calendar::EventCalendarService;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, interval};
@@ -24,6 +24,12 @@ pub struct StrategyEngine {
     risk_manager: Arc<dyn RiskManager>,
     scan_interval: Duration,
     event_calendar: Option<Arc<EventCalendarService>>,
+    /// Order book lookup for depth validation.
+    get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+    /// Minimum order size in USDC; opportunities below this after scaling are rejected.
+    min_order_usdc: Decimal,
+    /// Only trade markets ending within this many days. None = no filter.
+    max_market_end_days: Option<u64>,
     /// Cooldown map: (condition_id, strategy_type) → expiry time.
     /// Prevents retry flooding when the same opportunity is detected repeatedly.
     cooldowns: Mutex<HashMap<(B256, StrategyType), Instant>>,
@@ -38,6 +44,9 @@ impl StrategyEngine {
         risk_manager: Arc<dyn RiskManager>,
         scan_interval_ms: u64,
         event_calendar: Option<Arc<EventCalendarService>>,
+        get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+        min_order_usdc: Decimal,
+        max_market_end_days: Option<u64>,
     ) -> Self {
         Self {
             strategies,
@@ -45,6 +54,9 @@ impl StrategyEngine {
             risk_manager,
             scan_interval: Duration::from_millis(scan_interval_ms),
             event_calendar,
+            get_orderbook,
+            min_order_usdc,
+            max_market_end_days,
             cooldowns: Mutex::new(HashMap::new()),
             execution_paused_until: Mutex::new(Instant::now()),
         }
@@ -134,8 +146,27 @@ impl StrategyEngine {
 
         let timer = pa_monitor::metrics::SCAN_LATENCY.start_timer();
 
+        // Filter markets by end_date if max_market_end_days is configured
+        let filtered: Vec<MarketInfo>;
+        let scan_markets: &[MarketInfo] = if let Some(max_days) = self.max_market_end_days {
+            let now = Utc::now();
+            let cutoff = now + TimeDelta::days(max_days as i64);
+            filtered = markets
+                .iter()
+                .filter(|m| {
+                    m.end_date
+                        .map(|ed| ed > now && ed <= cutoff)
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect();
+            &filtered
+        } else {
+            markets
+        };
+
         for strategy in &self.strategies {
-            match strategy.scan(markets).await {
+            match strategy.scan(scan_markets).await {
                 Ok(opportunities) => {
                     if !opportunities.is_empty() {
                         tracing::info!(
@@ -158,7 +189,7 @@ impl StrategyEngine {
                         }
 
                         // Apply event calendar position filter
-                        if let Some(ref ec) = self.event_calendar {
+                        let opp = if let Some(ref ec) = self.event_calendar {
                             let multiplier = ec.position_multiplier(&opp.question, Utc::now()).await;
                             if multiplier < Decimal::ONE {
                                 tracing::info!(
@@ -170,10 +201,23 @@ impl StrategyEngine {
                                 scaled.estimated_profit = (scaled.estimated_profit * multiplier).round_dp(4);
                                 scale_execution_plan_size(&mut scaled.execution_plan, multiplier);
                                 pa_monitor::metrics::EVENT_FILTER_APPLIED.inc();
-                                self.process_opportunity(&scaled).await;
+                                scaled
+                            } else {
+                                opp
+                            }
+                        } else {
+                            opp
+                        };
+
+                        // Validate order book depth (may scale or reject)
+                        let opp = match self.validate_depth(&opp) {
+                            Some(validated) => validated,
+                            None => {
+                                self.set_cooldown(opp.condition_id, opp.strategy_type, 10);
                                 continue;
                             }
-                        }
+                        };
+
                         self.process_opportunity(&opp).await;
                     }
                 }
@@ -243,6 +287,97 @@ impl StrategyEngine {
                 self.set_cooldown(opp.condition_id, opp.strategy_type, 60);
             }
         }
+    }
+
+    /// Validate order book depth for an opportunity.
+    ///
+    /// - Exit orders bypass validation (selling held positions).
+    /// - Extracts liquidity requirements from the execution plan.
+    /// - Checks available depth and slippage on each leg.
+    /// - Scales down the opportunity if depth is insufficient.
+    /// - Returns `None` if zero depth or scaled below `min_order_usdc`.
+    fn validate_depth(&self, opp: &ArbitrageOpportunity) -> Option<ArbitrageOpportunity> {
+        // Exit orders bypass depth validation
+        if opp.execution_plan.is_exit() {
+            return Some(opp.clone());
+        }
+
+        let reqs = opp.execution_plan.liquidity_requirements();
+        if reqs.is_empty() {
+            return Some(opp.clone());
+        }
+
+        let mut min_fill_ratio = Decimal::ONE;
+
+        for req in &reqs {
+            let book = match (self.get_orderbook)(req.token_id) {
+                Some(b) => b,
+                None => {
+                    tracing::debug!(
+                        id = %opp.id,
+                        token_id = %req.token_id,
+                        "Depth rejected: no order book"
+                    );
+                    pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+                    return None;
+                }
+            };
+
+            // FOK limit orders can only fill at or better than limit_price,
+            // so available_depth at the limit is the exact fillable quantity.
+            let depth = book.available_depth(req.side, req.limit_price);
+            if depth.is_zero() {
+                tracing::debug!(
+                    id = %opp.id,
+                    token_id = %req.token_id,
+                    side = ?req.side,
+                    limit_price = %req.limit_price,
+                    "Depth rejected: zero depth at limit"
+                );
+                pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+                return None;
+            }
+
+            let ratio = if req.size > Decimal::ZERO {
+                depth / req.size
+            } else {
+                Decimal::ONE
+            };
+            if ratio < min_fill_ratio {
+                min_fill_ratio = ratio;
+            }
+        }
+
+        if min_fill_ratio >= Decimal::ONE {
+            return Some(opp.clone());
+        }
+
+        // Scale down
+        let mut scaled = opp.clone();
+        scaled.size = (scaled.size * min_fill_ratio).round_dp(2);
+        scaled.estimated_profit = (scaled.estimated_profit * min_fill_ratio).round_dp(4);
+        scale_execution_plan_size(&mut scaled.execution_plan, min_fill_ratio);
+
+        if scaled.size < self.min_order_usdc {
+            tracing::debug!(
+                id = %opp.id,
+                fill_ratio = %min_fill_ratio,
+                scaled_size = %scaled.size,
+                "Depth rejected: scaled below min order"
+            );
+            pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+            return None;
+        }
+
+        tracing::info!(
+            id = %opp.id,
+            fill_ratio = %min_fill_ratio,
+            original_size = %opp.size,
+            scaled_size = %scaled.size,
+            "Depth scaling opportunity"
+        );
+        pa_monitor::metrics::DEPTH_VALIDATION_SCALED.inc();
+        Some(scaled)
     }
 
     /// Check if an opportunity is in cooldown (recently attempted).

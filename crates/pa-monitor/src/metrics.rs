@@ -151,3 +151,25 @@ pub static USDC_BALANCE: LazyLock<Gauge> = LazyLock::new(|| {
     REGISTRY.register(Box::new(gauge.clone())).unwrap();
     gauge
 });
+
+/// Opportunities scaled down due to insufficient order book depth.
+pub static DEPTH_VALIDATION_SCALED: LazyLock<IntCounter> = LazyLock::new(|| {
+    let counter = IntCounter::new(
+        "depth_validation_scaled_total",
+        "Opportunities scaled down due to insufficient depth",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
+/// Opportunities rejected due to zero order book depth.
+pub static DEPTH_VALIDATION_REJECTED: LazyLock<IntCounter> = LazyLock::new(|| {
+    let counter = IntCounter::new(
+        "depth_validation_rejected_total",
+        "Opportunities rejected due to zero depth",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});

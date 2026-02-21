@@ -7,16 +7,41 @@
   "links": [],
   "panels": [
     {
-      "title": "",
+      "title": "概览",
       "type": "row",
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
       "collapsed": false,
       "panels": []
     },
     {
-      "title": "USDC Balance",
+      "title": "资产总额",
+      "description": "USDC 余额 + 持仓敞口",
       "type": "stat",
       "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 100 },
+              { "color": "green", "value": 500 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "graphMode": "area", "colorMode": "value", "textMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "expr": "usdc_balance + total_exposure_usd", "legendFormat": "", "refId": "A" }
+      ]
+    },
+    {
+      "title": "USDC 余额",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 4, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
@@ -38,9 +63,9 @@
       ]
     },
     {
-      "title": "Realized PnL",
+      "title": "已实现盈亏",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "gridPos": { "h": 4, "w": 3, "x": 7, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
@@ -61,9 +86,9 @@
       ]
     },
     {
-      "title": "Total Exposure",
+      "title": "总敞口",
       "type": "gauge",
-      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "gridPos": { "h": 4, "w": 4, "x": 10, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
@@ -86,14 +111,14 @@
       ]
     },
     {
-      "title": "Circuit Breaker",
+      "title": "熔断器",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 3, "x": 12, "y": 1 },
+      "gridPos": { "h": 4, "w": 3, "x": 14, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "options": { "0": { "text": "OK", "color": "green" }, "1": { "text": "TRIPPED", "color": "red" } }, "type": "value" }
+            { "options": { "0": { "text": "正常", "color": "green" }, "1": { "text": "已触发", "color": "red" } }, "type": "value" }
           ],
           "thresholds": {
             "steps": [
@@ -110,9 +135,9 @@
       ]
     },
     {
-      "title": "Markets",
+      "title": "监控市场",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 3, "x": 15, "y": 1 },
+      "gridPos": { "h": 4, "w": 3, "x": 17, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
@@ -127,9 +152,9 @@
       ]
     },
     {
-      "title": "WS Subscriptions",
+      "title": "WS 订阅",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 3, "x": 18, "y": 1 },
+      "gridPos": { "h": 4, "w": 2, "x": 20, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
@@ -144,9 +169,9 @@
       ]
     },
     {
-      "title": "MM Markets",
+      "title": "做市市场",
       "type": "stat",
-      "gridPos": { "h": 4, "w": 3, "x": 21, "y": 1 },
+      "gridPos": { "h": 4, "w": 2, "x": 22, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
@@ -161,14 +186,15 @@
       ]
     },
     {
-      "title": "Portfolio",
+      "title": "资产组合",
       "type": "row",
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
       "collapsed": false,
       "panels": []
     },
     {
-      "title": "PnL & Balance",
+      "title": "资产组合走势",
+      "description": "资产总额 = USDC 余额 + 持仓敞口",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
@@ -185,64 +211,92 @@
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "USDC Balance" },
+            "matcher": { "id": "byName", "options": "资产总额" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "white", "mode": "fixed" } },
+              { "id": "custom.lineWidth", "value": 3 },
+              { "id": "custom.fillOpacity", "value": 0 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "USDC 余额" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } },
+              { "id": "custom.fillOpacity", "value": 20 },
+              { "id": "custom.stacking", "value": { "mode": "normal" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "持仓敞口" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } },
+              { "id": "custom.fillOpacity", "value": 20 },
+              { "id": "custom.stacking", "value": { "mode": "normal" } }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        { "expr": "usdc_balance", "legendFormat": "USDC 余额", "refId": "A" },
+        { "expr": "total_exposure_usd", "legendFormat": "持仓敞口", "refId": "B" },
+        { "expr": "usdc_balance + total_exposure_usd", "legendFormat": "资产总额", "refId": "C" }
+      ]
+    },
+    {
+      "title": "盈亏与余额趋势",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "gradientMode": "scheme",
+            "showPoints": "never"
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "USDC 余额" },
             "properties": [
               { "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } },
               { "id": "custom.fillOpacity", "value": 5 }
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "Realized PnL" },
+            "matcher": { "id": "byName", "options": "已实现盈亏" },
             "properties": [
               { "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "总敞口" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } },
+              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } }
             ]
           }
         ]
       },
       "targets": [
-        { "expr": "usdc_balance", "legendFormat": "USDC Balance", "refId": "A" },
-        { "expr": "realized_pnl_usd", "legendFormat": "Realized PnL", "refId": "B" }
+        { "expr": "usdc_balance", "legendFormat": "USDC 余额", "refId": "A" },
+        { "expr": "realized_pnl_usd", "legendFormat": "已实现盈亏", "refId": "B" },
+        { "expr": "total_exposure_usd", "legendFormat": "总敞口", "refId": "C" }
       ]
     },
     {
-      "title": "Total Exposure",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "fixedColor": "orange", "mode": "fixed" },
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 15,
-            "gradientMode": "scheme",
-            "showPoints": "never",
-            "thresholdsStyle": { "mode": "line" }
-          },
-          "unit": "currencyUSD",
-          "thresholds": {
-            "steps": [
-              { "color": "transparent", "value": null },
-              { "color": "red", "value": 10000 }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "targets": [
-        { "expr": "total_exposure_usd", "legendFormat": "Exposure", "refId": "A" }
-      ]
-    },
-    {
-      "title": "Opportunity Pipeline",
+      "title": "交易管道",
       "type": "row",
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
       "collapsed": false,
       "panels": []
     },
     {
-      "title": "Opportunity Funnel (rate/s)",
-      "description": "Detected -> Rejected -> Executed -> Errors",
+      "title": "机会漏斗 (速率/秒)",
+      "description": "检测 → 拒绝 → 执行 → 错误",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
@@ -258,33 +312,33 @@
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "Detected" },
+            "matcher": { "id": "byName", "options": "检测" },
             "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }]
           },
           {
-            "matcher": { "id": "byName", "options": "Rejected" },
+            "matcher": { "id": "byName", "options": "拒绝" },
             "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
           },
           {
-            "matcher": { "id": "byName", "options": "Executed" },
+            "matcher": { "id": "byName", "options": "执行" },
             "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
           },
           {
-            "matcher": { "id": "byName", "options": "Errors" },
+            "matcher": { "id": "byName", "options": "错误" },
             "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
           }
         ]
       },
       "targets": [
-        { "expr": "rate(opportunities_detected_total[5m])", "legendFormat": "Detected", "refId": "A" },
-        { "expr": "rate(opportunities_rejected_total[5m])", "legendFormat": "Rejected", "refId": "B" },
-        { "expr": "rate(executions_total[5m])", "legendFormat": "Executed", "refId": "C" },
-        { "expr": "rate(execution_errors_total[5m])", "legendFormat": "Errors", "refId": "D" }
+        { "expr": "rate(opportunities_detected_total[5m])", "legendFormat": "检测", "refId": "A" },
+        { "expr": "rate(opportunities_rejected_total[5m])", "legendFormat": "拒绝", "refId": "B" },
+        { "expr": "rate(executions_total[5m])", "legendFormat": "执行", "refId": "C" },
+        { "expr": "rate(execution_errors_total[5m])", "legendFormat": "错误", "refId": "D" }
       ]
     },
     {
-      "title": "Exits & Events",
-      "description": "Exit trades (model reversal/capital efficiency) and event calendar filter applications",
+      "title": "退出 / 事件过滤 / 深度验证",
+      "description": "退出交易、事件日历过滤、深度验证（缩减与拒绝）",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
@@ -301,29 +355,39 @@
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "Exits" },
+            "matcher": { "id": "byName", "options": "退出交易" },
             "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }]
           },
           {
-            "matcher": { "id": "byName", "options": "Event Filter" },
+            "matcher": { "id": "byName", "options": "事件过滤" },
             "properties": [{ "id": "color", "value": { "fixedColor": "purple", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "深度缩减" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "深度拒绝" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
           }
         ]
       },
       "targets": [
-        { "expr": "rate(exit_trades_total[5m]) * 300", "legendFormat": "Exits", "refId": "A" },
-        { "expr": "rate(event_filter_applied_total[5m]) * 300", "legendFormat": "Event Filter", "refId": "B" }
+        { "expr": "rate(exit_trades_total[5m]) * 300", "legendFormat": "退出交易", "refId": "A" },
+        { "expr": "rate(event_filter_applied_total[5m]) * 300", "legendFormat": "事件过滤", "refId": "B" },
+        { "expr": "rate(depth_validation_scaled_total[5m]) * 300", "legendFormat": "深度缩减", "refId": "C" },
+        { "expr": "rate(depth_validation_rejected_total[5m]) * 300", "legendFormat": "深度拒绝", "refId": "D" }
       ]
     },
     {
-      "title": "Latency",
+      "title": "延迟",
       "type": "row",
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
       "collapsed": false,
       "panels": []
     },
     {
-      "title": "Execution Latency (P50 / P95 / P99)",
+      "title": "执行延迟 (P50 / P95 / P99)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
@@ -346,7 +410,7 @@
       ]
     },
     {
-      "title": "Strategy Scan Latency",
+      "title": "策略扫描延迟",
       "type": "heatmap",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
@@ -364,14 +428,14 @@
       }
     },
     {
-      "title": "Infrastructure",
+      "title": "基础设施",
       "type": "row",
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
       "collapsed": false,
       "panels": []
     },
     {
-      "title": "WebSocket Reconnections",
+      "title": "WebSocket 重连",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 33 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
@@ -389,11 +453,11 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "rate(ws_reconnect_total[5m]) * 300", "legendFormat": "Reconnects / 5min", "refId": "A" }
+        { "expr": "rate(ws_reconnect_total[5m]) * 300", "legendFormat": "重连次数 / 5分钟", "refId": "A" }
       ]
     },
     {
-      "title": "Snapshots Recorded",
+      "title": "快照录制",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 33 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
@@ -410,12 +474,12 @@
         "overrides": []
       },
       "targets": [
-        { "expr": "rate(snapshots_recorded_total[5m]) * 60", "legendFormat": "Snapshots / min", "refId": "A" }
+        { "expr": "rate(snapshots_recorded_total[5m]) * 60", "legendFormat": "快照数 / 分钟", "refId": "A" }
       ]
     },
     {
-      "title": "Market Making Orders",
-      "description": "Orders placed and cancelled by the market making background task",
+      "title": "做市订单",
+      "description": "做市后台任务的下单与撤单",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 33 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
@@ -432,18 +496,18 @@
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "Placed" },
+            "matcher": { "id": "byName", "options": "下单" },
             "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
           },
           {
-            "matcher": { "id": "byName", "options": "Cancelled" },
+            "matcher": { "id": "byName", "options": "撤单" },
             "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
           }
         ]
       },
       "targets": [
-        { "expr": "rate(mm_orders_placed_total[5m]) * 300", "legendFormat": "Placed", "refId": "A" },
-        { "expr": "rate(mm_orders_cancelled_total[5m]) * 300", "legendFormat": "Cancelled", "refId": "B" }
+        { "expr": "rate(mm_orders_placed_total[5m]) * 300", "legendFormat": "下单", "refId": "A" },
+        { "expr": "rate(mm_orders_cancelled_total[5m]) * 300", "legendFormat": "撤单", "refId": "B" }
       ]
     }
   ],
@@ -462,7 +526,7 @@
   "time": { "from": "now-6h", "to": "now" },
   "timepicker": {},
   "timezone": "browser",
-  "title": "PolyAlpha Overview",
+  "title": "PolyAlpha 总览",
   "uid": "polyalpha-overview",
-  "version": 2
+  "version": 3
 }

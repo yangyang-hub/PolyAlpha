@@ -155,6 +155,28 @@ pub struct PriceLevel {
     pub size: Decimal,
 }
 
+/// Result of walking the order book to simulate a fill.
+#[derive(Debug, Clone)]
+pub struct WalkResult {
+    /// Total fillable quantity.
+    pub filled: Decimal,
+    /// Volume-weighted average price of the fill.
+    pub avg_price: Decimal,
+    /// Worst price level touched.
+    pub worst_price: Decimal,
+    /// Number of price levels consumed.
+    pub levels_used: usize,
+}
+
+/// A single leg's liquidity requirement extracted from an `ExecutionPlan`.
+#[derive(Debug, Clone)]
+pub struct LiquidityRequirement {
+    pub token_id: U256,
+    pub side: TradeSide,
+    pub size: Decimal,
+    pub limit_price: Decimal,
+}
+
 impl OrderBook {
     pub fn best_bid(&self) -> Option<&PriceLevel> {
         self.bids.first()
@@ -174,6 +196,68 @@ impl OrderBook {
         let bid = self.best_bid()?.price;
         let ask = self.best_ask()?.price;
         Some(ask - bid)
+    }
+
+    /// Total available depth within `limit_price` on the given side.
+    ///
+    /// - Buy: walks asks where `level.price <= limit_price`
+    /// - Sell: walks bids where `level.price >= limit_price`
+    pub fn available_depth(&self, side: TradeSide, limit_price: Decimal) -> Decimal {
+        match side {
+            TradeSide::Buy => self
+                .asks
+                .iter()
+                .take_while(|l| l.price <= limit_price)
+                .map(|l| l.size)
+                .sum(),
+            TradeSide::Sell => self
+                .bids
+                .iter()
+                .take_while(|l| l.price >= limit_price)
+                .map(|l| l.size)
+                .sum(),
+        }
+    }
+
+    /// Simulate filling `target_size` by walking the book.
+    ///
+    /// Returns `None` if the relevant side is empty.
+    pub fn walk_book(&self, side: TradeSide, target_size: Decimal) -> Option<WalkResult> {
+        let levels = match side {
+            TradeSide::Buy => &self.asks,
+            TradeSide::Sell => &self.bids,
+        };
+        if levels.is_empty() {
+            return None;
+        }
+
+        let mut filled = Decimal::ZERO;
+        let mut cost = Decimal::ZERO; // sum of price * size for VWAP
+        let mut worst_price = levels[0].price;
+        let mut levels_used = 0usize;
+
+        for level in levels {
+            let remaining = target_size - filled;
+            if remaining <= Decimal::ZERO {
+                break;
+            }
+            let take = remaining.min(level.size);
+            filled += take;
+            cost += take * level.price;
+            worst_price = level.price;
+            levels_used += 1;
+        }
+
+        if filled.is_zero() {
+            return None;
+        }
+
+        Some(WalkResult {
+            filled,
+            avg_price: cost / filled,
+            worst_price,
+            levels_used,
+        })
     }
 }
 
@@ -269,6 +353,113 @@ impl ExecutionPlan {
     /// Returns true if this is an exit/sell order (reduces risk, not increases it).
     pub fn is_exit(&self) -> bool {
         matches!(self, ExecutionPlan::DirectionalBuy { side: TradeSide::Sell, .. })
+    }
+
+    /// Extract the liquidity requirements for each leg of this plan.
+    ///
+    /// Returns one `LiquidityRequirement` per token that needs to be filled.
+    pub fn liquidity_requirements(&self) -> Vec<LiquidityRequirement> {
+        match self {
+            ExecutionPlan::BuyAndMerge {
+                yes_token_id,
+                no_token_id,
+                yes_price,
+                no_price,
+                merge_amount,
+                ..
+            } => vec![
+                LiquidityRequirement {
+                    token_id: *yes_token_id,
+                    side: TradeSide::Buy,
+                    size: *merge_amount,
+                    limit_price: *yes_price,
+                },
+                LiquidityRequirement {
+                    token_id: *no_token_id,
+                    side: TradeSide::Buy,
+                    size: *merge_amount,
+                    limit_price: *no_price,
+                },
+            ],
+            ExecutionPlan::SplitAndSell {
+                yes_token_id,
+                no_token_id,
+                yes_price,
+                no_price,
+                split_amount,
+                ..
+            } => vec![
+                LiquidityRequirement {
+                    token_id: *yes_token_id,
+                    side: TradeSide::Sell,
+                    size: *split_amount,
+                    limit_price: *yes_price,
+                },
+                LiquidityRequirement {
+                    token_id: *no_token_id,
+                    side: TradeSide::Sell,
+                    size: *split_amount,
+                    limit_price: *no_price,
+                },
+            ],
+            ExecutionPlan::NegRiskArbitrage { legs, .. } => legs
+                .iter()
+                .map(|leg| LiquidityRequirement {
+                    token_id: leg.token_id,
+                    side: leg.side,
+                    size: leg.size,
+                    limit_price: leg.price,
+                })
+                .collect(),
+            ExecutionPlan::CrossMarket { leg_a, leg_b, .. } => {
+                let mut reqs = Vec::with_capacity(4);
+                for leg in [leg_a, leg_b] {
+                    match leg.operation {
+                        CrossMarketOp::BuyAndMerge => {
+                            reqs.push(LiquidityRequirement {
+                                token_id: leg.yes_token_id,
+                                side: TradeSide::Buy,
+                                size: leg.size,
+                                limit_price: leg.yes_price,
+                            });
+                            reqs.push(LiquidityRequirement {
+                                token_id: leg.no_token_id,
+                                side: TradeSide::Buy,
+                                size: leg.size,
+                                limit_price: leg.no_price,
+                            });
+                        }
+                        CrossMarketOp::SplitAndSell => {
+                            reqs.push(LiquidityRequirement {
+                                token_id: leg.yes_token_id,
+                                side: TradeSide::Sell,
+                                size: leg.size,
+                                limit_price: leg.yes_price,
+                            });
+                            reqs.push(LiquidityRequirement {
+                                token_id: leg.no_token_id,
+                                side: TradeSide::Sell,
+                                size: leg.size,
+                                limit_price: leg.no_price,
+                            });
+                        }
+                    }
+                }
+                reqs
+            }
+            ExecutionPlan::DirectionalBuy {
+                token_id,
+                side,
+                price,
+                size,
+                ..
+            } => vec![LiquidityRequirement {
+                token_id: *token_id,
+                side: *side,
+                size: *size,
+                limit_price: *price,
+            }],
+        }
     }
 
     /// Approximate per-unit entry price for exposure estimation.
@@ -388,6 +579,7 @@ pub enum RiskRejectReason {
     ExceedsSlippage,
     ExceedsStrategyExposure,
     ExceedsStrategyMarketCount,
+    InsufficientDepth,
 }
 
 // ──── Profit Estimation ────
@@ -400,4 +592,191 @@ pub struct ProfitEstimate {
     pub net_profit: Decimal,
     /// Net profit / total cost
     pub roi: Decimal,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use rust_decimal_macros::dec;
+
+    fn make_book(bids: Vec<(Decimal, Decimal)>, asks: Vec<(Decimal, Decimal)>) -> OrderBook {
+        OrderBook {
+            token_id: U256::from(1u64),
+            bids: bids
+                .into_iter()
+                .map(|(price, size)| PriceLevel { price, size })
+                .collect(),
+            asks: asks
+                .into_iter()
+                .map(|(price, size)| PriceLevel { price, size })
+                .collect(),
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_available_depth_buy() {
+        let book = make_book(
+            vec![(dec!(0.45), dec!(100))],
+            vec![
+                (dec!(0.50), dec!(50)),
+                (dec!(0.55), dec!(30)),
+                (dec!(0.60), dec!(20)),
+            ],
+        );
+        // limit 0.55: should get 50 + 30 = 80
+        assert_eq!(book.available_depth(TradeSide::Buy, dec!(0.55)), dec!(80));
+        // limit 0.50: only first level
+        assert_eq!(book.available_depth(TradeSide::Buy, dec!(0.50)), dec!(50));
+        // limit 0.60: all levels
+        assert_eq!(book.available_depth(TradeSide::Buy, dec!(0.60)), dec!(100));
+    }
+
+    #[test]
+    fn test_available_depth_sell() {
+        let book = make_book(
+            vec![
+                (dec!(0.55), dec!(40)),
+                (dec!(0.50), dec!(30)),
+                (dec!(0.45), dec!(20)),
+            ],
+            vec![(dec!(0.60), dec!(100))],
+        );
+        // limit 0.50: 40 + 30 = 70
+        assert_eq!(book.available_depth(TradeSide::Sell, dec!(0.50)), dec!(70));
+        // limit 0.55: only first level
+        assert_eq!(book.available_depth(TradeSide::Sell, dec!(0.55)), dec!(40));
+    }
+
+    #[test]
+    fn test_available_depth_empty() {
+        let book = make_book(vec![], vec![]);
+        assert_eq!(book.available_depth(TradeSide::Buy, dec!(1.00)), dec!(0));
+        assert_eq!(book.available_depth(TradeSide::Sell, dec!(0.01)), dec!(0));
+    }
+
+    #[test]
+    fn test_walk_book_full_fill() {
+        let book = make_book(
+            vec![],
+            vec![(dec!(0.50), dec!(100))],
+        );
+        let result = book.walk_book(TradeSide::Buy, dec!(50)).unwrap();
+        assert_eq!(result.filled, dec!(50));
+        assert_eq!(result.avg_price, dec!(0.50));
+        assert_eq!(result.worst_price, dec!(0.50));
+        assert_eq!(result.levels_used, 1);
+    }
+
+    #[test]
+    fn test_walk_book_multi_level() {
+        let book = make_book(
+            vec![],
+            vec![
+                (dec!(0.50), dec!(20)),
+                (dec!(0.52), dec!(30)),
+                (dec!(0.55), dec!(50)),
+            ],
+        );
+        let result = book.walk_book(TradeSide::Buy, dec!(40)).unwrap();
+        assert_eq!(result.filled, dec!(40));
+        // VWAP: (20*0.50 + 20*0.52) / 40 = (10 + 10.4) / 40 = 0.51
+        assert_eq!(result.avg_price, dec!(0.51));
+        assert_eq!(result.worst_price, dec!(0.52));
+        assert_eq!(result.levels_used, 2);
+    }
+
+    #[test]
+    fn test_walk_book_partial() {
+        let book = make_book(
+            vec![],
+            vec![(dec!(0.50), dec!(10))],
+        );
+        let result = book.walk_book(TradeSide::Buy, dec!(100)).unwrap();
+        assert_eq!(result.filled, dec!(10));
+        assert_eq!(result.avg_price, dec!(0.50));
+        assert_eq!(result.levels_used, 1);
+    }
+
+    #[test]
+    fn test_walk_book_empty() {
+        let book = make_book(vec![], vec![]);
+        assert!(book.walk_book(TradeSide::Buy, dec!(10)).is_none());
+    }
+
+    #[test]
+    fn test_liquidity_requirements_directional() {
+        let plan = ExecutionPlan::DirectionalBuy {
+            token_id: U256::from(42u64),
+            side: TradeSide::Buy,
+            price: dec!(0.60),
+            size: dec!(25),
+            condition_id: B256::ZERO,
+        };
+        let reqs = plan.liquidity_requirements();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].token_id, U256::from(42u64));
+        assert_eq!(reqs[0].side, TradeSide::Buy);
+        assert_eq!(reqs[0].size, dec!(25));
+        assert_eq!(reqs[0].limit_price, dec!(0.60));
+    }
+
+    #[test]
+    fn test_liquidity_requirements_buy_and_merge() {
+        let plan = ExecutionPlan::BuyAndMerge {
+            yes_token_id: U256::from(1u64),
+            no_token_id: U256::from(2u64),
+            yes_price: dec!(0.45),
+            no_price: dec!(0.50),
+            merge_amount: dec!(100),
+            condition_id: B256::ZERO,
+        };
+        let reqs = plan.liquidity_requirements();
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(reqs[0].side, TradeSide::Buy);
+        assert_eq!(reqs[0].size, dec!(100));
+        assert_eq!(reqs[1].side, TradeSide::Buy);
+        assert_eq!(reqs[1].size, dec!(100));
+    }
+
+    #[test]
+    fn test_liquidity_requirements_neg_risk() {
+        let plan = ExecutionPlan::NegRiskArbitrage {
+            neg_risk_market_id: B256::ZERO,
+            legs: vec![
+                NegRiskLeg {
+                    token_id: U256::from(1u64),
+                    condition_id: B256::ZERO,
+                    outcome: Outcome::Yes,
+                    side: TradeSide::Buy,
+                    price: dec!(0.30),
+                    size: dec!(50),
+                },
+                NegRiskLeg {
+                    token_id: U256::from(2u64),
+                    condition_id: B256::ZERO,
+                    outcome: Outcome::Yes,
+                    side: TradeSide::Buy,
+                    price: dec!(0.25),
+                    size: dec!(50),
+                },
+                NegRiskLeg {
+                    token_id: U256::from(3u64),
+                    condition_id: B256::ZERO,
+                    outcome: Outcome::Yes,
+                    side: TradeSide::Buy,
+                    price: dec!(0.40),
+                    size: dec!(50),
+                },
+            ],
+            amount: dec!(50),
+        };
+        let reqs = plan.liquidity_requirements();
+        assert_eq!(reqs.len(), 3);
+        for req in &reqs {
+            assert_eq!(req.side, TradeSide::Buy);
+            assert_eq!(req.size, dec!(50));
+        }
+    }
 }

@@ -840,12 +840,16 @@ async fn main() -> Result<()> {
         None
     };
 
+    let engine_cache = market_data.cache().clone();
     let engine = StrategyEngine::new(
         strategies,
         executor.clone(),
         risk_manager.clone(),
         settings.strategy.scan_interval_ms,
         event_calendar,
+        Box::new(move |token_id| engine_cache.get(&token_id)),
+        settings.risk.min_order_usdc,
+        settings.strategy.max_market_end_days,
     );
 
     tracing::info!(

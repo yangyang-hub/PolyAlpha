@@ -16,12 +16,14 @@ signature_type = 2
 host = "https://gamma-api.polymarket.com"
 
 [strategy]
-enabled = ["weather", "convergence", "crypto"]
+# enabled = ["weather", "convergence", "crypto"]
+enabled = ["weather"]
 scan_interval_ms = 100
 min_spread_bps = 200
 min_profit_usdc = 0.20
 max_trade_size_usdc = 500.0
 order_type = "FOK"
+max_market_end_days = 3
 
 [risk]
 max_position_per_market = 2000.0
