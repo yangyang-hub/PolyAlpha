@@ -353,8 +353,10 @@ pub fn parse_target_date(text: &str) -> Option<NaiveDate> {
 
     // "in February" / "by end of February" — bare month name without day
     // Default to the last day of the month.
+    // Require a preposition before the month name to avoid false matches
+    // (e.g. "may" as modal verb in "temperatures may exceed").
     for &(name, month_num) in MONTHS {
-        if lower.contains(name) {
+        if has_month_with_context(&lower, name) {
             let year = today.year();
             // Last day of month: go to 1st of next month, subtract 1 day
             let next_month = if month_num == 12 {
@@ -369,6 +371,18 @@ pub fn parse_target_date(text: &str) -> Option<NaiveDate> {
     }
 
     None
+}
+
+/// Check if a month name appears in text with a preposition context.
+/// Avoids false matches like "may" (modal verb) in "temperatures may exceed".
+fn has_month_with_context(lower: &str, month_name: &str) -> bool {
+    for prefix in &["in ", "by ", "of ", "for ", "during ", "through ", "before ", "after ", "until "] {
+        let pattern = format!("{}{}", prefix, month_name);
+        if lower.contains(&pattern) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Parse a leading unsigned integer from a string slice.
@@ -392,6 +406,27 @@ pub fn detect_precipitation_unit(text: &str) -> &'static str {
     } else {
         "inch"
     }
+}
+
+/// Detect if a temperature question uses Celsius (°C).
+///
+/// Markets on Polymarket use °C for non-US cities (Wellington, Toronto, Paris, etc.)
+/// and °F for US cities (Dallas, Miami, NYC, etc.).
+pub fn is_celsius_market(text: &str) -> bool {
+    text.contains("°C") || text.contains("°c") || text.to_lowercase().contains("celsius")
+}
+
+/// Convert Celsius to Fahrenheit.
+fn celsius_to_fahrenheit(c: f64) -> f64 {
+    c * 9.0 / 5.0 + 32.0
+}
+
+/// Returns true if the metric is a temperature type.
+fn is_temperature_metric(metric: WeatherMetric) -> bool {
+    matches!(
+        metric,
+        WeatherMetric::TemperatureMax | WeatherMetric::TemperatureMin | WeatherMetric::TemperatureAvg
+    )
 }
 
 // ──── NegRisk Outcome Range Parser ────
@@ -788,8 +823,8 @@ impl OpenMeteoClient {
         }
 
         // Validate temperature is in expected Fahrenheit range.
-        // Open-Meteo sometimes ignores temperature_unit param and returns Celsius.
-        // Fahrenheit range: roughly -60°F to 140°F. Celsius would typically be -50°C to 60°C.
+        // Open-Meteo should respect temperature_unit=fahrenheit param.
+        // Log a warning if values fall outside normal F range for investigation.
         if matches!(
             metric,
             WeatherMetric::TemperatureMax | WeatherMetric::TemperatureMin | WeatherMetric::TemperatureAvg
@@ -801,37 +836,6 @@ impl OpenMeteoClient {
                         "Forecast temperature out of Fahrenheit range [-60, 140], possible unit mismatch"
                     );
                 }
-            }
-            // Heuristic: if all values < 60 and we requested Fahrenheit, likely got Celsius.
-            // Most US weather markets deal with temps > 0°F. If max temp < -10°F for any US location
-            // in forecast season, that's unusual. But better to check if ALL values look like Celsius.
-            let all_below_celsius_range = values.iter().all(|&v| v >= -50.0 && v <= 60.0);
-            let any_extreme_f = values.iter().any(|&v| v > 60.0 || v < -50.0);
-            if all_below_celsius_range && !any_extreme_f && values.iter().any(|&v| v < 30.0) {
-                // All values in [-50, 60] and some below 30 — very likely Celsius
-                tracing::warn!(
-                    mean = values.iter().sum::<f64>() / values.len() as f64,
-                    metric = ?metric,
-                    "All forecast values in Celsius range despite requesting Fahrenheit — converting to Fahrenheit"
-                );
-                // Convert C → F: F = C * 9/5 + 32
-                let values_f: Vec<f64> = values.iter().map(|&c| c * 9.0 / 5.0 + 32.0).collect();
-                let mean_f = values_f.iter().sum::<f64>() / values_f.len() as f64;
-                let variance_f = values_f.iter().map(|v| (v - mean_f).powi(2)).sum::<f64>() / values_f.len() as f64;
-                let std_dev_f = variance_f.sqrt();
-                let target_value_f = if target_date.is_some() {
-                    Some(values_f[0])
-                } else {
-                    None
-                };
-                return Ok(ForecastData {
-                    values: values_f,
-                    dates,
-                    mean: mean_f,
-                    std_dev: std_dev_f,
-                    target_value: target_value_f,
-                    model_spread: 0.0,
-                });
             }
         }
 
@@ -1090,10 +1094,19 @@ pub fn normal_cdf(x: f64) -> f64 {
 ///
 /// Precipitation data is non-negative and right-skewed, making log-normal
 /// a better fit than normal distribution.
-/// Returns 0.0 for t <= 0 or mean <= 0.
+/// When mean <= 0 (no precipitation expected), returns 1.0 for any t > 0
+/// (almost certain the amount is below any positive threshold).
 pub fn lognormal_cdf(t: f64, mean: f64, sigma: f64) -> f64 {
-    if t <= 0.0 || mean <= 0.0 || sigma <= 0.0 {
+    if t <= 0.0 {
         return 0.0;
+    }
+    if mean <= 0.0 {
+        // No precipitation expected: P(X ≤ t) ≈ 1 for any t > 0
+        return 1.0;
+    }
+    if sigma <= 0.0 {
+        // Degenerate: point mass at mean
+        return if t >= mean { 1.0 } else { 0.0 };
     }
 
     // Convert (mean, sigma) of the actual variable to log-space parameters
@@ -1113,10 +1126,14 @@ pub fn lognormal_cdf(t: f64, mean: f64, sigma: f64) -> f64 {
 /// Wind speed follows a Weibull distribution. We use shape k=2 (Rayleigh).
 /// lambda = mean / Gamma(1 + 1/k) = mean / Gamma(1.5) ≈ mean / 0.8862.
 /// P(X < t) = 1 - exp(-(t/lambda)^k)
-/// Returns 0.0 for t <= 0 or mean <= 0.
+/// When mean <= 0 (no wind expected), returns 1.0 for any t > 0.
 pub fn weibull_cdf(t: f64, mean: f64, _sigma: f64) -> f64 {
-    if t <= 0.0 || mean <= 0.0 {
+    if t <= 0.0 {
         return 0.0;
+    }
+    if mean <= 0.0 {
+        // No wind expected: P(X ≤ t) ≈ 1 for any t > 0
+        return 1.0;
     }
 
     let k = 2.0;
@@ -1134,7 +1151,7 @@ fn cdf_for_metric(metric: WeatherMetric, value: f64, mean: f64, sigma: f64) -> f
         | WeatherMetric::TemperatureMin
         | WeatherMetric::TemperatureAvg => {
             if sigma < 1e-10 {
-                if mean >= value { 1.0 } else { 0.0 }
+                if mean <= value { 1.0 } else { 0.0 }
             } else {
                 normal_cdf((value - mean) / sigma)
             }
@@ -1476,9 +1493,15 @@ impl WeatherAlphaStrategy {
             days_to_event,
             self.config.dynamic_sigma,
         );
+        // Convert °C threshold to °F since forecast is always in Fahrenheit
+        let threshold = if is_temperature_metric(parsed.metric) && is_celsius_market(&market.question) {
+            celsius_to_fahrenheit(parsed.threshold)
+        } else {
+            parsed.threshold
+        };
         let model_prob = model_probability(
             &forecast,
-            parsed.threshold,
+            threshold,
             parsed.comparison,
             forecast_error_sigma,
             parsed.metric,
@@ -1618,6 +1641,7 @@ impl WeatherAlphaStrategy {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             location.to_lowercase().hash(&mut hasher);
             (metric as u8).hash(&mut hasher);
+            target_date.map(|d| d.num_days_from_ce()).hash(&mut hasher);
             hasher.finish()
         };
 
@@ -1777,6 +1801,16 @@ impl WeatherAlphaStrategy {
             let range = match parse_outcome_range(&market.question) {
                 Some(r) => r,
                 None => continue,
+            };
+
+            // Convert °C thresholds to °F since forecast is always in Fahrenheit
+            let range = if is_temperature_metric(metric) && is_celsius_market(&market.question) {
+                OutcomeRange {
+                    lower: range.lower.map(celsius_to_fahrenheit),
+                    upper: range.upper.map(celsius_to_fahrenheit),
+                }
+            } else {
+                range
             };
 
             let model_prob_f64 =
@@ -1963,12 +1997,24 @@ impl WeatherAlphaStrategy {
                 "inch"
             };
 
-            let (forecast, _is_fresh) = match self
-                .get_forecast(&market.question, &parsed, target_date, precipitation_unit)
-                .await
-            {
-                Some(f) => f,
-                None => continue,
+            // For NegRisk positions, use get_forecast_by_location to share cache with entry path.
+            // For binary positions, use get_forecast (keyed by question text).
+            let (forecast, _is_fresh) = if market.neg_risk {
+                match self
+                    .get_forecast_by_location(&parsed.location, parsed.metric, target_date, precipitation_unit)
+                    .await
+                {
+                    Some(f) => f,
+                    None => continue,
+                }
+            } else {
+                match self
+                    .get_forecast(&market.question, &parsed, target_date, precipitation_unit)
+                    .await
+                {
+                    Some(f) => f,
+                    None => continue,
+                }
             };
 
             let days_to_event = target_date.map(|d| {
@@ -1980,13 +2026,37 @@ impl WeatherAlphaStrategy {
                 days_to_event,
                 self.config.dynamic_sigma,
             );
-            let model_prob = model_probability(
-                &forecast,
-                parsed.threshold,
-                parsed.comparison,
-                forecast_error_sigma,
-                parsed.metric,
-            );
+            // Convert °C threshold to °F since forecast is always in Fahrenheit
+            // For NegRisk outcomes (ranges), use model_range_probability instead of model_probability
+            let model_prob = if market.neg_risk {
+                if let Some(range) = parse_outcome_range(&market.question) {
+                    let range = if is_temperature_metric(parsed.metric) && is_celsius_market(&market.question) {
+                        OutcomeRange {
+                            lower: range.lower.map(celsius_to_fahrenheit),
+                            upper: range.upper.map(celsius_to_fahrenheit),
+                        }
+                    } else {
+                        range
+                    };
+                    model_range_probability(&forecast, &range, forecast_error_sigma, parsed.metric)
+                } else {
+                    // NegRisk outcome couldn't be parsed as range — skip
+                    continue;
+                }
+            } else {
+                let threshold = if is_temperature_metric(parsed.metric) && is_celsius_market(&market.question) {
+                    celsius_to_fahrenheit(parsed.threshold)
+                } else {
+                    parsed.threshold
+                };
+                model_probability(
+                    &forecast,
+                    threshold,
+                    parsed.comparison,
+                    forecast_error_sigma,
+                    parsed.metric,
+                )
+            };
             let model_prob_dec = match Decimal::from_f64_retain(model_prob) {
                 Some(d) => d,
                 None => continue,
@@ -2495,6 +2565,21 @@ mod tests {
         assert_eq!(date, today + chrono::Duration::days(1));
     }
 
+    #[test]
+    fn test_parse_target_date_may_modal_verb() {
+        // "may" as a modal verb should NOT be parsed as the month May
+        let date = parse_target_date("Will temperatures may exceed 100°F this summer?");
+        assert!(date.is_none(), "Modal verb 'may' should not match as month May");
+    }
+
+    #[test]
+    fn test_parse_target_date_in_may() {
+        // "in May" with preposition should match
+        let date = parse_target_date("What will the temperature be in May?").unwrap();
+        assert_eq!(date.month(), 5);
+        assert_eq!(date.day(), 31);
+    }
+
     // ──── Precipitation Unit Detection Tests ────
 
     #[test]
@@ -2567,6 +2652,120 @@ mod tests {
         // Very large value should have CDF near 1
         let cdf = weibull_cdf(100.0, 10.0, 0.0);
         assert!(cdf > 0.99, "Weibull CDF at 10x mean should be near 1, got {}", cdf);
+    }
+
+    // ──── CDF Zero-Mean Edge Case Tests ────
+
+    #[test]
+    fn test_lognormal_cdf_zero_mean_returns_one() {
+        // No precipitation expected: P(X ≤ 13) should be ~1.0, not 0.0
+        assert_eq!(lognormal_cdf(13.0, 0.0, 0.3), 1.0);
+        assert_eq!(lognormal_cdf(0.1, 0.0, 1.0), 1.0);
+        assert_eq!(lognormal_cdf(100.0, -1.0, 0.5), 1.0);
+        // t <= 0 still returns 0.0
+        assert_eq!(lognormal_cdf(0.0, 0.0, 0.3), 0.0);
+        assert_eq!(lognormal_cdf(-1.0, 0.0, 0.3), 0.0);
+    }
+
+    #[test]
+    fn test_lognormal_cdf_zero_sigma_point_mass() {
+        // sigma=0 with positive mean: point mass at mean
+        assert_eq!(lognormal_cdf(5.0, 3.0, 0.0), 1.0);  // t > mean
+        assert_eq!(lognormal_cdf(3.0, 3.0, 0.0), 1.0);  // t == mean
+        assert_eq!(lognormal_cdf(1.0, 3.0, 0.0), 0.0);  // t < mean
+    }
+
+    #[test]
+    fn test_weibull_cdf_zero_mean_returns_one() {
+        // No wind expected: P(X ≤ t) should be ~1.0 for any t > 0
+        assert_eq!(weibull_cdf(5.0, 0.0, 0.0), 1.0);
+        assert_eq!(weibull_cdf(0.1, 0.0, 0.0), 1.0);
+        assert_eq!(weibull_cdf(50.0, -1.0, 0.0), 1.0);
+        // t <= 0 still returns 0.0
+        assert_eq!(weibull_cdf(0.0, 0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn test_snow_zero_forecast_range_probability() {
+        // "13 or more inches of snow" with forecast_mean=0.0 → should be ~0, not 1.0
+        let forecast = ForecastData {
+            values: vec![0.0],
+            dates: vec!["2026-02-21".to_string()],
+            mean: 0.0,
+            std_dev: 0.0,
+            target_value: Some(0.0),
+            model_spread: 0.0,
+        };
+        let range = OutcomeRange {
+            lower: Some(13.0),
+            upper: None,
+        };
+        let prob = model_range_probability(&forecast, &range, 2.0, WeatherMetric::Snowfall);
+        // P(snow ≥ 13 | forecast=0) should be very small (near 0)
+        assert!(
+            prob < 0.01,
+            "P(snow >= 13 | mean=0) should be ~0, got {}",
+            prob
+        );
+    }
+
+    // ──── Celsius/Fahrenheit Conversion Tests ────
+
+    #[test]
+    fn test_is_celsius_market() {
+        assert!(is_celsius_market("Will the highest temperature in Wellington be 23°C or higher?"));
+        assert!(is_celsius_market("between 10-12°C"));
+        assert!(is_celsius_market("temperature will exceed 30 Celsius"));
+        assert!(!is_celsius_market("Will the highest temperature be 84°F?"));
+        assert!(!is_celsius_market("between 84-85°F"));
+        assert!(!is_celsius_market("Will it snow 13 inches?"));
+    }
+
+    #[test]
+    fn test_celsius_to_fahrenheit_conversion() {
+        assert!((celsius_to_fahrenheit(0.0) - 32.0).abs() < 0.01);
+        assert!((celsius_to_fahrenheit(100.0) - 212.0).abs() < 0.01);
+        assert!((celsius_to_fahrenheit(23.0) - 73.4).abs() < 0.01);
+        assert!((celsius_to_fahrenheit(-40.0) - (-40.0)).abs() < 0.01); // C and F meet at -40
+    }
+
+    #[test]
+    fn test_cdf_for_metric_degenerate_temperature() {
+        // CDF(value) = P(X <= value). For point mass at mean (sigma → 0):
+        // P(X <= 80) = 1.0 when mean=70 (mass is below threshold)
+        // P(X <= 60) = 0.0 when mean=70 (mass is above threshold)
+        assert_eq!(cdf_for_metric(WeatherMetric::TemperatureMax, 80.0, 70.0, 0.0), 1.0);
+        assert_eq!(cdf_for_metric(WeatherMetric::TemperatureMax, 60.0, 70.0, 0.0), 0.0);
+        assert_eq!(cdf_for_metric(WeatherMetric::TemperatureMax, 70.0, 70.0, 0.0), 1.0); // at mean
+    }
+
+    #[test]
+    fn test_celsius_market_probability_correction() {
+        // Wellington: "23°C or higher" with forecast 71.5°F (=21.9°C)
+        // Without fix: P(X >= 23 | mean=71.5, sigma=3) ≈ 1.0 (wrong!)
+        // With fix: P(X >= 73.4 | mean=71.5, sigma=3) ≈ 0.26 (correct)
+        let forecast = ForecastData {
+            values: vec![71.5],
+            dates: vec!["2026-02-22".to_string()],
+            mean: 71.5,
+            std_dev: 0.0,
+            target_value: Some(71.5),
+            model_spread: 0.0,
+        };
+        let sigma = 3.0;
+
+        // Incorrect: using raw Celsius threshold
+        let prob_wrong = model_probability(&forecast, 23.0, Comparison::AtLeast, sigma, WeatherMetric::TemperatureMax);
+        assert!(prob_wrong > 0.99, "Without conversion prob should be ~1.0, got {}", prob_wrong);
+
+        // Correct: convert 23°C to 73.4°F
+        let threshold_f = celsius_to_fahrenheit(23.0);
+        let prob_correct = model_probability(&forecast, threshold_f, Comparison::AtLeast, sigma, WeatherMetric::TemperatureMax);
+        assert!(
+            prob_correct < 0.40,
+            "With conversion prob should be ~0.26, got {}",
+            prob_correct
+        );
     }
 
     // ──── Forecast Error Sigma Tests ────
@@ -3176,6 +3375,149 @@ mod tests {
 
         let exits = strategy.scan_exits(&[market]).await;
         assert_eq!(exits.len(), 1, "Model reversal exit must fire even when is_fresh_signal=false");
+        assert!(exits[0].question.starts_with("[EXIT]"));
+    }
+
+    #[tokio::test]
+    async fn test_exit_neg_risk_uses_range_probability() {
+        // NegRisk outcome "between 84-85°F" should use model_range_probability,
+        // not model_probability. With forecast 70°F, P(84 <= X <= 85) ≈ tiny,
+        // so buying YES at 0.50 is a losing trade → exit should fire.
+        let token_id = U256::from(1u64);
+        let question = "Will the highest temperature in Miami be between 84-85°F on February 22?";
+        let market = MarketInfo {
+            condition_id: B256::ZERO,
+            question_id: B256::ZERO,
+            question: question.to_string(),
+            neg_risk: true,  // NegRisk market!
+            neg_risk_market_id: None,
+            tokens: vec![
+                TokenInfo {
+                    token_id: U256::from(1u64),
+                    outcome: Outcome::Yes,
+                    complement_id: U256::from(2u64),
+                },
+                TokenInfo {
+                    token_id: U256::from(2u64),
+                    outcome: Outcome::No,
+                    complement_id: U256::from(1u64),
+                },
+            ],
+            tick_size: dec!(0.01),
+            fee_rate_bps: 200,
+            active: true,
+            liquidity: dec!(1000),
+            event_title: None,
+            end_date: None,
+            category: None,
+            outcome_prices: None,
+            gamma_best_bid: None,
+            gamma_best_ask: None,
+        };
+
+        let mut books = HashMap::new();
+        books.insert(token_id, make_weather_book(token_id, dec!(0.50)));
+        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.50)));
+
+        let held = vec![(token_id, dec!(10), dec!(0.50))]; // bought YES at 0.50
+        let strategy = make_weather_strategy(books, held);
+
+        // Pre-populate cache: forecast 70°F (far from 84-85 range)
+        let cache_key = WeatherAlphaStrategy::question_hash(question);
+        {
+            let mut cache = strategy.forecast_cache.lock().unwrap();
+            cache.insert(cache_key, CachedForecast {
+                forecast: ForecastData {
+                    values: vec![70.0],
+                    dates: vec!["2026-02-22".into()],
+                    mean: 70.0,
+                    std_dev: 3.0,
+                    target_value: Some(70.0),
+                    model_spread: 0.0,
+                },
+                fetched_at: Instant::now(),
+                previous_mean: None,
+                is_fresh_signal: true,
+            });
+        }
+
+        let exits = strategy.scan_exits(&[market]).await;
+        // P(84 ≤ X ≤ 85 | mean=70, sigma=3) is tiny (~0.00003)
+        // effective_prob ≈ 0.00003, best_bid = 0.50
+        // 0.00003 < 0.50 - 0.005 → EXIT must fire
+        assert_eq!(exits.len(), 1, "NegRisk range exit should fire when forecast is far from range");
+        assert!(exits[0].question.starts_with("[EXIT]"));
+    }
+
+    #[tokio::test]
+    async fn test_exit_celsius_neg_risk_converts_threshold() {
+        // NegRisk outcome in °C: "23°C or higher" with forecast 71.5°F (=21.9°C)
+        // Without conversion: P(X >= 23) ≈ 1.0 → no exit (wrong!)
+        // With conversion: P(X >= 73.4) ≈ 0.26 → exit fires (correct!)
+        let token_id = U256::from(1u64);
+        let question = "Will the highest temperature in Wellington be 23°C or higher on February 22?";
+        let market = MarketInfo {
+            condition_id: B256::ZERO,
+            question_id: B256::ZERO,
+            question: question.to_string(),
+            neg_risk: true,
+            neg_risk_market_id: None,
+            tokens: vec![
+                TokenInfo {
+                    token_id: U256::from(1u64),
+                    outcome: Outcome::Yes,
+                    complement_id: U256::from(2u64),
+                },
+                TokenInfo {
+                    token_id: U256::from(2u64),
+                    outcome: Outcome::No,
+                    complement_id: U256::from(1u64),
+                },
+            ],
+            tick_size: dec!(0.01),
+            fee_rate_bps: 200,
+            active: true,
+            liquidity: dec!(1000),
+            event_title: None,
+            end_date: None,
+            category: None,
+            outcome_prices: None,
+            gamma_best_bid: None,
+            gamma_best_ask: None,
+        };
+
+        let mut books = HashMap::new();
+        books.insert(token_id, make_weather_book(token_id, dec!(0.52)));
+        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.48)));
+
+        let held = vec![(token_id, dec!(12.50), dec!(0.52))]; // bought YES at 0.52
+        let strategy = make_weather_strategy(books, held);
+
+        // Pre-populate cache: forecast 71.5°F (=21.9°C, below 23°C threshold)
+        let cache_key = WeatherAlphaStrategy::question_hash(question);
+        {
+            let mut cache = strategy.forecast_cache.lock().unwrap();
+            cache.insert(cache_key, CachedForecast {
+                forecast: ForecastData {
+                    values: vec![71.5],
+                    dates: vec!["2026-02-22".into()],
+                    mean: 71.5,
+                    std_dev: 3.0,
+                    target_value: Some(71.5),
+                    model_spread: 0.0,
+                },
+                fetched_at: Instant::now(),
+                previous_mean: None,
+                is_fresh_signal: true,
+            });
+        }
+
+        let exits = strategy.scan_exits(&[market]).await;
+        // With °C conversion: 23°C = 73.4°F, P(X >= 73.4 | mean=71.5, sigma=3) ≈ 0.26
+        // NegRisk uses parse_outcome_range: "23°C or higher" → lower=Some(23) → converted to 73.4
+        // effective_prob ≈ 0.26, best_bid = 0.52
+        // 0.26 < 0.52 - 0.005 = 0.515 → EXIT must fire
+        assert_eq!(exits.len(), 1, "Celsius NegRisk exit should fire with correct conversion");
         assert!(exits[0].question.starts_with("[EXIT]"));
     }
 }

@@ -9,7 +9,7 @@ Polymarket 量化套利交易机器人（Rust）。通过实时订单簿监控�
 - **语言**: Rust Edition 2024, MSRV 1.88.0
 - **工具链**: rustc 1.93.0, cargo 1.93.0
 - **代码量**: ~9700 行 Rust
-- **测试**: 180 个（全部通过）
+- **测试**: 192 个（全部通过）
 
 ## 常用命令
 
@@ -352,7 +352,7 @@ Grafana 仪表盘: PnL, Exposure gauge, Circuit breaker, Market stats, Opportuni
 | Crate | 数量 | 覆盖 |
 |-------|------|------|
 | pa-backtest | 11 | DataLoader 解析, Report 构建/统计, Simulator 执行模拟 |
-| pa-strategy | 125 | ProfitCalculator(12), CrossMarket(4), Weather(67: binary parser, NegRisk outcome range parser(5), event title parser(2), date parser(6), precipitation unit(3), CDF models(7: normal, lognormal, weibull, dispatcher), forecast error sigma(2), dynamic sigma(5), model spread/ensemble(4), forecast change detection(6), probability model(3), position sizing(3), cache eviction, NegRisk NO-side, edge detection), Convergence(10: filters(4), detection(3), time decay, position sizing, neg_risk skip), CryptoAlpha(24: question parser(6), volatility, GBM probability(4), asset mapping, NegRisk event title parser(3), NegRisk outcome range parser(3), GBM range probability(2), binary group(4: asset from title, reach/dip questions, group type)), YesNo(内含于profitability) |
+| pa-strategy | 138 | ProfitCalculator(12), CrossMarket(4), Weather(79: binary parser, NegRisk outcome range parser(5), event title parser(2), date parser(8: full month, abbreviated, slash, none, bare month, by end of, today, tomorrow, may modal verb, in may), precipitation unit(3), CDF models(8: normal, lognormal, weibull, dispatcher, degenerate temperature), CDF zero-mean(4: lognormal mean=0, lognormal sigma=0, weibull mean=0, snow zero forecast), celsius conversion(3: detection, conversion, probability correction), forecast error sigma(2), dynamic sigma(5), model spread/ensemble(4), forecast change detection(6), probability model(3), position sizing(3), cache eviction, NegRisk NO-side, edge detection, exit change detection, exit NegRisk range, exit celsius NegRisk), Convergence(10: filters(4), detection(3), time decay, position sizing, neg_risk skip), CryptoAlpha(24: question parser(6), volatility, GBM probability(4), asset mapping, NegRisk event title parser(3), NegRisk outcome range parser(3), GBM range probability(2), binary group(4: asset from title, reach/dip questions, group type)), YesNo(内含于profitability) |
 | pa-execution | 1 | Gas 估算 |
 | pa-market-data | 17 | OrderBook 排序(1), EventCalendar(12: Finnhub/CoinMarketCal parsing, static loading, window tests(3), impact multipliers(3), overlapping events, keyword matching, no-match different category), GammaFeed(4: binary group basic, excludes neg_risk, no title, multiple groups) |
 
