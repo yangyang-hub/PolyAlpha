@@ -9,7 +9,7 @@ Polymarket 量化套利交易机器人（Rust）。通过实时订单簿监控�
 - **语言**: Rust Edition 2024, MSRV 1.88.0
 - **工具链**: rustc 1.93.0, cargo 1.93.0
 - **代码量**: ~9700 行 Rust
-- **测试**: 125 个（全部通过）
+- **测试**: 180 个（全部通过）
 
 ## 常用命令
 
@@ -91,7 +91,7 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 
 关键结构: `Settings { chain, clob, gamma, strategy, risk, database, monitor, market_filter, weather, convergence, crypto_alpha, event_calendar, market_making }`
 
-`WeatherConfig` fields: `min_edge_bps`, `max_position_usdc`, `kelly_fraction`, `forecast_error: ForecastErrorConfig`, `refresh_interval_secs`
+`WeatherConfig` fields: `min_edge_bps`, `max_position_usdc`, `kelly_fraction`, `forecast_error: ForecastErrorConfig`, `refresh_interval_secs`, `dynamic_sigma(true)`, `ensemble_enabled(false)`, `ensemble_models(["gfs_seamless","ecmwf_ifs025","icon_seamless"])`, `forecast_change_detection(false)`, `forecast_change_threshold(0.5)`
 
 `ForecastErrorConfig` — 每指标预报误差σ: `temperature_sigma_f(3.0°F)`, `precipitation_sigma_in(0.3in)`, `snowfall_sigma_in(2.0in)`, `wind_sigma_mph(5.0mph)`
 
@@ -133,8 +133,11 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 
 **Forecast Error Model**:
 - 使用绝对值 sigma 替代百分比不确定性: `ForecastErrorConfig` per metric
-- 日期特定: `sigma = forecast_error_sigma`（仅预报误差）
-- 多日模式: `sigma = sqrt(std_dev² + forecast_error_sigma²)`（组合方差）
+- 动态 sigma: `dynamic_sigma=true` 时 `sigma = base × √(max(1, days_to_event))`
+- 日期特定: `sigma = sqrt(forecast_error² + model_spread²)`
+- 多日模式: `sigma = sqrt(std_dev² + forecast_error² + model_spread²)`
+- 多模型 ensemble: `ensemble_enabled=true` 时并行查询 GFS/ECMWF/ICON，取均值 + 模型分歧(model_spread)
+- 预报变化检测: `forecast_change_detection=true` 时仅在 `|new - old| > threshold × sigma` 时交易
 
 **分布模型（CDF）**:
 - 温度: 正态分布 `normal_cdf(z)`
@@ -344,12 +347,12 @@ Grafana 仪表盘: PnL, Exposure gauge, Circuit breaker, Market stats, Opportuni
 7. `crates/pa-backtest/src/engine.rs` — build_strategies() 中添加
 8. 测试: 至少覆盖 detect 逻辑 + profitability 计算
 
-## 测试分布（125 个）
+## 测试分布（180 个）
 
 | Crate | 数量 | 覆盖 |
 |-------|------|------|
 | pa-backtest | 11 | DataLoader 解析, Report 构建/统计, Simulator 执行模拟 |
-| pa-strategy | 96 | ProfitCalculator(12), CrossMarket(4), Weather(45: binary parser, NegRisk outcome range parser(5), event title parser(2), date parser(6), precipitation unit(3), CDF models(7: normal, lognormal, weibull, dispatcher), forecast error sigma(2), probability model(3), position sizing(3), cache eviction, NegRisk NO-side, edge detection), Convergence(10: filters(4), detection(3), time decay, position sizing, neg_risk skip), CryptoAlpha(24: question parser(6), volatility, GBM probability(4), asset mapping, NegRisk event title parser(3), NegRisk outcome range parser(3), GBM range probability(2), binary group(4: asset from title, reach/dip questions, group type)), YesNo(内含于profitability) |
+| pa-strategy | 125 | ProfitCalculator(12), CrossMarket(4), Weather(67: binary parser, NegRisk outcome range parser(5), event title parser(2), date parser(6), precipitation unit(3), CDF models(7: normal, lognormal, weibull, dispatcher), forecast error sigma(2), dynamic sigma(5), model spread/ensemble(4), forecast change detection(6), probability model(3), position sizing(3), cache eviction, NegRisk NO-side, edge detection), Convergence(10: filters(4), detection(3), time decay, position sizing, neg_risk skip), CryptoAlpha(24: question parser(6), volatility, GBM probability(4), asset mapping, NegRisk event title parser(3), NegRisk outcome range parser(3), GBM range probability(2), binary group(4: asset from title, reach/dip questions, group type)), YesNo(内含于profitability) |
 | pa-execution | 1 | Gas 估算 |
 | pa-market-data | 17 | OrderBook 排序(1), EventCalendar(12: Finnhub/CoinMarketCal parsing, static loading, window tests(3), impact multipliers(3), overlapping events, keyword matching, no-match different category), GammaFeed(4: binary group basic, excludes neg_risk, no title, multiple groups) |
 

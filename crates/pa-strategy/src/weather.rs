@@ -49,14 +49,29 @@ pub enum Comparison {
 }
 
 /// Return the forecast error sigma for a given metric from the config.
-pub fn sigma_for_metric(config: &ForecastErrorConfig, metric: WeatherMetric) -> f64 {
-    match metric {
+///
+/// When `dynamic_sigma` is true, scales the base sigma by `sqrt(max(1, days_to_event))`
+/// to account for increasing forecast uncertainty over longer horizons.
+pub fn sigma_for_metric(
+    config: &ForecastErrorConfig,
+    metric: WeatherMetric,
+    days_to_event: Option<i64>,
+    dynamic_sigma: bool,
+) -> f64 {
+    let base = match metric {
         WeatherMetric::TemperatureMax
         | WeatherMetric::TemperatureMin
         | WeatherMetric::TemperatureAvg => config.temperature_sigma_f,
         WeatherMetric::Rainfall => config.precipitation_sigma_in,
         WeatherMetric::Snowfall => config.snowfall_sigma_in,
         WeatherMetric::WindSpeed => config.wind_sigma_mph,
+    };
+
+    if dynamic_sigma {
+        let days = days_to_event.unwrap_or(1).max(1) as f64;
+        base * days.sqrt()
+    } else {
+        base
     }
 }
 
@@ -605,6 +620,9 @@ pub struct ForecastData {
     pub std_dev: f64,
     /// Single-day value when a specific target date was requested.
     pub target_value: Option<f64>,
+    /// Cross-model standard deviation from ensemble forecasting.
+    /// Zero when ensemble is disabled or only one model responded.
+    pub model_spread: f64,
 }
 
 /// Open-Meteo geocoding API response.
@@ -812,6 +830,7 @@ impl OpenMeteoClient {
                     mean: mean_f,
                     std_dev: std_dev_f,
                     target_value: target_value_f,
+                    model_spread: 0.0,
                 });
             }
         }
@@ -832,7 +851,178 @@ impl OpenMeteoClient {
             mean,
             std_dev,
             target_value,
+            model_spread: 0.0,
         })
+    }
+
+    /// Fetch forecasts from multiple models and compute ensemble mean + model spread.
+    ///
+    /// Queries each model in parallel (via `tokio::spawn`). Models that fail are skipped.
+    /// Returns `None` if no model succeeds.
+    pub async fn forecast_ensemble(
+        &self,
+        lat: f64,
+        lon: f64,
+        metric: WeatherMetric,
+        target_date: Option<NaiveDate>,
+        precipitation_unit: &str,
+        model_names: &[String],
+    ) -> Option<ForecastData> {
+        if model_names.is_empty() {
+            return None;
+        }
+
+        let daily_param = match metric {
+            WeatherMetric::TemperatureMax => "temperature_2m_max",
+            WeatherMetric::TemperatureMin => "temperature_2m_min",
+            WeatherMetric::TemperatureAvg => "temperature_2m_mean",
+            WeatherMetric::Rainfall => "rain_sum",
+            WeatherMetric::Snowfall => "snowfall_sum",
+            WeatherMetric::WindSpeed => "wind_speed_10m_max",
+        };
+
+        // Build per-model futures
+        let mut handles = Vec::new();
+        for model_name in model_names {
+            let http = self.http.clone();
+            let model = model_name.clone();
+            let precip_unit = precipitation_unit.to_string();
+            let daily = daily_param.to_string();
+
+            let mut params: Vec<(&str, String)> = vec![
+                ("latitude", lat.to_string()),
+                ("longitude", lon.to_string()),
+                ("daily", daily),
+                ("temperature_unit", "fahrenheit".to_string()),
+            ];
+
+            if matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
+                params.push(("precipitation_unit", precip_unit));
+            }
+            if matches!(metric, WeatherMetric::WindSpeed) {
+                params.push(("wind_speed_unit", "mph".to_string()));
+            }
+            if let Some(date) = target_date {
+                let date_str = date.format("%Y-%m-%d").to_string();
+                params.push(("start_date", date_str.clone()));
+                params.push(("end_date", date_str));
+            } else {
+                params.push(("forecast_days", "14".to_string()));
+            }
+
+            // Convert to owned pairs for the spawned task
+            let owned_params: Vec<(String, String)> = params
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect();
+
+            let handle = tokio::spawn(async move {
+                let url = format!("https://api.open-meteo.com/v1/forecast?models={}", model);
+                let result: anyhow::Result<ForecastResponse> = with_retry(1, || {
+                    let p = owned_params.clone();
+                    let u = url.clone();
+                    let h = http.clone();
+                    async move {
+                        let r: ForecastResponse = h
+                            .get(&u)
+                            .query(&p)
+                            .send()
+                            .await?
+                            .json()
+                            .await?;
+                        Ok(r)
+                    }
+                })
+                .await;
+                (model, result)
+            });
+            handles.push(handle);
+        }
+
+        // Collect results
+        let mut model_means: Vec<f64> = Vec::new();
+        let mut best_forecast: Option<ForecastData> = None;
+
+        for handle in handles {
+            if let Ok((model_name, Ok(resp))) = handle.await {
+                if let Some(daily) = resp.daily {
+                    let values = match metric {
+                        WeatherMetric::TemperatureMax => daily.temperature_2m_max,
+                        WeatherMetric::TemperatureMin => daily.temperature_2m_min,
+                        WeatherMetric::TemperatureAvg => daily.temperature_2m_mean,
+                        WeatherMetric::Rainfall => daily.rain_sum,
+                        WeatherMetric::Snowfall => daily.snowfall_sum,
+                        WeatherMetric::WindSpeed => daily.wind_speed_10m_max,
+                    };
+
+                    if values.is_empty() {
+                        continue;
+                    }
+
+                    let mean = values.iter().sum::<f64>() / values.len() as f64;
+                    let target_val = if target_date.is_some() {
+                        Some(values[0])
+                    } else {
+                        None
+                    };
+                    model_means.push(target_val.unwrap_or(mean));
+
+                    if best_forecast.is_none() {
+                        let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                            / values.len() as f64;
+                        best_forecast = Some(ForecastData {
+                            values,
+                            dates: daily.time,
+                            mean,
+                            std_dev: variance.sqrt(),
+                            target_value: target_val,
+                            model_spread: 0.0,
+                        });
+                    }
+
+                    tracing::debug!(
+                        model = %model_name,
+                        mean = mean,
+                        target_value = ?target_val,
+                        "Ensemble model response"
+                    );
+                }
+            }
+        }
+
+        if model_means.is_empty() {
+            return None;
+        }
+
+        let ensemble_mean = model_means.iter().sum::<f64>() / model_means.len() as f64;
+        let model_spread = if model_means.len() > 1 {
+            let var = model_means
+                .iter()
+                .map(|v| (v - ensemble_mean).powi(2))
+                .sum::<f64>()
+                / model_means.len() as f64;
+            var.sqrt()
+        } else {
+            0.0
+        };
+
+        // Update the best forecast with ensemble aggregates
+        let mut forecast = best_forecast?;
+        if forecast.target_value.is_some() {
+            forecast.target_value = Some(ensemble_mean);
+        } else {
+            forecast.mean = ensemble_mean;
+        }
+        forecast.model_spread = model_spread;
+
+        tracing::info!(
+            n_models = model_means.len(),
+            ensemble_mean = ensemble_mean,
+            model_spread = model_spread,
+            "Ensemble forecast computed"
+        );
+
+        Some(forecast)
     }
 }
 
@@ -954,17 +1144,18 @@ fn cdf_for_metric(metric: WeatherMetric, value: f64, mean: f64, sigma: f64) -> f
     }
 }
 
-/// Compute effective sigma combining forecast std_dev and forecast error.
+/// Compute effective sigma combining forecast std_dev, forecast error, and model spread.
 ///
-/// For date-specific forecasts (target_value.is_some()): uses only forecast error sigma.
-/// For multi-day forecasts: sqrt(std_dev² + forecast_error_sigma²).
+/// For date-specific forecasts (target_value.is_some()): sqrt(forecast_error² + model_spread²).
+/// For multi-day forecasts: sqrt(std_dev² + forecast_error² + model_spread²).
+/// When model_spread is 0.0, this degrades to the original behavior.
 fn effective_sigma(forecast: &ForecastData, forecast_error_sigma: f64) -> f64 {
     if forecast.target_value.is_some() {
-        // Date-specific: day-to-day variance is irrelevant, only forecast error matters
-        forecast_error_sigma
+        // Date-specific: day-to-day variance is irrelevant
+        (forecast_error_sigma.powi(2) + forecast.model_spread.powi(2)).sqrt()
     } else {
-        // Multi-day: combine observed variance with forecast error
-        (forecast.std_dev.powi(2) + forecast_error_sigma.powi(2)).sqrt()
+        // Multi-day: combine observed variance with forecast error and model spread
+        (forecast.std_dev.powi(2) + forecast_error_sigma.powi(2) + forecast.model_spread.powi(2)).sqrt()
     }
 }
 
@@ -1040,6 +1231,29 @@ pub fn model_range_probability(
     (cdf_upper - cdf_lower).max(0.0)
 }
 
+// ──── Forecast Change Detection ────
+
+/// Check whether the new forecast value represents a significant change from the previous one.
+///
+/// Returns `true` if:
+/// - There is no previous value (first observation → always significant)
+/// - `|new_value - previous| > threshold * sigma`
+///
+/// Returns `false` if the change is below the threshold.
+fn is_significant_change(new_value: f64, previous: Option<f64>, sigma: f64, threshold: f64) -> bool {
+    match previous {
+        None => true, // First observation is always fresh
+        Some(prev) => {
+            if sigma <= 0.0 {
+                // Avoid division issues; any non-zero change is significant
+                (new_value - prev).abs() > 1e-10
+            } else {
+                (new_value - prev).abs() > threshold * sigma
+            }
+        }
+    }
+}
+
 // ──── Cache Eviction ────
 
 /// Remove stale forecast cache entries older than `max_age_secs`.
@@ -1053,6 +1267,10 @@ fn evict_stale_cache_entries(cache: &mut HashMap<u64, CachedForecast>, max_age_s
 struct CachedForecast {
     forecast: ForecastData,
     fetched_at: Instant,
+    /// Previous forecast mean (for change detection).
+    previous_mean: Option<f64>,
+    /// Whether this forecast represents a significant change from the previous one.
+    is_fresh_signal: bool,
 }
 
 pub struct WeatherAlphaStrategy {
@@ -1106,13 +1324,14 @@ impl WeatherAlphaStrategy {
     }
 
     /// Get cached forecast or fetch new one.
+    /// Returns (forecast, is_fresh_signal) where is_fresh_signal indicates a significant change.
     async fn get_forecast(
         &self,
         question: &str,
         parsed: &WeatherQuestion,
         target_date: Option<NaiveDate>,
         precipitation_unit: &str,
-    ) -> Option<ForecastData> {
+    ) -> Option<(ForecastData, bool)> {
         let key = Self::question_hash(question);
 
         // Check cache
@@ -1121,7 +1340,7 @@ impl WeatherAlphaStrategy {
             if let Some(entry) = cache.get(&key)
                 && entry.fetched_at.elapsed().as_secs() < self.config.refresh_interval_secs
             {
-                return Some(entry.forecast.clone());
+                return Some((entry.forecast.clone(), entry.is_fresh_signal));
             }
         }
 
@@ -1138,21 +1357,73 @@ impl WeatherAlphaStrategy {
             }
         };
 
-        let forecast = match self
-            .meteo
-            .forecast(coords.0, coords.1, parsed.metric, target_date, precipitation_unit)
-            .await
-        {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::warn!(
-                    location = %parsed.location,
-                    metric = ?parsed.metric,
-                    error = %e,
-                    "Failed to fetch forecast"
-                );
-                return None;
+        // Try ensemble if enabled, fallback to single model
+        let forecast = if self.config.ensemble_enabled && !self.config.ensemble_models.is_empty() {
+            match self
+                .meteo
+                .forecast_ensemble(
+                    coords.0,
+                    coords.1,
+                    parsed.metric,
+                    target_date,
+                    precipitation_unit,
+                    &self.config.ensemble_models,
+                )
+                .await
+            {
+                Some(f) => f,
+                None => {
+                    tracing::warn!("Ensemble forecast failed, falling back to single model");
+                    match self
+                        .meteo
+                        .forecast(coords.0, coords.1, parsed.metric, target_date, precipitation_unit)
+                        .await
+                    {
+                        Ok(f) => f,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Single model fallback also failed");
+                            return None;
+                        }
+                    }
+                }
             }
+        } else {
+            match self
+                .meteo
+                .forecast(coords.0, coords.1, parsed.metric, target_date, precipitation_unit)
+                .await
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!(
+                        location = %parsed.location,
+                        metric = ?parsed.metric,
+                        error = %e,
+                        "Failed to fetch forecast"
+                    );
+                    return None;
+                }
+            }
+        };
+
+        // Compute change detection signal
+        let new_mean = forecast.target_value.unwrap_or(forecast.mean);
+        let (previous_mean, is_fresh_signal) = {
+            let cache = self.forecast_cache.lock().unwrap();
+            let prev = cache.get(&key).and_then(|e| e.previous_mean);
+            let base_sigma = sigma_for_metric(
+                &self.config.forecast_error,
+                parsed.metric,
+                None,
+                false,
+            );
+            let fresh = is_significant_change(
+                new_mean,
+                prev,
+                base_sigma,
+                self.config.forecast_change_threshold,
+            );
+            (Some(new_mean), fresh)
         };
 
         // Cache the result and evict stale entries
@@ -1163,12 +1434,14 @@ impl WeatherAlphaStrategy {
                 CachedForecast {
                     forecast: forecast.clone(),
                     fetched_at: Instant::now(),
+                    previous_mean,
+                    is_fresh_signal,
                 },
             );
             evict_stale_cache_entries(&mut cache, self.config.refresh_interval_secs * 2);
         }
 
-        Some(forecast)
+        Some((forecast, is_fresh_signal))
     }
 
     /// Detect a directional opportunity on a single weather market.
@@ -1185,11 +1458,24 @@ impl WeatherAlphaStrategy {
             "inch"
         };
 
-        let forecast = self
+        let (forecast, is_fresh) = self
             .get_forecast(&market.question, parsed, target_date, precipitation_unit)
             .await?;
 
-        let forecast_error_sigma = sigma_for_metric(&self.config.forecast_error, parsed.metric);
+        // Skip if forecast hasn't changed significantly (when change detection is enabled)
+        if self.config.forecast_change_detection && !is_fresh {
+            return None;
+        }
+
+        let days_to_event = target_date.map(|d| {
+            (d - Local::now().date_naive()).num_days()
+        });
+        let forecast_error_sigma = sigma_for_metric(
+            &self.config.forecast_error,
+            parsed.metric,
+            days_to_event,
+            self.config.dynamic_sigma,
+        );
         let model_prob = model_probability(
             &forecast,
             parsed.threshold,
@@ -1318,13 +1604,14 @@ impl WeatherAlphaStrategy {
     }
 
     /// Get a forecast by location string and metric, using the cache.
+    /// Returns (forecast, is_fresh_signal) where is_fresh_signal indicates a significant change.
     async fn get_forecast_by_location(
         &self,
         location: &str,
         metric: WeatherMetric,
         target_date: Option<NaiveDate>,
         precipitation_unit: &str,
-    ) -> Option<ForecastData> {
+    ) -> Option<(ForecastData, bool)> {
         // Use location+metric as cache key
         let cache_key = {
             use std::hash::{Hash, Hasher};
@@ -1340,7 +1627,7 @@ impl WeatherAlphaStrategy {
             if let Some(entry) = cache.get(&cache_key)
                 && entry.fetched_at.elapsed().as_secs() < self.config.refresh_interval_secs
             {
-                return Some(entry.forecast.clone());
+                return Some((entry.forecast.clone(), entry.is_fresh_signal));
             }
         }
 
@@ -1353,16 +1640,68 @@ impl WeatherAlphaStrategy {
             }
         };
 
-        let forecast = match self
-            .meteo
-            .forecast(coords.0, coords.1, metric, target_date, precipitation_unit)
-            .await
-        {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::warn!(location = %location, metric = ?metric, error = %e, "Failed to fetch forecast for NegRisk weather");
-                return None;
+        // Try ensemble if enabled, fallback to single model
+        let forecast = if self.config.ensemble_enabled && !self.config.ensemble_models.is_empty() {
+            match self
+                .meteo
+                .forecast_ensemble(
+                    coords.0,
+                    coords.1,
+                    metric,
+                    target_date,
+                    precipitation_unit,
+                    &self.config.ensemble_models,
+                )
+                .await
+            {
+                Some(f) => f,
+                None => {
+                    tracing::warn!("Ensemble forecast failed for NegRisk, falling back to single model");
+                    match self
+                        .meteo
+                        .forecast(coords.0, coords.1, metric, target_date, precipitation_unit)
+                        .await
+                    {
+                        Ok(f) => f,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Single model fallback also failed for NegRisk");
+                            return None;
+                        }
+                    }
+                }
             }
+        } else {
+            match self
+                .meteo
+                .forecast(coords.0, coords.1, metric, target_date, precipitation_unit)
+                .await
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!(location = %location, metric = ?metric, error = %e, "Failed to fetch forecast for NegRisk weather");
+                    return None;
+                }
+            }
+        };
+
+        // Compute change detection signal
+        let new_mean = forecast.target_value.unwrap_or(forecast.mean);
+        let (previous_mean, is_fresh_signal) = {
+            let cache = self.forecast_cache.lock().unwrap();
+            let prev = cache.get(&cache_key).and_then(|e| e.previous_mean);
+            let base_sigma = sigma_for_metric(
+                &self.config.forecast_error,
+                metric,
+                None,
+                false,
+            );
+            let fresh = is_significant_change(
+                new_mean,
+                prev,
+                base_sigma,
+                self.config.forecast_change_threshold,
+            );
+            (Some(new_mean), fresh)
         };
 
         // Cache and evict stale entries
@@ -1373,12 +1712,14 @@ impl WeatherAlphaStrategy {
                 CachedForecast {
                     forecast: forecast.clone(),
                     fetched_at: Instant::now(),
+                    previous_mean,
+                    is_fresh_signal,
                 },
             );
             evict_stale_cache_entries(&mut cache, self.config.refresh_interval_secs * 2);
         }
 
-        Some(forecast)
+        Some((forecast, is_fresh_signal))
     }
 
     /// Detect the best undervalued outcome in a NegRisk weather event.
@@ -1398,11 +1739,24 @@ impl WeatherAlphaStrategy {
             "inch"
         };
 
-        let forecast = self
+        let (forecast, is_fresh) = self
             .get_forecast_by_location(location, metric, target_date, precipitation_unit)
             .await?;
 
-        let forecast_error_sigma = sigma_for_metric(&self.config.forecast_error, metric);
+        // Skip if forecast hasn't changed significantly (when change detection is enabled)
+        if self.config.forecast_change_detection && !is_fresh {
+            return None;
+        }
+
+        let days_to_event = target_date.map(|d| {
+            (d - Local::now().date_naive()).num_days()
+        });
+        let forecast_error_sigma = sigma_for_metric(
+            &self.config.forecast_error,
+            metric,
+            days_to_event,
+            self.config.dynamic_sigma,
+        );
 
         // Evaluate each outcome market for edge (both YES and NO sides)
         let mut best_edge = Decimal::ZERO;
@@ -1609,7 +1963,7 @@ impl WeatherAlphaStrategy {
                 "inch"
             };
 
-            let forecast = match self
+            let (forecast, _is_fresh) = match self
                 .get_forecast(&market.question, &parsed, target_date, precipitation_unit)
                 .await
             {
@@ -1617,7 +1971,15 @@ impl WeatherAlphaStrategy {
                 None => continue,
             };
 
-            let forecast_error_sigma = sigma_for_metric(&self.config.forecast_error, parsed.metric);
+            let days_to_event = target_date.map(|d| {
+                (d - Local::now().date_naive()).num_days()
+            });
+            let forecast_error_sigma = sigma_for_metric(
+                &self.config.forecast_error,
+                parsed.metric,
+                days_to_event,
+                self.config.dynamic_sigma,
+            );
             let model_prob = model_probability(
                 &forecast,
                 parsed.threshold,
@@ -1853,6 +2215,7 @@ mod tests {
             mean: 95.0,
             std_dev: 5.0,
             target_value: None,
+            model_spread: 0.0,
         };
         let prob = model_probability(&forecast, 100.0, Comparison::Above, 0.0, WeatherMetric::TemperatureMax);
         assert!(
@@ -1872,6 +2235,7 @@ mod tests {
             mean: 95.0,
             std_dev: 5.0,
             target_value: None,
+            model_spread: 0.0,
         };
         let prob = model_probability(&forecast, 100.0, Comparison::Below, 0.0, WeatherMetric::TemperatureMax);
         assert!(
@@ -1890,6 +2254,7 @@ mod tests {
             mean: 95.0,
             std_dev: 5.0,
             target_value: None,
+            model_spread: 0.0,
         };
         let prob_no_extra = model_probability(&forecast, 100.0, Comparison::Above, 0.0, WeatherMetric::TemperatureMax);
         let prob_with_extra = model_probability(&forecast, 100.0, Comparison::Above, 3.0, WeatherMetric::TemperatureMax);
@@ -1914,6 +2279,11 @@ mod tests {
             refresh_interval_secs: 3600,
             exit_buffer_bps: 50,
             capital_efficiency_threshold: dec!(0.98),
+            dynamic_sigma: false,
+            ensemble_enabled: false,
+            ensemble_models: vec![],
+            forecast_change_detection: false,
+            forecast_change_threshold: 0.5,
         };
 
         let profit_calc = ProfitCalculator::new(Decimal::ZERO);
@@ -1977,6 +2347,7 @@ mod tests {
             mean: 40.0,
             std_dev: 3.0,
             target_value: None,
+            model_spread: 0.0,
         };
         let range = OutcomeRange {
             lower: Some(38.0),
@@ -1999,6 +2370,7 @@ mod tests {
             mean: 40.0,
             std_dev: 3.0,
             target_value: None,
+            model_spread: 0.0,
         };
         let range = OutcomeRange {
             lower: Some(50.0),
@@ -2021,6 +2393,7 @@ mod tests {
             mean: 40.0,
             std_dev: 3.0,
             target_value: None,
+            model_spread: 0.0,
         };
         let ranges = vec![
             OutcomeRange { lower: None, upper: Some(35.0) },          // ≤35
@@ -2206,12 +2579,63 @@ mod tests {
             snowfall_sigma_in: 2.0,
             wind_sigma_mph: 5.0,
         };
-        assert_eq!(sigma_for_metric(&config, WeatherMetric::TemperatureMax), 3.0);
-        assert_eq!(sigma_for_metric(&config, WeatherMetric::TemperatureMin), 3.0);
-        assert_eq!(sigma_for_metric(&config, WeatherMetric::TemperatureAvg), 3.0);
-        assert_eq!(sigma_for_metric(&config, WeatherMetric::Rainfall), 0.3);
-        assert_eq!(sigma_for_metric(&config, WeatherMetric::Snowfall), 2.0);
-        assert_eq!(sigma_for_metric(&config, WeatherMetric::WindSpeed), 5.0);
+        // Without dynamic sigma, returns base values
+        assert_eq!(sigma_for_metric(&config, WeatherMetric::TemperatureMax, None, false), 3.0);
+        assert_eq!(sigma_for_metric(&config, WeatherMetric::TemperatureMin, None, false), 3.0);
+        assert_eq!(sigma_for_metric(&config, WeatherMetric::TemperatureAvg, None, false), 3.0);
+        assert_eq!(sigma_for_metric(&config, WeatherMetric::Rainfall, None, false), 0.3);
+        assert_eq!(sigma_for_metric(&config, WeatherMetric::Snowfall, None, false), 2.0);
+        assert_eq!(sigma_for_metric(&config, WeatherMetric::WindSpeed, None, false), 5.0);
+    }
+
+    // ──── Dynamic Sigma Tests ────
+
+    #[test]
+    fn test_dynamic_sigma_1_day() {
+        let config = ForecastErrorConfig::default(); // temp=3.0
+        // sqrt(1) = 1.0 → 3.0 * 1.0 = 3.0
+        let sigma = sigma_for_metric(&config, WeatherMetric::TemperatureMax, Some(1), true);
+        assert!((sigma - 3.0).abs() < 1e-6, "1-day sigma = {}, expected 3.0", sigma);
+    }
+
+    #[test]
+    fn test_dynamic_sigma_4_days() {
+        let config = ForecastErrorConfig::default(); // temp=3.0
+        // sqrt(4) = 2.0 → 3.0 * 2.0 = 6.0
+        let sigma = sigma_for_metric(&config, WeatherMetric::TemperatureMax, Some(4), true);
+        assert!((sigma - 6.0).abs() < 1e-6, "4-day sigma = {}, expected 6.0", sigma);
+    }
+
+    #[test]
+    fn test_dynamic_sigma_9_days() {
+        let config = ForecastErrorConfig::default(); // temp=3.0
+        // sqrt(9) = 3.0 → 3.0 * 3.0 = 9.0
+        let sigma = sigma_for_metric(&config, WeatherMetric::TemperatureMax, Some(9), true);
+        assert!((sigma - 9.0).abs() < 1e-6, "9-day sigma = {}, expected 9.0", sigma);
+    }
+
+    #[test]
+    fn test_dynamic_sigma_disabled() {
+        let config = ForecastErrorConfig::default(); // temp=3.0
+        // dynamic_sigma=false → always returns base regardless of days
+        let sigma = sigma_for_metric(&config, WeatherMetric::TemperatureMax, Some(9), false);
+        assert!((sigma - 3.0).abs() < 1e-6, "disabled sigma = {}, expected 3.0", sigma);
+    }
+
+    #[test]
+    fn test_dynamic_sigma_none_and_zero_clamp() {
+        let config = ForecastErrorConfig::default(); // temp=3.0
+        // None → defaults to 1 day → sqrt(1) = 1.0 → 3.0
+        let sigma_none = sigma_for_metric(&config, WeatherMetric::TemperatureMax, None, true);
+        assert!((sigma_none - 3.0).abs() < 1e-6, "None sigma = {}, expected 3.0", sigma_none);
+
+        // 0 days → clamped to 1 → sqrt(1) = 1.0 → 3.0
+        let sigma_zero = sigma_for_metric(&config, WeatherMetric::TemperatureMax, Some(0), true);
+        assert!((sigma_zero - 3.0).abs() < 1e-6, "0-day sigma = {}, expected 3.0", sigma_zero);
+
+        // Negative days → clamped to 1 → sqrt(1) = 1.0 → 3.0
+        let sigma_neg = sigma_for_metric(&config, WeatherMetric::TemperatureMax, Some(-2), true);
+        assert!((sigma_neg - 3.0).abs() < 1e-6, "negative sigma = {}, expected 3.0", sigma_neg);
     }
 
     #[test]
@@ -2223,6 +2647,7 @@ mod tests {
             mean: 95.0,
             std_dev: 0.0,   // Single day → no variance
             target_value: Some(95.0), // Date-specific
+            model_spread: 0.0,
         };
         let sigma = effective_sigma(&forecast, 3.0);
         assert_eq!(sigma, 3.0, "Date-specific sigma should equal forecast error only");
@@ -2234,6 +2659,7 @@ mod tests {
             mean: 95.0,
             std_dev: 5.0,
             target_value: None,
+            model_spread: 0.0,
         };
         let sigma2 = effective_sigma(&multi_forecast, 3.0);
         let expected = (25.0_f64 + 9.0).sqrt(); // sqrt(5² + 3²)
@@ -2242,6 +2668,85 @@ mod tests {
             "Multi-day sigma should be sqrt(std_dev² + error²): {} vs {}",
             sigma2,
             expected
+        );
+    }
+
+    // ──── Model Spread / Ensemble Tests ────
+
+    #[test]
+    fn test_model_spread_widens_sigma_date_specific() {
+        // Date-specific: sigma = sqrt(forecast_error² + model_spread²)
+        let forecast = ForecastData {
+            values: vec![95.0],
+            dates: vec!["2025-07-01".into()],
+            mean: 95.0,
+            std_dev: 0.0,
+            target_value: Some(95.0),
+            model_spread: 4.0,
+        };
+        let sigma = effective_sigma(&forecast, 3.0);
+        // sqrt(9 + 16) = sqrt(25) = 5.0
+        assert!((sigma - 5.0).abs() < 1e-6, "sigma = {}, expected 5.0", sigma);
+    }
+
+    #[test]
+    fn test_model_spread_zero_unchanged() {
+        // model_spread=0 should give same result as before
+        let forecast = ForecastData {
+            values: vec![95.0],
+            dates: vec!["2025-07-01".into()],
+            mean: 95.0,
+            std_dev: 0.0,
+            target_value: Some(95.0),
+            model_spread: 0.0,
+        };
+        let sigma = effective_sigma(&forecast, 3.0);
+        assert!((sigma - 3.0).abs() < 1e-6, "zero spread sigma = {}, expected 3.0", sigma);
+    }
+
+    #[test]
+    fn test_model_spread_multiday() {
+        // Multi-day: sigma = sqrt(std_dev² + forecast_error² + model_spread²)
+        let forecast = ForecastData {
+            values: vec![90.0, 95.0, 100.0],
+            dates: vec!["d1".into(), "d2".into(), "d3".into()],
+            mean: 95.0,
+            std_dev: 5.0,
+            target_value: None,
+            model_spread: 4.0,
+        };
+        let sigma = effective_sigma(&forecast, 3.0);
+        // sqrt(25 + 9 + 16) = sqrt(50) ≈ 7.071
+        let expected = 50.0_f64.sqrt();
+        assert!((sigma - expected).abs() < 1e-6, "multiday sigma = {}, expected {}", sigma, expected);
+    }
+
+    #[test]
+    fn test_model_spread_pushes_probability_toward_half() {
+        // Higher model_spread → wider sigma → probability closer to 0.5
+        let forecast_no_spread = ForecastData {
+            values: vec![95.0],
+            dates: vec!["d1".into()],
+            mean: 95.0,
+            std_dev: 0.0,
+            target_value: Some(95.0),
+            model_spread: 0.0,
+        };
+        let forecast_with_spread = ForecastData {
+            values: vec![95.0],
+            dates: vec!["d1".into()],
+            mean: 95.0,
+            std_dev: 0.0,
+            target_value: Some(95.0),
+            model_spread: 5.0,
+        };
+        let prob_no = model_probability(&forecast_no_spread, 100.0, Comparison::Above, 3.0, WeatherMetric::TemperatureMax);
+        let prob_with = model_probability(&forecast_with_spread, 100.0, Comparison::Above, 3.0, WeatherMetric::TemperatureMax);
+        // With spread, sigma is larger, so P(X>100) is closer to 0.5 (higher in this case since mean < threshold)
+        assert!(
+            prob_with > prob_no,
+            "model_spread should push tail prob toward 0.5: {} > {}",
+            prob_with, prob_no
         );
     }
 
@@ -2296,8 +2801,11 @@ mod tests {
                     mean: 1.0,
                     std_dev: 0.0,
                     target_value: None,
+                    model_spread: 0.0,
                 },
                 fetched_at: Instant::now() - Duration::from_secs(7200), // 2 hours old
+                previous_mean: None,
+                is_fresh_signal: true,
             },
         );
 
@@ -2311,8 +2819,11 @@ mod tests {
                     mean: 2.0,
                     std_dev: 0.0,
                     target_value: None,
+                    model_spread: 0.0,
                 },
                 fetched_at: Instant::now(),
+                previous_mean: None,
+                is_fresh_signal: true,
             },
         );
 
@@ -2324,6 +2835,46 @@ mod tests {
         assert_eq!(cache.len(), 1);
         assert!(cache.contains_key(&2));
         assert!(!cache.contains_key(&1));
+    }
+
+    // ──── Forecast Change Detection Tests ────
+
+    #[test]
+    fn test_change_detection_first_observation() {
+        // No previous value → always significant
+        assert!(is_significant_change(95.0, None, 3.0, 0.5));
+    }
+
+    #[test]
+    fn test_change_detection_above_threshold() {
+        // |97.0 - 95.0| = 2.0 > 0.5 * 3.0 = 1.5 → significant
+        assert!(is_significant_change(97.0, Some(95.0), 3.0, 0.5));
+    }
+
+    #[test]
+    fn test_change_detection_below_threshold() {
+        // |95.5 - 95.0| = 0.5 < 0.5 * 3.0 = 1.5 → not significant
+        assert!(!is_significant_change(95.5, Some(95.0), 3.0, 0.5));
+    }
+
+    #[test]
+    fn test_change_detection_exact_threshold() {
+        // |96.5 - 95.0| = 1.5 = 0.5 * 3.0 → NOT significant (strictly greater required)
+        assert!(!is_significant_change(96.5, Some(95.0), 3.0, 0.5));
+    }
+
+    #[test]
+    fn test_change_detection_reverse_direction() {
+        // |93.0 - 95.0| = 2.0 > 0.5 * 3.0 = 1.5 → significant (direction doesn't matter)
+        assert!(is_significant_change(93.0, Some(95.0), 3.0, 0.5));
+    }
+
+    #[test]
+    fn test_change_detection_zero_sigma() {
+        // sigma=0 → any nonzero change is significant
+        assert!(is_significant_change(95.001, Some(95.0), 0.0, 0.5));
+        // No change → not significant
+        assert!(!is_significant_change(95.0, Some(95.0), 0.0, 0.5));
     }
 
     // ──── NegRisk NO-Side Detection Test ────
@@ -2424,6 +2975,11 @@ mod tests {
             refresh_interval_secs: 3600,
             exit_buffer_bps: 50,
             capital_efficiency_threshold: dec!(0.98),
+            dynamic_sigma: false,
+            ensemble_enabled: false,
+            ensemble_models: vec![],
+            forecast_change_detection: false,
+            forecast_change_threshold: 0.5,
         };
         let books = Arc::new(books);
         WeatherAlphaStrategy::new(
@@ -2506,8 +3062,11 @@ mod tests {
                     mean: 70.0,
                     std_dev: 5.0,
                     target_value: Some(70.0),
+                    model_spread: 0.0,
                 },
                 fetched_at: Instant::now(),
+                previous_mean: None,
+                is_fresh_signal: true,
             });
         }
 
@@ -2543,12 +3102,80 @@ mod tests {
                     mean: 99.0,
                     std_dev: 3.0,
                     target_value: Some(99.0),
+                    model_spread: 0.0,
                 },
                 fetched_at: Instant::now(),
+                previous_mean: None,
+                is_fresh_signal: true,
             });
         }
 
         let exits = strategy.scan_exits(&[market]).await;
         assert!(exits.is_empty(), "Edge still positive, should not exit");
+    }
+
+    #[tokio::test]
+    async fn test_exit_model_reversal_ignores_change_detection() {
+        // Key scenario: forecast_change_detection=true, is_fresh_signal=false,
+        // but model has reversed → exit should STILL fire (exits ignore change detection)
+        let token_id = U256::from(1u64);
+        let question = "Will the temperature in NYC exceed 100F this summer?";
+        let market = make_weather_market(question);
+
+        let mut books = HashMap::new();
+        books.insert(token_id, make_weather_book(token_id, dec!(0.70)));
+        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.30)));
+
+        // Build strategy with forecast_change_detection=true
+        let config = WeatherConfig {
+            min_edge_bps: 500,
+            max_position_usdc: dec!(100),
+            kelly_fraction: dec!(0.25),
+            forecast_error: ForecastErrorConfig::default(),
+            refresh_interval_secs: 3600,
+            exit_buffer_bps: 50,
+            capital_efficiency_threshold: dec!(0.98),
+            dynamic_sigma: false,
+            ensemble_enabled: false,
+            ensemble_models: vec![],
+            forecast_change_detection: true,   // ENABLED
+            forecast_change_threshold: 0.5,
+        };
+        let held = vec![(token_id, dec!(50), dec!(0.30))];
+        let held_clone = held.clone();
+        let books_arc = Arc::new(books);
+        let strategy = WeatherAlphaStrategy::new(
+            config,
+            Decimal::ZERO,
+            Box::new(move |tid| books_arc.get(&tid).cloned()),
+            Box::new(|| Decimal::MAX),
+            Box::new(|_| Decimal::ZERO),
+            vec![],
+            Box::new(move || held_clone.clone()),
+        );
+
+        // Pre-populate cache: model_prob ≈ 0.0, is_fresh_signal = false
+        // (forecast hasn't changed, but model clearly disagrees with market)
+        let cache_key = WeatherAlphaStrategy::question_hash(question);
+        {
+            let mut cache = strategy.forecast_cache.lock().unwrap();
+            cache.insert(cache_key, CachedForecast {
+                forecast: ForecastData {
+                    values: vec![70.0],
+                    dates: vec!["2025-07-15".into()],
+                    mean: 70.0,
+                    std_dev: 5.0,
+                    target_value: Some(70.0),
+                    model_spread: 0.0,
+                },
+                fetched_at: Instant::now(),
+                previous_mean: Some(70.0),     // same as current → no change
+                is_fresh_signal: false,         // NOT a fresh signal
+            });
+        }
+
+        let exits = strategy.scan_exits(&[market]).await;
+        assert_eq!(exits.len(), 1, "Model reversal exit must fire even when is_fresh_signal=false");
+        assert!(exits[0].question.starts_with("[EXIT]"));
     }
 }

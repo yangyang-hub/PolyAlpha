@@ -59,6 +59,11 @@ kelly_fraction = 0.25
 refresh_interval_secs = 3600
 exit_buffer_bps = 50
 capital_efficiency_threshold = 0.98
+dynamic_sigma = true
+ensemble_enabled = false
+ensemble_models = ["gfs_seamless", "ecmwf_ifs025", "icon_seamless"]
+forecast_change_detection = false
+forecast_change_threshold = 0.5
 
 [weather.forecast_error]
 temperature_sigma_f = 3.0

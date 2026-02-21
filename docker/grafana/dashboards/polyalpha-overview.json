@@ -14,14 +14,15 @@
       "panels": []
     },
     {
-      "title": "资产总额",
+      "title": "资产总额 (USDC)",
       "description": "USDC 余额 + 持仓敞口",
       "type": "stat",
       "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "unit": "currencyUSD",
+          "unit": "none",
+          "decimals": 2,
           "color": { "mode": "thresholds" },
           "thresholds": {
             "steps": [
@@ -35,7 +36,7 @@
       },
       "options": { "graphMode": "area", "colorMode": "value", "textMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"] } },
       "targets": [
-        { "expr": "usdc_balance + total_exposure_usd", "legendFormat": "", "refId": "A" }
+        { "expr": "usdc_balance / 1e6 + total_exposure_usd", "legendFormat": "", "refId": "A" }
       ]
     },
     {
@@ -45,7 +46,8 @@
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "unit": "currencyUSD",
+          "unit": "none",
+          "decimals": 2,
           "color": { "mode": "thresholds" },
           "thresholds": {
             "steps": [
@@ -59,17 +61,18 @@
       },
       "options": { "graphMode": "area", "colorMode": "value", "textMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"] } },
       "targets": [
-        { "expr": "usdc_balance", "legendFormat": "", "refId": "A" }
+        { "expr": "usdc_balance / 1e6", "legendFormat": "", "refId": "A" }
       ]
     },
     {
-      "title": "已实现盈亏",
+      "title": "已实现盈亏 (USDC)",
       "type": "stat",
       "gridPos": { "h": 4, "w": 3, "x": 7, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "unit": "currencyUSD",
+          "unit": "none",
+          "decimals": 2,
           "color": { "mode": "thresholds" },
           "thresholds": {
             "steps": [
@@ -86,13 +89,14 @@
       ]
     },
     {
-      "title": "总敞口",
+      "title": "总敞口 (USDC)",
       "type": "gauge",
       "gridPos": { "h": 4, "w": 4, "x": 10, "y": 1 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
-          "unit": "currencyUSD",
+          "unit": "none",
+          "decimals": 2,
           "min": 0,
           "max": 10000,
           "thresholds": {
@@ -207,7 +211,8 @@
             "gradientMode": "scheme",
             "showPoints": "never"
           },
-          "unit": "currencyUSD"
+          "unit": "none",
+          "decimals": 2
         },
         "overrides": [
           {
@@ -237,13 +242,13 @@
         ]
       },
       "targets": [
-        { "expr": "usdc_balance", "legendFormat": "USDC 余额", "refId": "A" },
+        { "expr": "usdc_balance / 1e6", "legendFormat": "USDC 余额", "refId": "A" },
         { "expr": "total_exposure_usd", "legendFormat": "持仓敞口", "refId": "B" },
-        { "expr": "usdc_balance + total_exposure_usd", "legendFormat": "资产总额", "refId": "C" }
+        { "expr": "usdc_balance / 1e6 + total_exposure_usd", "legendFormat": "资产总额", "refId": "C" }
       ]
     },
     {
-      "title": "盈亏与余额趋势",
+      "title": "盈亏与余额趋势 (USDC)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
@@ -256,7 +261,8 @@
             "gradientMode": "scheme",
             "showPoints": "never"
           },
-          "unit": "currencyUSD"
+          "unit": "none",
+          "decimals": 2
         },
         "overrides": [
           {
@@ -282,7 +288,7 @@
         ]
       },
       "targets": [
-        { "expr": "usdc_balance", "legendFormat": "USDC 余额", "refId": "A" },
+        { "expr": "usdc_balance / 1e6", "legendFormat": "USDC 余额", "refId": "A" },
         { "expr": "realized_pnl_usd", "legendFormat": "已实现盈亏", "refId": "B" },
         { "expr": "total_exposure_usd", "legendFormat": "总敞口", "refId": "C" }
       ]

@@ -145,10 +145,35 @@ pub struct WeatherConfig {
     /// Sell when best_bid >= this threshold (capital efficiency exit).
     #[serde(default = "default_capital_efficiency_threshold")]
     pub capital_efficiency_threshold: Decimal,
+    /// Scale forecast error sigma by sqrt(days_to_event). More distant forecasts get wider sigma.
+    #[serde(default = "default_true")]
+    pub dynamic_sigma: bool,
+    /// Enable multi-model ensemble forecasting (GFS + ECMWF + ICON).
+    #[serde(default)]
+    pub ensemble_enabled: bool,
+    /// Open-Meteo model names to query when ensemble is enabled.
+    #[serde(default = "default_ensemble_models")]
+    pub ensemble_models: Vec<String>,
+    /// Only trade when the forecast has changed significantly since last check.
+    #[serde(default)]
+    pub forecast_change_detection: bool,
+    /// Forecast change threshold in multiples of sigma. Trade only when
+    /// |new_forecast - previous_forecast| > threshold * sigma.
+    #[serde(default = "default_forecast_change_threshold")]
+    pub forecast_change_threshold: f64,
 }
 
 fn default_exit_buffer_bps() -> u32 { 50 }
 fn default_capital_efficiency_threshold() -> Decimal { Decimal::new(98, 2) } // 0.98
+fn default_true() -> bool { true }
+fn default_ensemble_models() -> Vec<String> {
+    vec![
+        "gfs_seamless".to_string(),
+        "ecmwf_ifs025".to_string(),
+        "icon_seamless".to_string(),
+    ]
+}
+fn default_forecast_change_threshold() -> f64 { 0.5 }
 
 impl Default for WeatherConfig {
     fn default() -> Self {
@@ -160,6 +185,11 @@ impl Default for WeatherConfig {
             refresh_interval_secs: 3600,
             exit_buffer_bps: default_exit_buffer_bps(),
             capital_efficiency_threshold: default_capital_efficiency_threshold(),
+            dynamic_sigma: default_true(),
+            ensemble_enabled: false,
+            ensemble_models: default_ensemble_models(),
+            forecast_change_detection: false,
+            forecast_change_threshold: default_forecast_change_threshold(),
         }
     }
 }
