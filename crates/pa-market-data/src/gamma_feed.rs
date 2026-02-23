@@ -1,13 +1,18 @@
 use alloy::primitives::{B256, U256};
-use futures::{StreamExt, pin_mut};
 use pa_core::config::Settings;
 use pa_core::types::{BinaryEventGroup, MarketInfo, NegRiskEvent, Outcome, TokenInfo};
+use polymarket_client_sdk::gamma::types::response::Event;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 
 /// Discovers markets from the Polymarket Gamma API and filters candidates.
+///
+/// Uses a custom `reqwest::Client` with HTTP/1.1 forced to avoid HTTP/2 stream
+/// reset issues with Gamma API's CDN. The SDK's built-in client negotiates HTTP/2
+/// via ALPN but the CDN doesn't handle it correctly, causing PROTOCOL_ERROR resets.
 pub struct GammaFeed {
-    client: polymarket_client_sdk::gamma::Client,
+    http_client: reqwest::Client,
+    gamma_host: String,
     min_liquidity: Decimal,
     min_volume_24h: Decimal,
     max_markets: usize,
@@ -16,9 +21,15 @@ pub struct GammaFeed {
 
 impl GammaFeed {
     pub fn new(settings: &Settings) -> anyhow::Result<Self> {
-        let client = polymarket_client_sdk::gamma::Client::new(&settings.gamma.host)?;
+        let http_client = reqwest::Client::builder()
+            .http1_only()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .user_agent("polyalpha/0.1")
+            .build()?;
         Ok(Self {
-            client,
+            http_client,
+            gamma_host: settings.gamma.host.clone(),
             min_liquidity: settings.market_filter.min_liquidity,
             min_volume_24h: settings.market_filter.min_volume_24h,
             max_markets: settings.market_filter.max_markets,
@@ -28,8 +39,16 @@ impl GammaFeed {
 
     /// Create with default Gamma API endpoint.
     pub fn with_defaults(settings: &Settings) -> Self {
+        let http_client = reqwest::Client::builder()
+            .http1_only()
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .user_agent("polyalpha/0.1")
+            .build()
+            .expect("Failed to build HTTP client");
         Self {
-            client: polymarket_client_sdk::gamma::Client::default(),
+            http_client,
+            gamma_host: "https://gamma-api.polymarket.com".to_string(),
             min_liquidity: settings.market_filter.min_liquidity,
             min_volume_24h: settings.market_filter.min_volume_24h,
             max_markets: settings.market_filter.max_markets,
@@ -39,19 +58,19 @@ impl GammaFeed {
 
     /// Discover all active binary markets from Gamma API.
     ///
-    /// Uses pagination via `stream_data()` to enumerate all active events,
+    /// Uses our own HTTP/1.1 client with pagination to enumerate all active events,
     /// then extracts binary markets with CLOB token IDs.
-    /// Retries up to 3 times with exponential backoff on failure.
+    /// Retries up to 5 times with exponential backoff on failure.
     pub async fn discover_markets(&self) -> anyhow::Result<Vec<MarketInfo>> {
         tracing::info!("Discovering markets from Gamma API");
 
         let mut all_markets = Vec::new();
         let mut last_error = None;
 
-        // Retry the entire stream up to 5 times with exponential backoff
+        // Retry the entire pagination up to 5 times with exponential backoff
         for attempt in 0..5u32 {
             if attempt > 0 {
-                let delay = std::time::Duration::from_secs(2u64.pow(attempt).min(30)); // 2s, 4s, 8s, 16s
+                let delay = std::time::Duration::from_secs(2u64.pow(attempt).min(30));
                 tracing::warn!(
                     attempt = attempt + 1,
                     delay_secs = delay.as_secs(),
@@ -62,70 +81,90 @@ impl GammaFeed {
 
             all_markets.clear();
             let mut had_error = false;
-
-            let stream = self.client.stream_data(
-                |client, limit, offset| {
-                    let request = polymarket_client_sdk::gamma::types::request::EventsRequest::builder()
-                        .active(true)
-                        .closed(false)
-                        .limit(limit)
-                        .offset(offset)
-                        .build();
-                    async move { client.events(&request).await }
-                },
-                100, // reduced from 500 to avoid HTTP/2 stream resets on large responses
-            );
-
-            pin_mut!(stream);
+            let mut offset = 0i32;
+            let limit = 100i32;
 
             loop {
-                // Wrap each page fetch with a 60s timeout to avoid 4-minute hangs
-                let event_result = match tokio::time::timeout(
-                    std::time::Duration::from_secs(60),
-                    stream.next(),
-                ).await {
-                    Ok(Some(result)) => result,
-                    Ok(None) => break, // stream exhausted — all pages fetched
-                    Err(_) => {
+                let url = format!(
+                    "{}/events?limit={}&offset={}&active=true&closed=false",
+                    self.gamma_host.trim_end_matches('/'),
+                    limit,
+                    offset,
+                );
+
+                tracing::debug!(offset, limit, "Fetching Gamma API page");
+
+                let events: Vec<Event> = match self.http_client.get(&url).send().await {
+                    Ok(resp) => {
+                        let status = resp.status();
+                        if !status.is_success() {
+                            tracing::warn!(
+                                attempt = attempt + 1,
+                                status = %status,
+                                offset,
+                                "Gamma API returned non-200 status"
+                            );
+                            last_error = Some(format!("HTTP {}", status));
+                            had_error = true;
+                            break;
+                        }
+                        match resp.json().await {
+                            Ok(data) => data,
+                            Err(e) => {
+                                tracing::warn!(
+                                    attempt = attempt + 1,
+                                    offset,
+                                    error = %e,
+                                    "Failed to decode Gamma API response"
+                                );
+                                last_error = Some(e.to_string());
+                                had_error = true;
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
                         tracing::warn!(
                             attempt = attempt + 1,
-                            "Gamma API page fetch timed out after 60s"
+                            offset,
+                            error = %e,
+                            "Failed to fetch Gamma API page"
                         );
-                        last_error = Some("Page fetch timed out".to_string());
+                        last_error = Some(e.to_string());
                         had_error = true;
                         break;
                     }
                 };
 
-                let event = match event_result {
-                    Ok(e) => e,
-                    Err(e) => {
-                        tracing::warn!(
-                            attempt = attempt + 1,
-                            error = %e,
-                            error_debug = ?e,
-                            "Failed to fetch event page"
-                        );
-                        last_error = Some(e.to_string());
-                        had_error = true;
-                        break; // Break inner loop to trigger retry
-                    }
-                };
+                let page_count = events.len() as i32;
 
-                let event_neg_risk = event.neg_risk.unwrap_or(false);
-                let event_neg_risk_market_id = event.neg_risk_market_id;
-                let event_title = event.title.clone();
+                for event in events {
+                    let event_neg_risk = event.neg_risk.unwrap_or(false);
+                    let event_neg_risk_market_id = event.neg_risk_market_id;
+                    let event_title = event.title.clone();
 
-                let markets = match event.markets {
-                    Some(m) => m,
-                    None => continue,
-                };
+                    let markets = match event.markets {
+                        Some(m) => m,
+                        None => continue,
+                    };
 
-                for market in markets {
-                    if let Some(info) = self.convert_market(&market, event_neg_risk, event_neg_risk_market_id, event_title.clone()) {
-                        all_markets.push(info);
+                    for market in markets {
+                        if let Some(info) = self.convert_market(
+                            &market,
+                            event_neg_risk,
+                            event_neg_risk_market_id,
+                            event_title.clone(),
+                        ) {
+                            all_markets.push(info);
+                        }
                     }
                 }
+
+                // If we got fewer events than the limit, we've reached the last page
+                if page_count < limit {
+                    break;
+                }
+                offset += page_count;
             }
 
             if !had_error && !all_markets.is_empty() {
@@ -441,11 +480,14 @@ impl GammaFeed {
         &self,
         condition_id: B256,
     ) -> anyhow::Result<Option<MarketInfo>> {
-        let request = polymarket_client_sdk::gamma::types::request::MarketsRequest::builder()
-            .condition_ids(vec![condition_id])
-            .build();
+        let url = format!(
+            "{}/markets?condition_ids={}",
+            self.gamma_host.trim_end_matches('/'),
+            condition_id,
+        );
 
-        let markets = self.client.markets(&request).await?;
+        let markets: Vec<polymarket_client_sdk::gamma::types::response::Market> =
+            self.http_client.get(&url).send().await?.json().await?;
 
         let market = match markets.into_iter().next() {
             Some(m) => m,
