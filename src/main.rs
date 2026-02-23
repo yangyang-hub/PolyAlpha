@@ -633,6 +633,15 @@ async fn main() -> Result<()> {
 
     // --- Load positions from Data API ---
     let proxy_addr = if settings.clob.proxy_wallet.is_empty() {
+        if settings.clob.signature_type != 0 {
+            tracing::warn!(
+                signature_type = settings.clob.signature_type,
+                eoa = %wallet_address,
+                "proxy_wallet not configured — querying Data API with EOA address. \
+                 If positions show 0 but you have holdings, set clob.proxy_wallet \
+                 to your Polymarket proxy wallet address."
+            );
+        }
         wallet_address
     } else {
         settings.clob.proxy_wallet.parse::<alloy::primitives::Address>()
@@ -643,10 +652,17 @@ async fn main() -> Result<()> {
         .context("Failed to load positions from Data API")?;
     let initial_positions: Vec<_> = api_positions
         .iter()
-        .map(|p| (p.token_id, p.size, p.avg_price, None, p.condition_id))
+        .map(|p| (p.token_id, p.size, p.avg_price, None, Some(p.condition_id)))
         .collect();
     let loaded_count = initial_positions.len();
     risk_manager_impl.load_initial_positions(initial_positions);
+    if loaded_count > 0 {
+        tracing::warn!(
+            loaded = loaded_count,
+            "Loaded positions have no strategy_type tag — exit logic will not fire \
+             for pre-existing positions until new trades are opened this session"
+        );
+    }
     tracing::info!(
         loaded = loaded_count,
         exposure = %risk_manager_impl.total_exposure(),

@@ -1,7 +1,6 @@
 use alloy::primitives::{Address, B256, U256};
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use polymarket_client_sdk::data::Client as DataApiClient;
 use polymarket_client_sdk::data::types::request::PositionsRequest;
 
@@ -10,7 +9,7 @@ pub struct ApiPosition {
     pub token_id: U256,
     pub size: Decimal,
     pub avg_price: Decimal,
-    pub condition_id: Option<B256>,
+    pub condition_id: B256,
 }
 
 /// Loads positions from the Polymarket Data API (no authentication required).
@@ -30,19 +29,17 @@ impl PositionLoader {
     /// Load all open positions for the configured wallet.
     ///
     /// Automatically paginates through results (limit=500 per page).
-    /// Filters out positions with size < 0.01 USDC.
+    /// Uses API default size_threshold (1.0 shares) to skip dust positions.
     pub async fn load_positions(&self) -> Result<Vec<ApiPosition>> {
         let mut all_positions = Vec::new();
         let mut offset = 0i32;
         let limit = 500i32;
-        let size_threshold = dec!(0.01);
 
         loop {
             let req = PositionsRequest::builder()
                 .user(self.wallet)
                 .limit(limit)?
                 .offset(offset)?
-                .size_threshold(size_threshold)
                 .build();
 
             let page = self.client.positions(&req).await
@@ -55,7 +52,7 @@ impl PositionLoader {
                     token_id: pos.asset,
                     size: pos.size,
                     avg_price: pos.avg_price,
-                    condition_id: Some(pos.condition_id),
+                    condition_id: pos.condition_id,
                 });
             }
 
@@ -68,9 +65,10 @@ impl PositionLoader {
 
             // Safety: don't paginate beyond 10000
             if offset >= 10000 {
-                tracing::warn!(
+                tracing::error!(
                     offset,
-                    "Data API pagination limit reached, some positions may be missing"
+                    loaded = all_positions.len(),
+                    "Data API pagination hard limit reached — risk manager exposure may be understated"
                 );
                 break;
             }

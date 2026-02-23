@@ -15,18 +15,29 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN="$REPO_DIR/bin/polyalpha"
 PID_FILE="$REPO_DIR/polyalpha.pid"
 LOG_FILE="$REPO_DIR/polyalpha.log"
+LOCK_FILE="$REPO_DIR/deploy.lock"
 ENV_FILE="$REPO_DIR/.env"
 GIT_BRANCH="master"
+LOG_MAX_BYTES=$((50 * 1024 * 1024))  # 50MB
 
-# ── 颜色 ──
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+# ── cron 兼容: PATH + 颜色 ──
+export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+else
+    RED=''; GREEN=''; YELLOW=''; NC=''
+fi
 
 log()  { echo -e "${GREEN}[deploy]${NC} $*"; }
 warn() { echo -e "${YELLOW}[deploy]${NC} $*"; }
 err()  { echo -e "${RED}[deploy]${NC} $*" >&2; }
+
+# ── 进程锁: 防止 cron 并发 ──
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    err "另一个 deploy 正在运行，退出"
+    exit 0
+fi
 
 # ── 检查 .env ──
 check_env() {
@@ -34,6 +45,13 @@ check_env() {
         err ".env 文件不存在: $ENV_FILE"
         err "请创建 .env 并设置: POLYMARKET_PRIVATE_KEY=0x..."
         exit 1
+    fi
+    # 权限检查
+    local perms
+    perms=$(stat -c %a "$ENV_FILE" 2>/dev/null || stat -f %Lp "$ENV_FILE" 2>/dev/null)
+    if [[ "$perms" != "600" && "$perms" != "400" ]]; then
+        warn ".env 权限为 $perms，收紧为 600"
+        chmod 600 "$ENV_FILE"
     fi
 }
 
@@ -51,16 +69,27 @@ get_pid() {
     return 1
 }
 
+# ── 日志轮转 ──
+rotate_log() {
+    if [[ -f "$LOG_FILE" ]] && (( $(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0) > LOG_MAX_BYTES )); then
+        mv "$LOG_FILE" "${LOG_FILE}.1"
+        gzip -f "${LOG_FILE}.1" 2>/dev/null &
+        log "日志已轮转 (>${LOG_MAX_BYTES} bytes)"
+    fi
+}
+
 # ── Git 拉取 ──
 do_pull() {
     log "拉取最新代码 ($GIT_BRANCH)..."
     cd "$REPO_DIR"
 
-    # 保存本地配置变更
+    # 保存本地配置变更（仅 config/，.env 在 .gitignore 中不可 stash）
     local stashed=false
-    if ! git diff --quiet config/ .env 2>/dev/null; then
-        warn "暂存本地配置修改..."
-        git stash push -m "deploy-auto-stash" -- config/ 2>/dev/null && stashed=true
+    if ! git diff --quiet config/ 2>/dev/null; then
+        warn "暂存本地 config/ 修改..."
+        if git stash push -m "deploy-auto-stash" -- config/ 2>/dev/null; then
+            stashed=true
+        fi
     fi
 
     git fetch origin "$GIT_BRANCH"
@@ -76,7 +105,8 @@ do_pull() {
         return 1  # 无更新
     fi
 
-    git pull origin "$GIT_BRANCH"
+    # 使用 reset 避免 merge 冲突（云服务器不做本地开发）
+    git reset --hard "origin/$GIT_BRANCH"
     log "更新完成: ${local_hash:0:7} → ${remote_hash:0:7}"
 
     # 恢复本地配置
@@ -85,8 +115,8 @@ do_pull() {
     fi
 
     # 检查二进制
-    if [[ ! -x "$BIN" ]]; then
-        err "二进制文件不存在或无执行权限: $BIN"
+    if [[ ! -f "$BIN" ]]; then
+        err "二进制文件不存在: $BIN"
         exit 1
     fi
 
@@ -132,14 +162,29 @@ do_start() {
         exit 1
     fi
 
+    rotate_log
+
     log "启动 polyalpha..."
     cd "$REPO_DIR"
+
+    # 加载 .env 到环境（cron 下无 shell profile）
+    set -a; source "$ENV_FILE"; set +a
+
     nohup "$BIN" >> "$LOG_FILE" 2>&1 &
     local pid=$!
     echo "$pid" > "$PID_FILE"
-    sleep 1
 
-    if kill -0 "$pid" 2>/dev/null; then
+    # 等待最多 5 秒确认进程存活
+    local ok=false
+    for _ in $(seq 1 5); do
+        sleep 1
+        if ! kill -0 "$pid" 2>/dev/null; then
+            break
+        fi
+        ok=true
+    done
+
+    if $ok && kill -0 "$pid" 2>/dev/null; then
         log "启动成功 (PID: $pid)"
         log "日志: $LOG_FILE"
     else
@@ -154,10 +199,8 @@ do_status() {
     local pid
     if pid=$(get_pid); then
         log "运行中 (PID: $pid)"
-        # 显示资源占用
         ps -p "$pid" -o pid,vsz,rss,%cpu,etime --no-headers 2>/dev/null | \
             awk '{printf "  PID: %s  VSZ: %.0fMB  RSS: %.0fMB  CPU: %s  运行时间: %s\n", $1, $2/1024, $3/1024, $4, $5}'
-        # 显示最近几行日志
         echo ""
         log "最近日志:"
         tail -5 "$LOG_FILE" 2>/dev/null | sed 's/^/  /'
@@ -198,7 +241,11 @@ case "${1:-deploy}" in
         ;;
     deploy|"")
         if do_pull; then
-            # 有更新，重启
+            # 有更新 — 先验证二进制再停旧进程
+            if [[ ! -x "$BIN" ]]; then
+                err "拉取后二进制缺失，保留当前进程不重启"
+                exit 1
+            fi
             do_stop
             do_start
         else
