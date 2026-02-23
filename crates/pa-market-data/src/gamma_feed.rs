@@ -48,10 +48,10 @@ impl GammaFeed {
         let mut all_markets = Vec::new();
         let mut last_error = None;
 
-        // Retry the entire stream up to 3 times with exponential backoff
-        for attempt in 0..3u32 {
+        // Retry the entire stream up to 5 times with exponential backoff
+        for attempt in 0..5u32 {
             if attempt > 0 {
-                let delay = std::time::Duration::from_secs(2u64.pow(attempt)); // 2s, 4s
+                let delay = std::time::Duration::from_secs(2u64.pow(attempt).min(30)); // 2s, 4s, 8s, 16s
                 tracing::warn!(
                     attempt = attempt + 1,
                     delay_secs = delay.as_secs(),
@@ -73,12 +73,30 @@ impl GammaFeed {
                         .build();
                     async move { client.events(&request).await }
                 },
-                500, // max page size
+                100, // reduced from 500 to avoid HTTP/2 stream resets on large responses
             );
 
             pin_mut!(stream);
 
-            while let Some(event_result) = stream.next().await {
+            loop {
+                // Wrap each page fetch with a 60s timeout to avoid 4-minute hangs
+                let event_result = match tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    stream.next(),
+                ).await {
+                    Ok(Some(result)) => result,
+                    Ok(None) => break, // stream exhausted — all pages fetched
+                    Err(_) => {
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            "Gamma API page fetch timed out after 60s"
+                        );
+                        last_error = Some("Page fetch timed out".to_string());
+                        had_error = true;
+                        break;
+                    }
+                };
+
                 let event = match event_result {
                     Ok(e) => e,
                     Err(e) => {
@@ -111,7 +129,16 @@ impl GammaFeed {
             }
 
             if !had_error && !all_markets.is_empty() {
-                break; // Success
+                break; // Full success — all pages fetched
+            }
+
+            // Partial success: got some markets before error — use what we have
+            if had_error && !all_markets.is_empty() {
+                tracing::warn!(
+                    fetched = all_markets.len(),
+                    "Gamma API partially succeeded, using fetched markets"
+                );
+                break;
             }
 
             if !had_error && all_markets.is_empty() {
