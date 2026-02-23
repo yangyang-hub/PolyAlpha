@@ -1004,7 +1004,7 @@ impl OpenMeteoClient {
                 .iter()
                 .map(|v| (v - ensemble_mean).powi(2))
                 .sum::<f64>()
-                / model_means.len() as f64;
+                / (model_means.len() - 1) as f64; // sample variance (N-1)
             var.sqrt()
         } else {
             0.0
@@ -1337,6 +1337,17 @@ impl WeatherAlphaStrategy {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         question.to_lowercase().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Hash location + metric + date for cache key (used by get_forecast_by_location).
+    #[cfg(test)]
+    fn location_hash(location: &str, metric: WeatherMetric, target_date: Option<NaiveDate>) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        location.to_lowercase().hash(&mut hasher);
+        (metric as u8).hash(&mut hasher);
+        target_date.map(|d| d.num_days_from_ce()).hash(&mut hasher);
         hasher.finish()
     }
 
@@ -2018,31 +2029,58 @@ impl WeatherAlphaStrategy {
                 None => continue,
             };
 
-            let parsed = match parse_weather_question(&market.question) {
-                Some(p) => p,
-                None => continue,
-            };
-
-            let target_date = parse_target_date(&market.question);
-            let precipitation_unit = if matches!(parsed.metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
-                detect_precipitation_unit(&market.question)
+            // For NegRisk outcomes (e.g. "36-37°F"), parse_weather_question fails because
+            // there's no city name. Use parse_weather_event_title on the event title instead.
+            // For binary markets, parse_weather_question gives threshold + comparison too.
+            let (location, metric, target_date, precipitation_unit, binary_parsed) = if market.neg_risk {
+                let event_title = match &market.event_title {
+                    Some(t) => t.as_str(),
+                    None => continue,
+                };
+                let (metric, location) = match parse_weather_event_title(event_title) {
+                    Some(r) => r,
+                    None => continue,
+                };
+                let target_date = parse_target_date(event_title);
+                let precipitation_unit = if matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
+                    detect_precipitation_unit(event_title)
+                } else {
+                    "inch"
+                };
+                (location, metric, target_date, precipitation_unit, None)
             } else {
-                "inch"
+                let parsed = match parse_weather_question(&market.question) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let target_date = parse_target_date(&market.question);
+                let precipitation_unit = if matches!(parsed.metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
+                    detect_precipitation_unit(&market.question)
+                } else {
+                    "inch"
+                };
+                let loc = parsed.location.clone();
+                let met = parsed.metric;
+                (loc, met, target_date, precipitation_unit, Some(parsed))
             };
 
             // For NegRisk positions, use get_forecast_by_location to share cache with entry path.
             // For binary positions, use get_forecast (keyed by question text).
             let (forecast, _is_fresh) = if market.neg_risk {
                 match self
-                    .get_forecast_by_location(&parsed.location, parsed.metric, target_date, precipitation_unit)
+                    .get_forecast_by_location(&location, metric, target_date, precipitation_unit)
                     .await
                 {
                     Some(f) => f,
                     None => continue,
                 }
             } else {
+                let parsed = match &binary_parsed {
+                    Some(p) => p,
+                    None => continue,
+                };
                 match self
-                    .get_forecast(&market.question, &parsed, target_date, precipitation_unit)
+                    .get_forecast(&market.question, parsed, target_date, precipitation_unit)
                     .await
                 {
                     Some(f) => f,
@@ -2055,7 +2093,7 @@ impl WeatherAlphaStrategy {
             });
             let forecast_error_sigma = sigma_for_metric(
                 &self.config.forecast_error,
-                parsed.metric,
+                metric,
                 days_to_event,
                 self.config.dynamic_sigma,
             );
@@ -2063,7 +2101,7 @@ impl WeatherAlphaStrategy {
             // For NegRisk outcomes (ranges), use model_range_probability instead of model_probability
             let model_prob = if market.neg_risk {
                 if let Some(range) = parse_outcome_range(&market.question) {
-                    let range = if is_temperature_metric(parsed.metric) && is_celsius_market(&market.question) {
+                    let range = if is_temperature_metric(metric) && is_celsius_market(&market.question) {
                         OutcomeRange {
                             lower: range.lower.map(celsius_to_fahrenheit),
                             upper: range.upper.map(celsius_to_fahrenheit),
@@ -2071,13 +2109,17 @@ impl WeatherAlphaStrategy {
                     } else {
                         range
                     };
-                    model_range_probability(&forecast, &range, forecast_error_sigma, parsed.metric)
+                    model_range_probability(&forecast, &range, forecast_error_sigma, metric)
                 } else {
                     // NegRisk outcome couldn't be parsed as range — skip
                     continue;
                 }
             } else {
-                let threshold = if is_temperature_metric(parsed.metric) && is_celsius_market(&market.question) {
+                let parsed = match &binary_parsed {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let threshold = if is_temperature_metric(metric) && is_celsius_market(&market.question) {
                     celsius_to_fahrenheit(parsed.threshold)
                 } else {
                     parsed.threshold
@@ -2087,7 +2129,7 @@ impl WeatherAlphaStrategy {
                     threshold,
                     parsed.comparison,
                     forecast_error_sigma,
-                    parsed.metric,
+                    metric,
                 )
             };
             let model_prob_dec = match Decimal::from_f64_retain(model_prob) {
@@ -3494,7 +3536,7 @@ mod tests {
             fee_rate_bps: 200,
             active: true,
             liquidity: dec!(1000),
-            event_title: None,
+            event_title: Some("Highest temperature in Miami on February 22".to_string()),
             end_date: None,
             category: None,
             outcome_prices: None,
@@ -3510,7 +3552,8 @@ mod tests {
         let strategy = make_weather_strategy(books, held);
 
         // Pre-populate cache: forecast 70°F (far from 84-85 range)
-        let cache_key = WeatherAlphaStrategy::question_hash(question);
+        // Use location-based cache key (same as get_forecast_by_location)
+        let cache_key = WeatherAlphaStrategy::location_hash("Miami", WeatherMetric::TemperatureMax, None);
         {
             let mut cache = strategy.forecast_cache.lock().unwrap();
             cache.insert(cache_key, CachedForecast {
@@ -3565,7 +3608,7 @@ mod tests {
             fee_rate_bps: 200,
             active: true,
             liquidity: dec!(1000),
-            event_title: None,
+            event_title: Some("Highest temperature in Wellington on February 22".to_string()),
             end_date: None,
             category: None,
             outcome_prices: None,
@@ -3581,7 +3624,8 @@ mod tests {
         let strategy = make_weather_strategy(books, held);
 
         // Pre-populate cache: forecast 71.5°F (=21.9°C, below 23°C threshold)
-        let cache_key = WeatherAlphaStrategy::question_hash(question);
+        // Use location-based cache key
+        let cache_key = WeatherAlphaStrategy::location_hash("Wellington", WeatherMetric::TemperatureMax, None);
         {
             let mut cache = strategy.forecast_cache.lock().unwrap();
             cache.insert(cache_key, CachedForecast {

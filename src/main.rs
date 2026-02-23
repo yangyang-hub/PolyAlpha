@@ -270,21 +270,21 @@ async fn main() -> Result<()> {
         // Markets with YES < 0.05 or > 0.95 have extreme order books (0.001/0.999)
         if let Some(yp) = yes_price {
             if yp < 0.05 || yp > 0.95 {
-                if GammaFeed::is_strategy_relevant(&m.question) {
+                if GammaFeed::is_relevant_for_strategies(&m.question, &settings.strategy.enabled) {
                     strategy_extreme += 1;
                 }
                 extreme_filtered += 1;
                 continue;
             }
             let dist = (yp - 0.50_f64).abs();
-            if GammaFeed::is_strategy_relevant(&m.question) {
+            if GammaFeed::is_relevant_for_strategies(&m.question, &settings.strategy.enabled) {
                 strategy_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, dist));
             } else {
                 general_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, dist));
             }
         } else {
             // No price data: include with worst priority in appropriate group
-            if GammaFeed::is_strategy_relevant(&m.question) {
+            if GammaFeed::is_relevant_for_strategies(&m.question, &settings.strategy.enabled) {
                 strategy_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, 1.0));
             } else {
                 general_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, 1.0));

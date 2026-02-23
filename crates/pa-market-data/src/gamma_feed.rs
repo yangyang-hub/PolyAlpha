@@ -11,6 +11,7 @@ pub struct GammaFeed {
     min_liquidity: Decimal,
     min_volume_24h: Decimal,
     max_markets: usize,
+    enabled_strategies: Vec<String>,
 }
 
 impl GammaFeed {
@@ -21,6 +22,7 @@ impl GammaFeed {
             min_liquidity: settings.market_filter.min_liquidity,
             min_volume_24h: settings.market_filter.min_volume_24h,
             max_markets: settings.market_filter.max_markets,
+            enabled_strategies: settings.strategy.enabled.clone(),
         })
     }
 
@@ -31,6 +33,7 @@ impl GammaFeed {
             min_liquidity: settings.market_filter.min_liquidity,
             min_volume_24h: settings.market_filter.min_volume_24h,
             max_markets: settings.market_filter.max_markets,
+            enabled_strategies: settings.strategy.enabled.clone(),
         }
     }
 
@@ -128,8 +131,14 @@ impl GammaFeed {
             "Raw market discovery complete"
         );
 
-        // Partition into strategy-relevant (weather/crypto keywords) vs general markets.
-        // Strategy-relevant markets are always included regardless of liquidity ranking.
+        // Determine if any general (non-directional) strategies are enabled.
+        // General strategies (yes_no, neg_risk, cross_market, convergence) need broad market data.
+        // Directional-only strategies (weather, crypto) only need strategy-relevant markets.
+        let general_strategies = ["yes_no", "neg_risk", "cross_market", "convergence"];
+        let needs_general_markets = self.enabled_strategies.is_empty()
+            || self.enabled_strategies.iter().any(|s| general_strategies.contains(&s.as_str()));
+
+        // Partition into strategy-relevant vs general markets.
         let mut strategy_markets = Vec::new();
         let mut general_markets = Vec::new();
 
@@ -137,11 +146,12 @@ impl GammaFeed {
             if !m.active {
                 continue;
             }
-            if Self::is_strategy_relevant(&m.question) {
+            if Self::is_relevant_for_strategies(&m.question, &self.enabled_strategies) {
                 strategy_markets.push(m);
-            } else {
+            } else if needs_general_markets {
                 general_markets.push(m);
             }
+            // If only directional strategies enabled, skip non-relevant markets entirely
         }
 
         // Sort general markets by liquidity descending, fill remaining slots
@@ -156,6 +166,9 @@ impl GammaFeed {
         tracing::info!(
             filtered_count = filtered.len(),
             strategy_relevant = strategy_count,
+            general_markets = filtered.len() - strategy_count,
+            needs_general = needs_general_markets,
+            enabled = ?self.enabled_strategies,
             "Market discovery complete after filtering"
         );
 
@@ -165,54 +178,63 @@ impl GammaFeed {
     /// Check if a market question is relevant to active strategies.
     /// These markets are always included regardless of liquidity ranking.
     pub fn is_strategy_relevant(question: &str) -> bool {
+        // When called without strategy filter, check all strategies
+        Self::is_relevant_for_strategies(question, &[])
+    }
+
+    /// Check if a market question is relevant to the given enabled strategies.
+    /// Empty slice means check all strategies (backwards compatibility).
+    pub fn is_relevant_for_strategies(question: &str, enabled: &[String]) -> bool {
         let lower = question.to_lowercase();
 
-        // Weather: only strong unambiguous keywords
-        // Avoid short words like "rain", "snow", "wind" which cause false positives
-        // ("Jonas Wind", "Snow White", "Ukraine" contains "rain", etc.)
-        let weather = lower.contains("temperature")
-            || lower.contains("fahrenheit")
-            || lower.contains("celsius")
-            || lower.contains("rainfall")
-            || lower.contains("snowfall")
-            || lower.contains("wind speed")
-            || lower.contains("inches of rain")
-            || lower.contains("inches of snow");
+        let check_weather = enabled.is_empty() || enabled.iter().any(|s| s == "weather");
+        let check_crypto = enabled.is_empty() || enabled.iter().any(|s| s == "crypto");
 
-        if weather {
-            return true;
+        // Weather: only strong unambiguous keywords
+        if check_weather {
+            let weather = lower.contains("temperature")
+                || lower.contains("fahrenheit")
+                || lower.contains("celsius")
+                || lower.contains("rainfall")
+                || lower.contains("snowfall")
+                || lower.contains("wind speed")
+                || lower.contains("inches of rain")
+                || lower.contains("inches of snow");
+
+            if weather {
+                return true;
+            }
         }
 
         // Crypto price markets: asset keyword + price indicator
-        // Only use unambiguous keywords — avoid short/common words that collide with
-        // sports teams ("avalanche"=NHL), government ("doge"=DOGE dept), people ("ada", "pol"), etc.
-        let crypto_assets = [
-            "bitcoin", "btc", "ethereum", "eth", "solana",
-            "bnb", "xrp", "ripple", "dogecoin",
-            "cardano", "avax", "polkadot", "polygon", "matic",
-        ];
-        let has_crypto_asset = crypto_assets.iter().any(|kw| {
-            if let Some(pos) = lower.find(kw) {
-                let before_ok = pos == 0 || !lower.as_bytes()[pos - 1].is_ascii_alphabetic();
-                let after = pos + kw.len();
-                let after_ok =
-                    after >= lower.len() || !lower.as_bytes()[after].is_ascii_alphabetic();
-                before_ok && after_ok
-            } else {
-                false
-            }
-        });
-        // Exclude "gas price" false positive (Ethereum gas fee ≠ ETH price)
-        let gas_price = lower.contains("gas price") || lower.contains("gas fee");
-        let has_price_indicator = lower.contains('$')
-            || lower.contains("price")
-            || lower.contains("reach")
-            || lower.contains("hit")
-            || lower.contains("exceed")
-            || lower.contains("dip");
+        if check_crypto {
+            let crypto_assets = [
+                "bitcoin", "btc", "ethereum", "eth", "solana",
+                "bnb", "xrp", "ripple", "dogecoin",
+                "cardano", "avax", "polkadot", "polygon", "matic",
+            ];
+            let has_crypto_asset = crypto_assets.iter().any(|kw| {
+                if let Some(pos) = lower.find(kw) {
+                    let before_ok = pos == 0 || !lower.as_bytes()[pos - 1].is_ascii_alphabetic();
+                    let after = pos + kw.len();
+                    let after_ok =
+                        after >= lower.len() || !lower.as_bytes()[after].is_ascii_alphabetic();
+                    before_ok && after_ok
+                } else {
+                    false
+                }
+            });
+            let gas_price = lower.contains("gas price") || lower.contains("gas fee");
+            let has_price_indicator = lower.contains('$')
+                || lower.contains("price")
+                || lower.contains("reach")
+                || lower.contains("hit")
+                || lower.contains("exceed")
+                || lower.contains("dip");
 
-        if has_crypto_asset && has_price_indicator && !gas_price {
-            return true;
+            if has_crypto_asset && has_price_indicator && !gas_price {
+                return true;
+            }
         }
 
         false

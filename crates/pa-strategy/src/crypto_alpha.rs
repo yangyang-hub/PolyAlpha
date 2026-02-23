@@ -43,7 +43,7 @@ pub static CRYPTO_ASSETS: &[CryptoAsset] = &[
     },
     CryptoAsset {
         name: "Solana",
-        keywords: &["solana"],
+        keywords: &["solana", "sol"],
         binance_symbol: "SOLUSDT",
         coingecko_id: "solana",
     },
@@ -61,7 +61,7 @@ pub static CRYPTO_ASSETS: &[CryptoAsset] = &[
     },
     CryptoAsset {
         name: "Dogecoin",
-        keywords: &["dogecoin"],
+        keywords: &["dogecoin", "doge"],
         binance_symbol: "DOGEUSDT",
         coingecko_id: "dogecoin",
     },
@@ -219,6 +219,8 @@ pub fn parse_crypto_question(question: &str) -> Option<CryptoQuestion> {
         || lower.contains("drop below")
         || lower.contains("drop under")
         || lower.contains("fall under")
+        || lower.contains("dip to")
+        || lower.contains("dip below")
         || (contains_word(&lower, "below") && !lower.contains("or below"))
         || contains_word(&lower, "under")
     {
@@ -1363,9 +1365,8 @@ impl CryptoAlphaStrategy {
                 (Utc::now() + chrono::Duration::days(30)).date_naive()
             });
             let days_to_target = (target_date - Utc::now().date_naive()).num_days().max(1) as f64;
-            let t = days_to_target / 365.0;
 
-            let model_prob = gbm_probability(price_data.current_price, parsed.threshold, mu, sigma, t);
+            let model_prob = gbm_probability(price_data.current_price, parsed.threshold, mu, sigma, days_to_target);
             let effective_prob = match parsed.direction {
                 PriceDirection::Above => model_prob,
                 PriceDirection::Below => 1.0 - model_prob,
@@ -1892,7 +1893,7 @@ mod tests {
         let q = q.unwrap();
         assert_eq!(q.asset.name, "Bitcoin");
         assert!((q.threshold - 85_000.0).abs() < 0.01);
-        // "dip to" is not explicitly "fall below" — direction depends on keyword matching
+        assert_eq!(q.direction, PriceDirection::Below); // "dip to" → Below
     }
 
     #[test]

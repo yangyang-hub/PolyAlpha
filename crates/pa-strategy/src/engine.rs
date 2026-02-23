@@ -146,7 +146,8 @@ impl StrategyEngine {
 
         let timer = pa_monitor::metrics::SCAN_LATENCY.start_timer();
 
-        // Filter markets by end_date if max_market_end_days is configured
+        // Filter markets by end_date if max_market_end_days is configured.
+        // Markets without end_date are always included (weather/crypto don't have end_date).
         let filtered: Vec<MarketInfo>;
         let scan_markets: &[MarketInfo] = if let Some(max_days) = self.max_market_end_days {
             let now = Utc::now();
@@ -156,7 +157,7 @@ impl StrategyEngine {
                 .filter(|m| {
                     m.end_date
                         .map(|ed| ed > now && ed <= cutoff)
-                        .unwrap_or(false)
+                        .unwrap_or(true) // no end_date → include (weather/crypto markets)
                 })
                 .cloned()
                 .collect();
