@@ -22,3 +22,4 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
+urlencoding = { workspace = true }

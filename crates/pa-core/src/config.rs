@@ -9,6 +9,7 @@ pub struct Settings {
     pub gamma: GammaConfig,
     pub strategy: StrategyConfig,
     pub risk: RiskConfig,
+    #[serde(default)]
     pub database: DatabaseConfig,
     pub monitor: MonitorConfig,
     pub market_filter: MarketFilterConfig,
@@ -41,6 +42,10 @@ pub struct ClobConfig {
     /// Use 2 if you deposited funds through the Polymarket website.
     #[serde(default)]
     pub signature_type: u8,
+    /// Polymarket proxy wallet address for Data API queries.
+    /// Leave empty to fallback to the EOA signer address.
+    #[serde(default)]
+    pub proxy_wallet: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -101,6 +106,7 @@ fn default_max_markets_per_strategy() -> usize {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DatabaseConfig {
+    #[serde(default)]
     pub url: String,
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
@@ -108,6 +114,15 @@ pub struct DatabaseConfig {
 
 fn default_max_connections() -> u32 {
     10
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            max_connections: default_max_connections(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]

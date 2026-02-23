@@ -1,9 +1,9 @@
 use alloy::primitives::{B256, U256};
 use pa_core::config::Settings;
 use pa_core::types::{BinaryEventGroup, MarketInfo, NegRiskEvent, Outcome, TokenInfo};
-use polymarket_client_sdk::gamma::types::response::Event;
+use polymarket_client_sdk::gamma::types::response::{Event, SearchResults};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Discovers markets from the Polymarket Gamma API and filters candidates.
 ///
@@ -58,13 +58,213 @@ impl GammaFeed {
         }
     }
 
-    /// Discover all active binary markets from Gamma API.
+    /// Discover active markets from Gamma API.
     ///
-    /// Uses our own HTTP/1.1 client with pagination to enumerate all active events,
-    /// then extracts binary markets with CLOB token IDs.
-    /// Retries up to 5 times with exponential backoff on failure.
+    /// Two discovery modes based on enabled strategies:
+    /// - **Directional-only** (weather, crypto): Uses `/public-search` API for targeted keyword
+    ///   search — returns relevant markets in 2-5 requests instead of paginating all ~500 events.
+    /// - **General strategies** (yes_no, neg_risk, cross_market, convergence): Falls back to
+    ///   full `/events` pagination since these need broad market coverage.
     pub async fn discover_markets(&self) -> anyhow::Result<Vec<MarketInfo>> {
         tracing::info!("Discovering markets from Gamma API");
+
+        // Check which discovery mode to use
+        let general_strategies = ["yes_no", "neg_risk", "cross_market", "convergence"];
+        let needs_full_scan = self.enabled_strategies.is_empty()
+            || self.enabled_strategies.iter().any(|s| general_strategies.contains(&s.as_str()));
+
+        let all_markets = if needs_full_scan {
+            self.discover_via_pagination().await?
+        } else {
+            self.discover_via_search().await?
+        };
+
+        tracing::info!(
+            total_discovered = all_markets.len(),
+            "Raw market discovery complete"
+        );
+
+        // Partition into strategy-relevant vs general markets.
+        let needs_general_markets = needs_full_scan;
+        let mut strategy_markets = Vec::new();
+        let mut general_markets = Vec::new();
+
+        for m in all_markets {
+            if !m.active {
+                continue;
+            }
+            if Self::is_relevant_for_strategies(&m.question, &self.enabled_strategies) {
+                strategy_markets.push(m);
+            } else if needs_general_markets {
+                general_markets.push(m);
+            }
+        }
+
+        // Sort general markets by liquidity descending, fill remaining slots
+        general_markets.sort_by(|a, b| b.liquidity.cmp(&a.liquidity));
+        let remaining_slots = self.max_markets.saturating_sub(strategy_markets.len());
+        general_markets.truncate(remaining_slots);
+
+        let mut filtered = strategy_markets;
+        let strategy_count = filtered.len();
+        filtered.extend(general_markets);
+
+        tracing::info!(
+            filtered_count = filtered.len(),
+            strategy_relevant = strategy_count,
+            general_markets = filtered.len() - strategy_count,
+            needs_general = needs_general_markets,
+            enabled = ?self.enabled_strategies,
+            "Market discovery complete after filtering"
+        );
+
+        Ok(filtered)
+    }
+
+    /// Discover markets via targeted `/public-search` queries.
+    ///
+    /// Much faster than full pagination — fetches all search terms in parallel,
+    /// then deduplicates by condition_id.
+    async fn discover_via_search(&self) -> anyhow::Result<Vec<MarketInfo>> {
+        let check_weather = self.enabled_strategies.iter().any(|s| s == "weather");
+        let check_crypto = self.enabled_strategies.iter().any(|s| s == "crypto");
+
+        let mut search_terms: Vec<&str> = Vec::new();
+        if check_weather {
+            // "weather" catches most weather markets; specific terms catch the rest
+            search_terms.extend_from_slice(&["weather", "temperature", "inches of snow", "inches of rain"]);
+        }
+        if check_crypto {
+            search_terms.extend_from_slice(&["bitcoin price", "ethereum price", "crypto price"]);
+        }
+
+        tracing::info!(
+            terms = ?search_terms,
+            "Discovering markets via search API (parallel)"
+        );
+
+        // Fire all search queries in parallel
+        let futures: Vec<_> = search_terms
+            .iter()
+            .map(|term| {
+                let term = term.to_string();
+                async move {
+                    let result = self.search_events(&term).await;
+                    (term, result)
+                }
+            })
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
+
+        // Merge results with deduplication
+        let mut all_markets = Vec::new();
+        let mut seen_condition_ids: HashSet<B256> = HashSet::new();
+
+        for (term, result) in results {
+            match result {
+                Ok(events) => {
+                    let mut term_count = 0;
+                    for event in events {
+                        let event_neg_risk = event.neg_risk.unwrap_or(false);
+                        let event_neg_risk_market_id = event.neg_risk_market_id;
+                        let event_title = event.title.clone();
+
+                        if let Some(markets) = event.markets {
+                            for market in markets {
+                                if let Some(info) = self.convert_market(
+                                    &market,
+                                    event_neg_risk,
+                                    event_neg_risk_market_id,
+                                    event_title.clone(),
+                                ) {
+                                    if seen_condition_ids.insert(info.condition_id) {
+                                        all_markets.push(info);
+                                        term_count += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    tracing::info!(
+                        term,
+                        new_markets = term_count,
+                        total = all_markets.len(),
+                        "Search term completed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(term, error = %e, "Search query failed, skipping");
+                }
+            }
+        }
+
+        Ok(all_markets)
+    }
+
+    /// Search events by keyword using the `/public-search` endpoint.
+    ///
+    /// Returns matching events with their embedded markets.
+    /// Retries up to 3 times with exponential backoff.
+    async fn search_events(&self, query: &str) -> anyhow::Result<Vec<Event>> {
+        let url = format!(
+            "{}/public-search?q={}&limit_per_type=100&events_status=active",
+            self.gamma_host.trim_end_matches('/'),
+            urlencoding::encode(query),
+        );
+
+        for attempt in 0..3u32 {
+            if attempt > 0 {
+                let delay = std::time::Duration::from_secs(2u64.pow(attempt));
+                tokio::time::sleep(delay).await;
+            }
+
+            match self.fetch_search_results(&url).await {
+                Ok(results) => {
+                    return Ok(results.events.unwrap_or_default());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        query,
+                        attempt = attempt + 1,
+                        error = %e,
+                        "Search request failed"
+                    );
+                    if attempt == 2 {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        Ok(Vec::new())
+    }
+
+    /// Fetch and parse a search results page.
+    async fn fetch_search_results(&self, url: &str) -> anyhow::Result<SearchResults> {
+        let resp = self.http_client.get(url).send().await.map_err(|e| {
+            anyhow::anyhow!("search request failed: {} (timeout={}, connect={})", e, e.is_timeout(), e.is_connect())
+        })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(anyhow::anyhow!("HTTP {}", status));
+        }
+
+        let body_text = resp.text().await
+            .map_err(|e| anyhow::anyhow!("body read failed: {}", e))?;
+
+        serde_json::from_str(&body_text).map_err(|e| {
+            let preview = &body_text[..body_text.len().min(200)];
+            anyhow::anyhow!("JSON parse failed: {} (len={}, preview={})", e, body_text.len(), preview)
+        })
+    }
+
+    /// Discover markets via full pagination of `/events` endpoint.
+    ///
+    /// Used when general strategies (yes_no, neg_risk, etc.) need broad market coverage.
+    async fn discover_via_pagination(&self) -> anyhow::Result<Vec<MarketInfo>> {
+        tracing::info!("Discovering markets via full events pagination");
 
         let mut all_markets = Vec::new();
         let mut last_error = None;
@@ -128,7 +328,6 @@ impl GammaFeed {
                     }
                     None => {
                         consecutive_page_failures += 1;
-                        // Skip this page and try the next one (events might be sparse)
                         if consecutive_page_failures >= 3 {
                             tracing::warn!(offset, "3 consecutive page failures, stopping pagination");
                             break;
@@ -170,7 +369,6 @@ impl GammaFeed {
                     "Gamma API page fetched"
                 );
 
-                // If we got fewer events than the limit, we've reached the last page
                 if page_count < limit {
                     break;
                 }
@@ -184,7 +382,7 @@ impl GammaFeed {
                 tracing::info!(
                     total_discovered = all_markets.len(),
                     pages_fetched = offset / limit + 1,
-                    "Gamma API discovery complete"
+                    "Gamma API pagination complete"
                 );
                 break;
             }
@@ -199,53 +397,7 @@ impl GammaFeed {
             }
         }
 
-        tracing::info!(
-            total_discovered = all_markets.len(),
-            "Raw market discovery complete"
-        );
-
-        // Determine if any general (non-directional) strategies are enabled.
-        // General strategies (yes_no, neg_risk, cross_market, convergence) need broad market data.
-        // Directional-only strategies (weather, crypto) only need strategy-relevant markets.
-        let general_strategies = ["yes_no", "neg_risk", "cross_market", "convergence"];
-        let needs_general_markets = self.enabled_strategies.is_empty()
-            || self.enabled_strategies.iter().any(|s| general_strategies.contains(&s.as_str()));
-
-        // Partition into strategy-relevant vs general markets.
-        let mut strategy_markets = Vec::new();
-        let mut general_markets = Vec::new();
-
-        for m in all_markets {
-            if !m.active {
-                continue;
-            }
-            if Self::is_relevant_for_strategies(&m.question, &self.enabled_strategies) {
-                strategy_markets.push(m);
-            } else if needs_general_markets {
-                general_markets.push(m);
-            }
-            // If only directional strategies enabled, skip non-relevant markets entirely
-        }
-
-        // Sort general markets by liquidity descending, fill remaining slots
-        general_markets.sort_by(|a, b| b.liquidity.cmp(&a.liquidity));
-        let remaining_slots = self.max_markets.saturating_sub(strategy_markets.len());
-        general_markets.truncate(remaining_slots);
-
-        let mut filtered = strategy_markets;
-        let strategy_count = filtered.len();
-        filtered.extend(general_markets);
-
-        tracing::info!(
-            filtered_count = filtered.len(),
-            strategy_relevant = strategy_count,
-            general_markets = filtered.len() - strategy_count,
-            needs_general = needs_general_markets,
-            enabled = ?self.enabled_strategies,
-            "Market discovery complete after filtering"
-        );
-
-        Ok(filtered)
+        Ok(all_markets)
     }
 
     /// Fetch a single page from the Gamma API events endpoint.

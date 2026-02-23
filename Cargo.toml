@@ -31,7 +31,7 @@ pa-monitor = { path = "crates/pa-monitor" }
 
 # Polymarket SDK
 polymarket-client-sdk = { version = "0.4", features = [
-    "clob", "ws", "ctf", "gamma", "tracing",
+    "clob", "ws", "ctf", "gamma", "data", "tracing",
 ] }
 
 # Blockchain
@@ -82,6 +82,7 @@ tokio-util = "0.7"
 
 # HTTP
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+urlencoding = "2"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -109,7 +110,6 @@ dotenvy = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 chrono = { workspace = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }

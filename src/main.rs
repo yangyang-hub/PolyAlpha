@@ -23,10 +23,9 @@ use pa_execution::orchestrator::HybridOrchestrator;
 use pa_market_data::gamma_feed::GammaFeed;
 use pa_market_data::service::MarketDataService;
 use pa_market_data::event_calendar::EventCalendarService;
+use pa_market_data::data_api::PositionLoader;
 use pa_monitor::health::HealthState;
 use pa_risk::manager::RiskManagerImpl;
-use pa_storage::models::OrderBookSnapshotRow;
-use pa_storage::repository::Repository;
 use pa_strategy::cross_market::{CrossMarketArbitrage, detect_cross_market_pairs};
 use pa_strategy::engine::StrategyEngine;
 use pa_strategy::neg_risk::NegRiskArbitrage;
@@ -63,20 +62,6 @@ async fn main() -> Result<()> {
         .with_chain_id(Some(settings.chain.chain_id));
     let wallet_address = signer.address();
     tracing::info!(address = %wallet_address, "Wallet loaded");
-
-    // --- Initialize database ---
-    let db_url = std::env::var("PA_DATABASE__URL")
-        .unwrap_or_else(|_| settings.database.url.clone());
-    tracing::info!(
-        db_host = db_url.split('@').last().unwrap_or("?"),
-        from_env = std::env::var("PA_DATABASE__URL").is_ok(),
-        "Connecting to database"
-    );
-    let repo = Repository::connect(&db_url, settings.database.max_connections)
-        .await
-        .context("Failed to connect to database")?;
-    repo.migrate().await.context("Failed to run database migrations")?;
-    tracing::info!("Database connected and migrations applied");
 
     // --- Global cancellation token ---
     let cancel = CancellationToken::new();
@@ -339,52 +324,6 @@ async fn main() -> Result<()> {
 
     // Get broadcast receiver for strategy engine
     let update_rx = market_data.ws_feed().await.subscribe_updates();
-
-    // --- Snapshot recording pipeline ---
-    let snapshot_repo = repo.clone();
-    let snapshot_cache = market_data.cache().clone();
-    let snapshot_cancel = cancel.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            tokio::select! {
-                _ = snapshot_cancel.cancelled() => break,
-                _ = interval.tick() => {
-                    let token_ids = snapshot_cache.token_ids();
-                    let mut recorded = 0u64;
-                    for token_id in &token_ids {
-                        if let Some(book) = snapshot_cache.get(token_id) {
-                            // Skip gamma-seeded synthetic books (size=1000 marker)
-                            if book.asks.first().map(|a| a.size) == Some(dec!(1000)) {
-                                continue;
-                            }
-                            let bids_json = price_levels_to_json(&book.bids);
-                            let asks_json = price_levels_to_json(&book.asks);
-                            let row = OrderBookSnapshotRow {
-                                id: 0,
-                                token_id: token_id.to_string(),
-                                timestamp: book.timestamp,
-                                bids: bids_json,
-                                asks: asks_json,
-                                best_bid: book.best_bid().map(|l| l.price),
-                                best_ask: book.best_ask().map(|l| l.price),
-                                midpoint: book.midpoint(),
-                            };
-                            if let Err(e) = snapshot_repo.insert_orderbook_snapshot(&row).await {
-                                tracing::warn!(error = %e, token_id = %token_id, "Failed to record snapshot");
-                            } else {
-                                recorded += 1;
-                            }
-                        }
-                    }
-                    if recorded > 0 {
-                        pa_monitor::metrics::SNAPSHOTS_RECORDED.inc_by(recorded);
-                        tracing::debug!(count = recorded, "Snapshots recorded");
-                    }
-                }
-            }
-        }
-    });
 
     // --- Market spread observer (observation mode) ---
     // Every 60s, scans all binary markets and logs spread distribution.
@@ -692,39 +631,26 @@ async fn main() -> Result<()> {
     // --- Initialize risk manager ---
     let risk_manager_impl = Arc::new(RiskManagerImpl::new(settings.risk.clone()));
 
-    // --- Load positions from DB ---
-    let position_rows = repo.load_positions().await
-        .context("Failed to load positions from database")?;
-    let initial_positions: Vec<_> = position_rows
+    // --- Load positions from Data API ---
+    let proxy_addr = if settings.clob.proxy_wallet.is_empty() {
+        wallet_address
+    } else {
+        settings.clob.proxy_wallet.parse::<alloy::primitives::Address>()
+            .context("Invalid proxy_wallet address")?
+    };
+    let position_loader = PositionLoader::new(proxy_addr)?;
+    let api_positions = position_loader.load_positions().await
+        .context("Failed to load positions from Data API")?;
+    let initial_positions: Vec<_> = api_positions
         .iter()
-        .filter_map(|row| {
-            alloy::primitives::U256::from_str(&row.token_id)
-                .ok()
-                .map(|tid| {
-                    let cid = row.condition_id.as_ref().and_then(|bytes| {
-                        if bytes.len() == 32 {
-                            Some(alloy::primitives::B256::from_slice(bytes))
-                        } else {
-                            if !bytes.is_empty() {
-                                tracing::warn!(
-                                    token_id = %row.token_id,
-                                    len = bytes.len(),
-                                    "Position has invalid condition_id length, concentration checks disabled for this position"
-                                );
-                            }
-                            None
-                        }
-                    });
-                    (tid, row.size, row.avg_cost, parse_strategy_type(row.strategy_type.as_deref()), cid)
-                })
-        })
+        .map(|p| (p.token_id, p.size, p.avg_price, None, p.condition_id))
         .collect();
     let loaded_count = initial_positions.len();
     risk_manager_impl.load_initial_positions(initial_positions);
     tracing::info!(
         loaded = loaded_count,
         exposure = %risk_manager_impl.total_exposure(),
-        "Positions loaded from DB"
+        "Positions loaded from Data API"
     );
 
     let risk_manager: Arc<dyn pa_core::traits::RiskManager> =
@@ -1126,27 +1052,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    // --- Position persistence background task (every 10s) ---
-    let persist_rm = Arc::clone(&risk_manager_impl);
-    let persist_repo = repo.clone();
-    let persist_cancel = cancel.clone();
-    let persist_handle = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(10));
-        loop {
-            tokio::select! {
-                _ = persist_cancel.cancelled() => {
-                    // Final flush on shutdown
-                    persist_positions(&persist_rm, &persist_repo).await;
-                    tracing::info!("Position persistence: final flush complete");
-                    break;
-                }
-                _ = interval.tick() => {
-                    persist_positions(&persist_rm, &persist_repo).await;
-                }
-            }
-        }
-    });
-
     // Wait for Ctrl+C
     tokio::signal::ctrl_c().await?;
     tracing::info!("Shutdown signal received");
@@ -1163,26 +1068,8 @@ async fn main() -> Result<()> {
     // Wait for engine to finish
     let _ = engine_handle.await;
 
-    // Wait for position persistence final flush
-    let _ = persist_handle.await;
-
     tracing::info!("PolyAlpha shutdown complete");
     Ok(())
-}
-
-/// Convert price levels to JSON array format: [[price, size], ...]
-fn price_levels_to_json(levels: &[pa_core::types::PriceLevel]) -> serde_json::Value {
-    serde_json::Value::Array(
-        levels
-            .iter()
-            .map(|l| {
-                serde_json::Value::Array(vec![
-                    serde_json::Value::String(l.price.to_string()),
-                    serde_json::Value::String(l.size.to_string()),
-                ])
-            })
-            .collect(),
-    )
 }
 
 /// No-op executor used when CLOB authentication fails (observe-only mode).
@@ -1216,41 +1103,5 @@ impl pa_core::traits::Executor for DryRunExecutor {
 
     async fn cancel_all(&self) -> pa_core::Result<()> {
         Ok(())
-    }
-}
-
-/// Persist all non-zero positions from risk manager to database.
-async fn persist_positions(rm: &RiskManagerImpl, repo: &Repository) {
-    let positions = rm.snapshot_positions();
-    for (token_id, entry) in &positions {
-        let st_str = entry.strategy_type.map(|st| format!("{:?}", st));
-        let cid_bytes: Option<Vec<u8>> = entry.condition_id.map(|cid| cid.as_slice().to_vec());
-        if let Err(e) = repo.upsert_position(
-            &token_id.to_string(),
-            entry.size,
-            entry.avg_cost,
-            st_str.as_deref(),
-            cid_bytes.as_deref(),
-        ).await {
-            tracing::warn!(error = %e, token_id = %token_id, "Failed to persist position");
-        }
-    }
-    if let Err(e) = repo.cleanup_zero_positions().await {
-        tracing::warn!(error = %e, "Failed to cleanup zero positions");
-    }
-}
-
-/// Parse a strategy type string from the database back to StrategyType enum.
-fn parse_strategy_type(s: Option<&str>) -> Option<pa_core::types::StrategyType> {
-    use pa_core::types::StrategyType;
-    match s? {
-        "Weather" => Some(StrategyType::Weather),
-        "CryptoAlpha" => Some(StrategyType::CryptoAlpha),
-        "ResolutionConvergence" => Some(StrategyType::ResolutionConvergence),
-        "YesNoMerge" => Some(StrategyType::YesNoMerge),
-        "YesNoSplit" => Some(StrategyType::YesNoSplit),
-        "NegRiskConvert" => Some(StrategyType::NegRiskConvert),
-        "CrossMarket" => Some(StrategyType::CrossMarket),
-        _ => None,
     }
 }
