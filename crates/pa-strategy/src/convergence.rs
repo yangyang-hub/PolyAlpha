@@ -134,6 +134,22 @@ impl ResolutionConvergenceStrategy {
         let remaining = (self.config.max_position_usdc - existing).max(Decimal::ZERO);
         let size = kelly_size.min(remaining).min(available);
 
+        // Ensure order meets CLOB minimum cost ($1.00): bump size if needed
+        let size = if size > Decimal::ZERO && ask_price > Decimal::ZERO {
+            let min_cost_size = (Decimal::ONE / ask_price).ceil();
+            if size < min_cost_size {
+                let bumped = min_cost_size.min(remaining).min(available);
+                if bumped < min_cost_size {
+                    return None;
+                }
+                bumped
+            } else {
+                size
+            }
+        } else {
+            size
+        };
+
         if size <= Decimal::ZERO {
             return None;
         }

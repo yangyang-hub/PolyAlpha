@@ -1575,6 +1575,23 @@ impl WeatherAlphaStrategy {
         let remaining = (self.config.max_position_usdc - existing).max(Decimal::ZERO);
         let size = kelly_size.min(remaining).min(available);
 
+        // Ensure order meets CLOB minimum cost ($1.00): bump size if needed
+        let size = if size > Decimal::ZERO && ask_price > Decimal::ZERO {
+            let min_cost_size = (Decimal::ONE / ask_price).ceil();
+            if size < min_cost_size {
+                let bumped = min_cost_size.min(remaining).min(available);
+                if bumped < min_cost_size {
+                    // Cannot meet minimum cost within position limits
+                    return None;
+                }
+                bumped
+            } else {
+                size
+            }
+        } else {
+            size
+        };
+
         if size <= Decimal::ZERO {
             return None;
         }
@@ -1890,6 +1907,22 @@ impl WeatherAlphaStrategy {
         let existing = (self.get_position)(token_id);
         let remaining = (self.config.max_position_usdc - existing).max(Decimal::ZERO);
         let size = kelly_size.min(remaining).min(available);
+
+        // Ensure order meets CLOB minimum cost ($1.00): bump size if needed
+        let size = if size > Decimal::ZERO && ask_price > Decimal::ZERO {
+            let min_cost_size = (Decimal::ONE / ask_price).ceil();
+            if size < min_cost_size {
+                let bumped = min_cost_size.min(remaining).min(available);
+                if bumped < min_cost_size {
+                    return None;
+                }
+                bumped
+            } else {
+                size
+            }
+        } else {
+            size
+        };
 
         if size <= Decimal::ZERO {
             return None;
@@ -2982,6 +3015,60 @@ mod tests {
         let existing = dec!(60);
         let remaining = (max_position - existing).max(Decimal::ZERO);
         assert_eq!(remaining, Decimal::ZERO);
+    }
+
+    // ──── Minimum Cost Floor Tests ────
+
+    #[test]
+    fn test_min_cost_floor_bumps_size() {
+        // Kelly gives size=0.5, but at price=0.10 cost=$0.05 < $1.00
+        // Floor: ceil(1.0/0.10) = 10 shares, cost = $1.00
+        let ask_price = dec!(0.10);
+        let kelly_size = dec!(0.5);
+        let remaining = dec!(20);
+        let available = dec!(1000);
+        let size = kelly_size.min(remaining).min(available);
+
+        let min_cost_size = (Decimal::ONE / ask_price).ceil();
+        assert_eq!(min_cost_size, dec!(10));
+
+        let size = if size < min_cost_size {
+            let bumped = min_cost_size.min(remaining).min(available);
+            if bumped < min_cost_size { Decimal::ZERO } else { bumped }
+        } else {
+            size
+        };
+        assert_eq!(size, dec!(10));
+        assert!(ask_price * size >= Decimal::ONE); // cost $1.00
+    }
+
+    #[test]
+    fn test_min_cost_floor_skip_when_exceeds_max() {
+        // Kelly gives size=0.5 at price=0.05: need 20 shares for $1.00
+        // But remaining=15 < 20 → cannot meet minimum, skip
+        let ask_price = dec!(0.05);
+        let remaining = dec!(15);
+        let min_cost_size = (Decimal::ONE / ask_price).ceil();
+        assert_eq!(min_cost_size, dec!(20));
+
+        let bumped = min_cost_size.min(remaining);
+        assert_eq!(bumped, dec!(15));
+        assert!(bumped < min_cost_size); // cannot meet → should skip
+    }
+
+    #[test]
+    fn test_min_cost_floor_no_bump_needed() {
+        // Kelly gives size=5 at price=0.50: cost=$2.50 > $1.00, no bump needed
+        let ask_price = dec!(0.50);
+        let kelly_size = dec!(5);
+        let remaining = dec!(20);
+        let size = kelly_size.min(remaining);
+
+        let min_cost_size = (Decimal::ONE / ask_price).ceil();
+        assert_eq!(min_cost_size, dec!(2));
+
+        assert!(size >= min_cost_size); // no bump needed
+        assert_eq!(size, dec!(5));
     }
 
     // ──── Cache Eviction Test ────
