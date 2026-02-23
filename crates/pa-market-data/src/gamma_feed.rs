@@ -23,8 +23,9 @@ impl GammaFeed {
     pub fn new(settings: &Settings) -> anyhow::Result<Self> {
         let http_client = reqwest::Client::builder()
             .http1_only()
-            .timeout(std::time::Duration::from_secs(30))
-            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(90))
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .pool_max_idle_per_host(0)
             .user_agent("polyalpha/0.1")
             .build()?;
         Ok(Self {
@@ -41,8 +42,9 @@ impl GammaFeed {
     pub fn with_defaults(settings: &Settings) -> Self {
         let http_client = reqwest::Client::builder()
             .http1_only()
-            .timeout(std::time::Duration::from_secs(30))
-            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(90))
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .pool_max_idle_per_host(0)
             .user_agent("polyalpha/0.1")
             .build()
             .expect("Failed to build HTTP client");
@@ -80,9 +82,9 @@ impl GammaFeed {
             }
 
             all_markets.clear();
-            let mut had_error = false;
             let mut offset = 0i32;
-            let limit = 100i32;
+            let limit = 10i32;
+            let mut consecutive_page_failures = 0u32;
 
             loop {
                 let url = format!(
@@ -92,47 +94,48 @@ impl GammaFeed {
                     offset,
                 );
 
-                tracing::debug!(offset, limit, "Fetching Gamma API page");
+                // Per-page retry: try each page up to 3 times with short backoff
+                let mut page_events: Option<Vec<Event>> = None;
+                for page_attempt in 0..3u32 {
+                    if page_attempt > 0 {
+                        let delay = std::time::Duration::from_secs(2u64.pow(page_attempt));
+                        tracing::debug!(offset, page_attempt = page_attempt + 1, "Retrying page");
+                        tokio::time::sleep(delay).await;
+                    }
 
-                let events: Vec<Event> = match self.http_client.get(&url).send().await {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        if !status.is_success() {
-                            tracing::warn!(
-                                attempt = attempt + 1,
-                                status = %status,
-                                offset,
-                                "Gamma API returned non-200 status"
-                            );
-                            last_error = Some(format!("HTTP {}", status));
-                            had_error = true;
+                    match self.fetch_page(&url).await {
+                        Ok(events) => {
+                            page_events = Some(events);
                             break;
                         }
-                        match resp.json().await {
-                            Ok(data) => data,
-                            Err(e) => {
-                                tracing::warn!(
-                                    attempt = attempt + 1,
-                                    offset,
-                                    error = %e,
-                                    "Failed to decode Gamma API response"
-                                );
-                                last_error = Some(e.to_string());
-                                had_error = true;
-                                break;
-                            }
+                        Err(e) => {
+                            tracing::warn!(
+                                attempt = attempt + 1,
+                                page_attempt = page_attempt + 1,
+                                offset,
+                                error = %e,
+                                "Gamma API page fetch failed"
+                            );
+                            last_error = Some(e.to_string());
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            attempt = attempt + 1,
-                            offset,
-                            error = %e,
-                            "Failed to fetch Gamma API page"
-                        );
-                        last_error = Some(e.to_string());
-                        had_error = true;
-                        break;
+                }
+
+                let events = match page_events {
+                    Some(e) => {
+                        consecutive_page_failures = 0;
+                        e
+                    }
+                    None => {
+                        consecutive_page_failures += 1;
+                        // Skip this page and try the next one (events might be sparse)
+                        if consecutive_page_failures >= 3 {
+                            tracing::warn!(offset, "3 consecutive page failures, stopping pagination");
+                            break;
+                        }
+                        tracing::warn!(offset, "Skipping failed page, trying next offset");
+                        offset += limit;
+                        continue;
                     }
                 };
 
@@ -160,30 +163,34 @@ impl GammaFeed {
                     }
                 }
 
+                tracing::info!(
+                    offset,
+                    page_events = page_count,
+                    total_markets = all_markets.len(),
+                    "Gamma API page fetched"
+                );
+
                 // If we got fewer events than the limit, we've reached the last page
                 if page_count < limit {
                     break;
                 }
                 offset += page_count;
+
+                // Delay between pages to avoid CDN rate limiting
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
 
-            if !had_error && !all_markets.is_empty() {
-                break; // Full success — all pages fetched
-            }
-
-            // Partial success: got some markets before error — use what we have
-            if had_error && !all_markets.is_empty() {
-                tracing::warn!(
-                    fetched = all_markets.len(),
-                    "Gamma API partially succeeded, using fetched markets"
+            if !all_markets.is_empty() {
+                tracing::info!(
+                    total_discovered = all_markets.len(),
+                    pages_fetched = offset / limit + 1,
+                    "Gamma API discovery complete"
                 );
                 break;
             }
 
-            if !had_error && all_markets.is_empty() {
-                tracing::warn!(attempt = attempt + 1, "Gamma API returned 0 events");
-                last_error = Some("Gamma API returned 0 events".to_string());
-            }
+            tracing::warn!(attempt = attempt + 1, "Gamma API returned 0 usable markets");
+            last_error = last_error.or_else(|| Some("No markets found".to_string()));
         }
 
         if all_markets.is_empty() {
@@ -239,6 +246,40 @@ impl GammaFeed {
         );
 
         Ok(filtered)
+    }
+
+    /// Fetch a single page from the Gamma API events endpoint.
+    ///
+    /// Reads response as text first for better error diagnostics, then parses JSON.
+    async fn fetch_page(&self, url: &str) -> anyhow::Result<Vec<Event>> {
+        let resp = self.http_client.get(url).send().await.map_err(|e| {
+            anyhow::anyhow!(
+                "request failed: {} (timeout={}, connect={})",
+                e,
+                e.is_timeout(),
+                e.is_connect()
+            )
+        })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(anyhow::anyhow!("HTTP {}", status));
+        }
+
+        let body_text = resp
+            .text()
+            .await
+            .map_err(|e| anyhow::anyhow!("body read failed: {}", e))?;
+
+        serde_json::from_str(&body_text).map_err(|e| {
+            let preview = &body_text[..body_text.len().min(200)];
+            anyhow::anyhow!(
+                "JSON parse failed: {} (body_len={}, preview={})",
+                e,
+                body_text.len(),
+                preview
+            )
+        })
     }
 
     /// Check if a market question is relevant to active strategies.
