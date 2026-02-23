@@ -107,15 +107,40 @@ async fn main() -> Result<()> {
         }
     });
 
-    // --- Discover markets ---
-    tracing::info!("Discovering markets from Gamma API...");
-    let markets = market_data.discover_markets().await?;
+    // --- Discover markets (with retry) ---
+    let markets = {
+        let mut markets = Vec::new();
+        for attempt in 0..5u32 {
+            if attempt > 0 {
+                let delay = std::time::Duration::from_secs(10 * (attempt as u64)); // 10s, 20s, 30s, 40s
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    delay_secs = delay.as_secs(),
+                    "Retrying market discovery"
+                );
+                tokio::time::sleep(delay).await;
+            }
+            tracing::info!("Discovering markets from Gamma API...");
+            match market_data.discover_markets().await {
+                Ok(m) if !m.is_empty() => {
+                    markets = m;
+                    break;
+                }
+                Ok(_) => {
+                    tracing::warn!(attempt = attempt + 1, "No markets found, will retry");
+                }
+                Err(e) => {
+                    tracing::error!(attempt = attempt + 1, error = %e, "Market discovery failed, will retry");
+                }
+            }
+        }
+        if markets.is_empty() {
+            tracing::error!("All market discovery attempts failed, exiting");
+            return Ok(());
+        }
+        markets
+    };
     tracing::info!(count = markets.len(), "Markets discovered");
-
-    if markets.is_empty() {
-        tracing::warn!("No markets found, exiting");
-        return Ok(());
-    }
 
     // Group NegRisk multi-outcome events
     let neg_risk_events = GammaFeed::group_neg_risk_events(&markets);

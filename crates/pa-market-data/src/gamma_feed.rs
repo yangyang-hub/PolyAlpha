@@ -38,50 +38,88 @@ impl GammaFeed {
     ///
     /// Uses pagination via `stream_data()` to enumerate all active events,
     /// then extracts binary markets with CLOB token IDs.
+    /// Retries up to 3 times with exponential backoff on failure.
     pub async fn discover_markets(&self) -> anyhow::Result<Vec<MarketInfo>> {
         tracing::info!("Discovering markets from Gamma API");
 
         let mut all_markets = Vec::new();
+        let mut last_error = None;
 
-        // Stream all active events with pagination
-        let stream = self.client.stream_data(
-            |client, limit, offset| {
-                let request = polymarket_client_sdk::gamma::types::request::EventsRequest::builder()
-                    .active(true)
-                    .closed(false)
-                    .limit(limit)
-                    .offset(offset)
-                    .build();
-                async move { client.events(&request).await }
-            },
-            500, // max page size
-        );
+        // Retry the entire stream up to 3 times with exponential backoff
+        for attempt in 0..3u32 {
+            if attempt > 0 {
+                let delay = std::time::Duration::from_secs(2u64.pow(attempt)); // 2s, 4s
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    delay_secs = delay.as_secs(),
+                    "Retrying Gamma API discovery"
+                );
+                tokio::time::sleep(delay).await;
+            }
 
-        pin_mut!(stream);
+            all_markets.clear();
+            let mut had_error = false;
 
-        while let Some(event_result) = stream.next().await {
-            let event = match event_result {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to fetch event, skipping");
-                    continue;
+            let stream = self.client.stream_data(
+                |client, limit, offset| {
+                    let request = polymarket_client_sdk::gamma::types::request::EventsRequest::builder()
+                        .active(true)
+                        .closed(false)
+                        .limit(limit)
+                        .offset(offset)
+                        .build();
+                    async move { client.events(&request).await }
+                },
+                500, // max page size
+            );
+
+            pin_mut!(stream);
+
+            while let Some(event_result) = stream.next().await {
+                let event = match event_result {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            error = %e,
+                            error_debug = ?e,
+                            "Failed to fetch event page"
+                        );
+                        last_error = Some(e.to_string());
+                        had_error = true;
+                        break; // Break inner loop to trigger retry
+                    }
+                };
+
+                let event_neg_risk = event.neg_risk.unwrap_or(false);
+                let event_neg_risk_market_id = event.neg_risk_market_id;
+                let event_title = event.title.clone();
+
+                let markets = match event.markets {
+                    Some(m) => m,
+                    None => continue,
+                };
+
+                for market in markets {
+                    if let Some(info) = self.convert_market(&market, event_neg_risk, event_neg_risk_market_id, event_title.clone()) {
+                        all_markets.push(info);
+                    }
                 }
-            };
+            }
 
-            let event_neg_risk = event.neg_risk.unwrap_or(false);
-            let event_neg_risk_market_id = event.neg_risk_market_id;
-            let event_title = event.title.clone();
+            if !had_error && !all_markets.is_empty() {
+                break; // Success
+            }
 
-            // Extract markets from this event
-            let markets = match event.markets {
-                Some(m) => m,
-                None => continue,
-            };
+            if !had_error && all_markets.is_empty() {
+                tracing::warn!(attempt = attempt + 1, "Gamma API returned 0 events");
+                last_error = Some("Gamma API returned 0 events".to_string());
+            }
+        }
 
-            for market in markets {
-                if let Some(info) = self.convert_market(&market, event_neg_risk, event_neg_risk_market_id, event_title.clone()) {
-                    all_markets.push(info);
-                }
+        if all_markets.is_empty() {
+            if let Some(err) = &last_error {
+                tracing::error!(error = %err, "All Gamma API retry attempts failed");
             }
         }
 
