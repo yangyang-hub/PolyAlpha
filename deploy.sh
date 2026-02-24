@@ -22,6 +22,11 @@ CONTAINER_NAME="polyalpha-bot"
 
 # ── cron 兼容: PATH + 颜色 ──
 export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+# ── 防止 git dubious ownership 报错（cron/不同用户执行时）──
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=safe.directory
+export GIT_CONFIG_VALUE_0="$REPO_DIR"
 if [[ -t 1 ]]; then
     RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 else
@@ -83,9 +88,6 @@ GIT_UPDATED=false
 do_pull() {
     log "拉取最新代码 ($GIT_BRANCH)..."
     cd "$REPO_DIR"
-
-    # 防止 cron/其他用户执行时 git dubious ownership 报错
-    git config --global --add safe.directory "$REPO_DIR" 2>/dev/null || true
 
     # 保存本地配置变更
     local stashed=false
