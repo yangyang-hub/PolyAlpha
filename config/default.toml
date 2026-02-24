@@ -29,10 +29,10 @@ order_type = "FOK"
 max_market_end_days = 3
 
 [risk]
-max_position_per_market = 2000.0
-max_total_exposure = 10000.0
-max_daily_loss = 500.0
-circuit_breaker_loss = 1000.0
+max_position_per_market = 5.0
+max_total_exposure = 10.0
+max_daily_loss = 5.0
+circuit_breaker_loss = 8.0
 circuit_breaker_consecutive_losses = 5
 max_slippage_bps = 50
 min_order_usdc = 1.0
@@ -56,8 +56,8 @@ max_markets = 500
 ws_max_instruments = 500
 
 [weather]
-min_edge_bps = 300
-max_position_usdc = 20.0
+min_edge_bps = 100
+max_position_usdc = 5.0
 kelly_fraction = 0.25
 refresh_interval_secs = 3600
 exit_buffer_bps = 50
