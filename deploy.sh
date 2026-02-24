@@ -77,7 +77,9 @@ binary_changed() {
     return 0  # 有变更
 }
 
-# ── Git 拉取 ──
+# ── Git 拉取（始终成功返回，用 GIT_UPDATED 标记是否有更新）──
+GIT_UPDATED=false
+
 do_pull() {
     log "拉取最新代码 ($GIT_BRANCH)..."
     cd "$REPO_DIR"
@@ -101,7 +103,7 @@ do_pull() {
         if $stashed; then
             git stash pop 2>/dev/null || true
         fi
-        return 1  # 无更新
+        return
     fi
 
     git reset --hard "origin/$GIT_BRANCH"
@@ -111,7 +113,7 @@ do_pull() {
         git stash pop 2>/dev/null || warn "配置恢复冲突，请手动处理: git stash pop"
     fi
 
-    return 0  # 有更新
+    GIT_UPDATED=true
 }
 
 # ── Docker 操作 ──
@@ -195,7 +197,7 @@ case "${1:-deploy}" in
         do_logs
         ;;
     deploy|"")
-        do_pull || true  # 即使无 git 更新也继续检测二进制
+        do_pull
 
         if binary_changed; then
             log "检测到 bin/polyalpha 变更，重建容器..."
