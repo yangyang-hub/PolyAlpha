@@ -84,6 +84,9 @@ do_pull() {
     log "拉取最新代码 ($GIT_BRANCH)..."
     cd "$REPO_DIR"
 
+    # 防止 cron/其他用户执行时 git dubious ownership 报错
+    git config --global --add safe.directory "$REPO_DIR" 2>/dev/null || true
+
     # 保存本地配置变更
     local stashed=false
     if ! git diff --quiet config/ 2>/dev/null; then
