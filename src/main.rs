@@ -1091,7 +1091,7 @@ async fn main() -> Result<()> {
         let redeem_cancel = cancel.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(300));
-            interval.tick().await; // skip immediate tick
+            // First tick fires immediately — no skip
             loop {
                 tokio::select! {
                     _ = redeem_cancel.cancelled() => break,
