@@ -630,6 +630,8 @@ pub struct CryptoAlphaStrategy {
     get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
     /// Returns all held positions for this strategy: (token_id, size, avg_cost).
     get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
+    /// Returns current wallet USDC balance for dynamic position sizing.
+    get_balance: Box<dyn Fn() -> Decimal + Send + Sync>,
     price_cache: Arc<Mutex<HashMap<String, CachedPrice>>>,
     neg_risk_events: Vec<NegRiskEvent>,
     binary_event_groups: Vec<BinaryEventGroup>,
@@ -649,6 +651,7 @@ impl CryptoAlphaStrategy {
         neg_risk_events: Vec<NegRiskEvent>,
         binary_event_groups: Vec<BinaryEventGroup>,
         get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
+        get_balance: Box<dyn Fn() -> Decimal + Send + Sync>,
     ) -> Self {
         let coingecko_key = if config.coingecko_api_key.is_empty() {
             None
@@ -663,6 +666,7 @@ impl CryptoAlphaStrategy {
             get_available_capital,
             get_position,
             get_held_positions,
+            get_balance,
             price_cache: Arc::new(Mutex::new(HashMap::new())),
             neg_risk_events,
             binary_event_groups,
@@ -803,18 +807,21 @@ impl CryptoAlphaStrategy {
             return None;
         }
 
+        // Dynamic position cap: fraction of current wallet balance
+        let effective_max = (self.get_balance)() * self.config.max_position_pct;
+
         // Kelly sizing: f* = edge / (1 - price)
         let kelly_raw = if ask_price > Decimal::ZERO && ask_price < dec!(0.99) {
             (edge / (Decimal::ONE - ask_price)).min(Decimal::TWO)
         } else {
             Decimal::ZERO
         };
-        let kelly_size = kelly_raw * self.config.kelly_fraction * self.config.max_position_usdc;
+        let kelly_size = kelly_raw * self.config.kelly_fraction * effective_max;
         let available = (self.get_available_capital)();
 
         // Position-aware sizing
         let existing = (self.get_position)(token_id);
-        let remaining = (self.config.max_position_usdc - existing).max(Decimal::ZERO);
+        let remaining = (effective_max - existing).max(Decimal::ZERO);
         let size = kelly_size.min(remaining).min(available);
 
         // Skip if Kelly-sized order below CLOB minimum cost ($1.00)
@@ -984,18 +991,21 @@ impl CryptoAlphaStrategy {
             return None;
         }
 
+        // Dynamic position cap: fraction of current wallet balance
+        let effective_max = (self.get_balance)() * self.config.max_position_pct;
+
         // Kelly sizing
         let kelly_raw = if ask_price > Decimal::ZERO && ask_price < dec!(0.99) {
             (edge / (Decimal::ONE - ask_price)).min(Decimal::TWO)
         } else {
             Decimal::ZERO
         };
-        let kelly_size = kelly_raw * self.config.kelly_fraction * self.config.max_position_usdc;
+        let kelly_size = kelly_raw * self.config.kelly_fraction * effective_max;
         let available = (self.get_available_capital)();
 
         // Position-aware sizing
         let existing = (self.get_position)(token_id);
-        let remaining = (self.config.max_position_usdc - existing).max(Decimal::ZERO);
+        let remaining = (effective_max - existing).max(Decimal::ZERO);
         let size = kelly_size.min(remaining).min(available);
 
         // Skip if Kelly-sized order below CLOB minimum cost ($1.00)
@@ -1210,18 +1220,21 @@ impl CryptoAlphaStrategy {
             return None;
         }
 
+        // Dynamic position cap: fraction of current wallet balance
+        let effective_max = (self.get_balance)() * self.config.max_position_pct;
+
         // Kelly sizing
         let kelly_raw = if ask_price > Decimal::ZERO && ask_price < dec!(0.99) {
             (edge / (Decimal::ONE - ask_price)).min(Decimal::TWO)
         } else {
             Decimal::ZERO
         };
-        let kelly_size = kelly_raw * self.config.kelly_fraction * self.config.max_position_usdc;
+        let kelly_size = kelly_raw * self.config.kelly_fraction * effective_max;
         let available = (self.get_available_capital)();
 
         // Position-aware sizing
         let existing = (self.get_position)(token_id);
-        let remaining = (self.config.max_position_usdc - existing).max(Decimal::ZERO);
+        let remaining = (effective_max - existing).max(Decimal::ZERO);
         let size = kelly_size.min(remaining).min(available);
 
         // Skip if Kelly-sized order below CLOB minimum cost ($1.00)
@@ -1974,7 +1987,7 @@ mod tests {
     ) -> CryptoAlphaStrategy {
         let config = CryptoAlphaConfig {
             min_edge_bps: 500,
-            max_position_usdc: dec!(100),
+            max_position_pct: dec!(0.50),
             kelly_fraction: dec!(0.25),
             refresh_interval_secs: 300,
             coingecko_api_key: String::new(),
@@ -1991,6 +2004,7 @@ mod tests {
             vec![],
             vec![],
             Box::new(move || held.clone()),
+            Box::new(|| dec!(200)), // test balance $200
         )
     }
 

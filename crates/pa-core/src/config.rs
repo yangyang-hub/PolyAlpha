@@ -145,8 +145,9 @@ pub struct MarketFilterConfig {
 pub struct WeatherConfig {
     /// Minimum edge (model_prob - market_price) to trigger a trade, in basis points.
     pub min_edge_bps: u32,
-    /// Maximum position size per weather market in USDC.
-    pub max_position_usdc: Decimal,
+    /// Maximum position size as a fraction of wallet balance (0.0-1.0).
+    /// E.g. 0.50 = up to 50% of current balance per market.
+    pub max_position_pct: Decimal,
     /// Kelly fraction cap (0.0-1.0). Limits position sizing aggressiveness.
     pub kelly_fraction: Decimal,
     /// Per-metric forecast error standard deviations.
@@ -194,7 +195,7 @@ impl Default for WeatherConfig {
     fn default() -> Self {
         Self {
             min_edge_bps: 500,
-            max_position_usdc: Decimal::from(50),
+            max_position_pct: Decimal::new(50, 2), // 0.50 = 50% of balance
             kelly_fraction: Decimal::new(25, 2), // 0.25 (quarter Kelly)
             forecast_error: ForecastErrorConfig::default(),
             refresh_interval_secs: 3600,
@@ -251,9 +252,9 @@ pub struct ConvergenceConfig {
     /// Maximum days until resolution to consider a market.
     #[serde(default = "default_max_days_to_resolution")]
     pub max_days_to_resolution: u32,
-    /// Maximum position size per market in USDC.
-    #[serde(default = "default_conv_max_position")]
-    pub max_position_usdc: Decimal,
+    /// Maximum position size as a fraction of wallet balance (0.0-1.0).
+    #[serde(default = "default_conv_max_position_pct")]
+    pub max_position_pct: Decimal,
     /// Kelly fraction cap (0.0-1.0).
     #[serde(default = "default_conv_kelly")]
     pub kelly_fraction: Decimal,
@@ -277,7 +278,7 @@ pub struct ConvergenceConfig {
 
 fn default_min_price_threshold() -> Decimal { Decimal::new(93, 2) }
 fn default_max_days_to_resolution() -> u32 { 7 }
-fn default_conv_max_position() -> Decimal { Decimal::from(100) }
+fn default_conv_max_position_pct() -> Decimal { Decimal::new(50, 2) } // 0.50
 fn default_conv_kelly() -> Decimal { Decimal::new(25, 2) }
 fn default_time_decay_boost() -> bool { true }
 fn default_time_decay_rate() -> f64 { 0.03 }
@@ -287,7 +288,7 @@ impl Default for ConvergenceConfig {
         Self {
             min_price_threshold: default_min_price_threshold(),
             max_days_to_resolution: default_max_days_to_resolution(),
-            max_position_usdc: default_conv_max_position(),
+            max_position_pct: default_conv_max_position_pct(),
             kelly_fraction: default_conv_kelly(),
             time_decay_boost: default_time_decay_boost(),
             time_decay_rate: default_time_decay_rate(),
@@ -305,9 +306,9 @@ pub struct CryptoAlphaConfig {
     /// Minimum edge in basis points.
     #[serde(default = "default_crypto_min_edge")]
     pub min_edge_bps: u32,
-    /// Maximum position size per market in USDC.
-    #[serde(default = "default_crypto_max_position")]
-    pub max_position_usdc: Decimal,
+    /// Maximum position size as a fraction of wallet balance (0.0-1.0).
+    #[serde(default = "default_crypto_max_position_pct")]
+    pub max_position_pct: Decimal,
     /// Kelly fraction cap (0.0-1.0).
     #[serde(default = "default_crypto_kelly")]
     pub kelly_fraction: Decimal,
@@ -326,7 +327,7 @@ pub struct CryptoAlphaConfig {
 }
 
 fn default_crypto_min_edge() -> u32 { 500 }
-fn default_crypto_max_position() -> Decimal { Decimal::from(100) }
+fn default_crypto_max_position_pct() -> Decimal { Decimal::new(50, 2) } // 0.50
 fn default_crypto_kelly() -> Decimal { Decimal::new(25, 2) }
 fn default_crypto_refresh() -> u64 { 300 }
 
@@ -334,7 +335,7 @@ impl Default for CryptoAlphaConfig {
     fn default() -> Self {
         Self {
             min_edge_bps: default_crypto_min_edge(),
-            max_position_usdc: default_crypto_max_position(),
+            max_position_pct: default_crypto_max_position_pct(),
             kelly_fraction: default_crypto_kelly(),
             refresh_interval_secs: default_crypto_refresh(),
             coingecko_api_key: String::new(),

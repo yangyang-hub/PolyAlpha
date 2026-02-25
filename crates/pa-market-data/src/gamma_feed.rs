@@ -283,7 +283,7 @@ impl GammaFeed {
 
             all_markets.clear();
             let mut offset = 0i32;
-            let limit = 10i32;
+            let limit = 100i32;
             let mut consecutive_page_failures = 0u32;
 
             loop {
@@ -375,7 +375,7 @@ impl GammaFeed {
                 offset += page_count;
 
                 // Delay between pages to avoid CDN rate limiting
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
 
             if !all_markets.is_empty() {

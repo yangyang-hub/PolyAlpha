@@ -1301,6 +1301,8 @@ pub struct WeatherAlphaStrategy {
     get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
     /// Returns all held positions for this strategy: (token_id, size, avg_cost).
     get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
+    /// Returns current wallet USDC balance for dynamic position sizing.
+    get_balance: Box<dyn Fn() -> Decimal + Send + Sync>,
     forecast_cache: Arc<Mutex<HashMap<u64, CachedForecast>>>,
     /// NegRisk multi-outcome weather events to scan.
     neg_risk_events: Vec<NegRiskEvent>,
@@ -1317,6 +1319,7 @@ impl WeatherAlphaStrategy {
         get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
         neg_risk_events: Vec<NegRiskEvent>,
         get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
+        get_balance: Box<dyn Fn() -> Decimal + Send + Sync>,
     ) -> Self {
         Self {
             config,
@@ -1326,6 +1329,7 @@ impl WeatherAlphaStrategy {
             get_available_capital,
             get_position,
             get_held_positions,
+            get_balance,
             forecast_cache: Arc::new(Mutex::new(HashMap::new())),
             neg_risk_events,
             scan_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1571,6 +1575,9 @@ impl WeatherAlphaStrategy {
             return None;
         }
 
+        // Dynamic position cap: fraction of current wallet balance
+        let effective_max = (self.get_balance)() * self.config.max_position_pct;
+
         // Position sizing via Kelly criterion: f* = edge / (1 - price)
         // Guard against extreme prices where denominator approaches zero
         let kelly_raw = if ask_price > Decimal::ZERO && ask_price < dec!(0.99) {
@@ -1578,12 +1585,12 @@ impl WeatherAlphaStrategy {
         } else {
             Decimal::ZERO
         };
-        let kelly_size = kelly_raw * self.config.kelly_fraction * self.config.max_position_usdc;
+        let kelly_size = kelly_raw * self.config.kelly_fraction * effective_max;
         let available = (self.get_available_capital)();
 
         // Position-aware sizing: subtract existing position from max
         let existing = (self.get_position)(token_id);
-        let remaining = (self.config.max_position_usdc - existing).max(Decimal::ZERO);
+        let remaining = (effective_max - existing).max(Decimal::ZERO);
         let size = kelly_size.min(remaining).min(available);
 
         // Skip if Kelly-sized order below CLOB minimum cost ($1.00)
@@ -1900,32 +1907,31 @@ impl WeatherAlphaStrategy {
             return None;
         }
 
+        // Dynamic position cap: fraction of current wallet balance
+        let effective_max = (self.get_balance)() * self.config.max_position_pct;
+
         // Kelly criterion position sizing
         let kelly_raw = if ask_price > Decimal::ZERO && ask_price < dec!(0.99) {
             (edge / (Decimal::ONE - ask_price)).min(Decimal::TWO)
         } else {
             Decimal::ZERO
         };
-        let kelly_size = kelly_raw * self.config.kelly_fraction * self.config.max_position_usdc;
+        let kelly_size = kelly_raw * self.config.kelly_fraction * effective_max;
         let available = (self.get_available_capital)();
 
         // Position-aware sizing: subtract existing position from max
         let existing = (self.get_position)(token_id);
-        let remaining = (self.config.max_position_usdc - existing).max(Decimal::ZERO);
+        let remaining = (effective_max - existing).max(Decimal::ZERO);
         let size = kelly_size.min(remaining).min(available);
 
-        // Ensure order meets CLOB minimum cost ($1.00): bump size if needed
+        // Skip if Kelly-sized order below CLOB minimum cost ($1.00)
+        // Do NOT bump up — Kelly says "edge too small to bet" and we should respect that
         let size = if size > Decimal::ZERO && ask_price > Decimal::ZERO {
             let min_cost_size = (Decimal::ONE / ask_price).ceil();
             if size < min_cost_size {
-                let bumped = min_cost_size.min(remaining).min(available);
-                if bumped < min_cost_size {
-                    return None;
-                }
-                bumped
-            } else {
-                size
+                return None;
             }
+            size
         } else {
             size
         };
@@ -2413,7 +2419,7 @@ mod tests {
         // This should produce a detectable edge
         let config = WeatherConfig {
             min_edge_bps: 500, // 5%
-            max_position_usdc: dec!(100),
+            max_position_pct: dec!(0.50),
             kelly_fraction: dec!(0.25),
             forecast_error: ForecastErrorConfig::default(),
             refresh_interval_secs: 3600,
@@ -3292,7 +3298,7 @@ mod tests {
     ) -> WeatherAlphaStrategy {
         let config = WeatherConfig {
             min_edge_bps: 500,
-            max_position_usdc: dec!(100),
+            max_position_pct: dec!(0.50),
             kelly_fraction: dec!(0.25),
             forecast_error: ForecastErrorConfig::default(),
             refresh_interval_secs: 3600,
@@ -3313,6 +3319,7 @@ mod tests {
             Box::new(|_| Decimal::ZERO),
             vec![],
             Box::new(move || held.clone()),
+            Box::new(|| dec!(200)), // test balance $200
         )
     }
 
@@ -3452,7 +3459,7 @@ mod tests {
         // Build strategy with forecast_change_detection=true
         let config = WeatherConfig {
             min_edge_bps: 500,
-            max_position_usdc: dec!(100),
+            max_position_pct: dec!(0.50),
             kelly_fraction: dec!(0.25),
             forecast_error: ForecastErrorConfig::default(),
             refresh_interval_secs: 3600,
@@ -3475,6 +3482,7 @@ mod tests {
             Box::new(|_| Decimal::ZERO),
             vec![],
             Box::new(move || held_clone.clone()),
+            Box::new(|| dec!(200)), // test balance $200
         );
 
         // Pre-populate cache: model_prob ≈ 0.0, is_fresh_signal = false

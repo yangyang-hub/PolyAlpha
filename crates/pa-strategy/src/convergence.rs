@@ -31,6 +31,8 @@ pub struct ResolutionConvergenceStrategy {
     get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
     /// Returns all held positions for this strategy: (token_id, size, avg_cost).
     get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
+    /// Returns current wallet USDC balance for dynamic position sizing.
+    get_balance: Box<dyn Fn() -> Decimal + Send + Sync>,
     scan_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -42,6 +44,7 @@ impl ResolutionConvergenceStrategy {
         get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
         get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
         get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
+        get_balance: Box<dyn Fn() -> Decimal + Send + Sync>,
     ) -> Self {
         Self {
             config,
@@ -50,6 +53,7 @@ impl ResolutionConvergenceStrategy {
             get_available_capital,
             get_position,
             get_held_positions,
+            get_balance,
             scan_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
@@ -120,18 +124,21 @@ impl ResolutionConvergenceStrategy {
         }
         let edge = model_prob - ask_price;
 
+        // Dynamic position cap: fraction of current wallet balance
+        let effective_max = (self.get_balance)() * self.config.max_position_pct;
+
         // Kelly sizing: f* = edge / (1 - price)
         let kelly_raw = if ask_price > Decimal::ZERO && ask_price < dec!(0.99) {
             (edge / (Decimal::ONE - ask_price)).min(Decimal::TWO)
         } else {
             Decimal::ZERO
         };
-        let kelly_size = kelly_raw * self.config.kelly_fraction * self.config.max_position_usdc;
+        let kelly_size = kelly_raw * self.config.kelly_fraction * effective_max;
         let available = (self.get_available_capital)();
 
         // Position-aware sizing: subtract existing position from max
         let existing = (self.get_position)(token_id);
-        let remaining = (self.config.max_position_usdc - existing).max(Decimal::ZERO);
+        let remaining = (effective_max - existing).max(Decimal::ZERO);
         let size = kelly_size.min(remaining).min(available);
 
         // Skip if Kelly-sized order below CLOB minimum cost ($1.00)
@@ -449,7 +456,7 @@ mod tests {
         ConvergenceConfig {
             min_price_threshold: dec!(0.93),
             max_days_to_resolution: 7,
-            max_position_usdc: dec!(100),
+            max_position_pct: dec!(0.50),
             kelly_fraction: dec!(0.25),
             time_decay_boost: true,
             time_decay_rate: 0.03,
@@ -522,6 +529,7 @@ mod tests {
             Box::new(|| Decimal::MAX),
             Box::new(move |_| *pos.lock().unwrap()),
             Box::new(|| vec![]), // no held positions in tests
+            Box::new(|| dec!(200)), // test balance $200
         )
     }
 
@@ -699,6 +707,7 @@ mod tests {
             Box::new(|| Decimal::MAX),
             Box::new(|_| Decimal::ZERO),
             Box::new(move || held.clone()),
+            Box::new(|| dec!(200)), // test balance $200
         )
     }
 

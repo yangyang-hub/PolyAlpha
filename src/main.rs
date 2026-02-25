@@ -573,8 +573,12 @@ async fn main() -> Result<()> {
         .context("Failed to create CTF executor")?;
     tracing::info!("CTF executor initialized");
 
-    // Second CTF executor for auto-redeem (independent of HybridOrchestrator)
+    // Second CTF executor for auto-redeem — needs a wallet provider to sign transactions
+    let redeem_signer = PrivateKeySigner::from_str(&private_key)
+        .context("Invalid private key for redeem signer")?
+        .with_chain_id(Some(settings.chain.chain_id));
     let redeem_provider = alloy::providers::ProviderBuilder::new()
+        .wallet(redeem_signer)
         .connect(&settings.chain.rpc_url)
         .await
         .context("Failed to connect to RPC for redeem executor")?;
@@ -710,6 +714,13 @@ async fn main() -> Result<()> {
         })
     };
 
+    // Shared balance closure: returns current wallet USDC balance.
+    // Used by strategies for dynamic position sizing (max_position_pct * balance).
+    let make_balance_fn = |bal: Arc<std::sync::RwLock<Decimal>>|
+     -> Box<dyn Fn() -> Decimal + Send + Sync> {
+        Box::new(move || *bal.read().unwrap())
+    };
+
     let mut strategies: Vec<Box<dyn pa_core::traits::Strategy>> = Vec::new();
 
     // Add YesNo arbitrage strategy if enabled
@@ -778,6 +789,7 @@ async fn main() -> Result<()> {
             Box::new(move |tid: alloy::primitives::U256| rm_pos.get_position_size(&tid)),
             neg_risk_events.clone(),
             Box::new(move || rm_held.positions_by_strategy(pa_core::types::StrategyType::Weather)),
+            make_balance_fn(Arc::clone(&usdc_balance)),
         );
         strategies.push(Box::new(weather_strategy));
         tracing::info!("Weather alpha strategy enabled (binary + NegRisk)");
@@ -795,6 +807,7 @@ async fn main() -> Result<()> {
             make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
             Box::new(move |tid: alloy::primitives::U256| rm_pos_conv.get_position_size(&tid)),
             Box::new(move || rm_held_conv.positions_by_strategy(pa_core::types::StrategyType::ResolutionConvergence)),
+            make_balance_fn(Arc::clone(&usdc_balance)),
         );
         strategies.push(Box::new(convergence));
         tracing::info!("Resolution convergence strategy enabled");
@@ -814,6 +827,7 @@ async fn main() -> Result<()> {
             neg_risk_events.clone(),
             binary_event_groups.clone(),
             Box::new(move || rm_held_crypto.positions_by_strategy(pa_core::types::StrategyType::CryptoAlpha)),
+            make_balance_fn(Arc::clone(&usdc_balance)),
         );
         strategies.push(Box::new(crypto));
         tracing::info!("Crypto alpha strategy enabled");
@@ -1090,7 +1104,19 @@ async fn main() -> Result<()> {
                                         neg_risk = pos.neg_risk,
                                         "Redeeming resolved position"
                                     );
-                                    let result = redeem_ctf.redeem(pos.condition_id).await;
+                                    let result = if pos.neg_risk {
+                                        // NegRisk: convert size to CTF amount (6 decimals) for each outcome
+                                        let amount_raw = pos.size * rust_decimal::Decimal::from(1_000_000u64);
+                                        let amount = alloy::primitives::U256::from(
+                                            amount_raw.to_u64().unwrap_or(0)
+                                        );
+                                        redeem_ctf.redeem_neg_risk(
+                                            pos.condition_id,
+                                            vec![amount, amount],
+                                        ).await
+                                    } else {
+                                        redeem_ctf.redeem(pos.condition_id).await
+                                    };
                                     match result {
                                         Ok(tx) => {
                                             tracing::info!(
