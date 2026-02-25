@@ -54,6 +54,15 @@ impl MarketDataService {
         &self.cache
     }
 
+    /// Cancel existing WS subscriptions and subscribe to new tokens.
+    pub async fn resubscribe(&self, token_ids: &[U256]) -> pa_core::Result<()> {
+        self.ws
+            .write()
+            .await
+            .resubscribe(token_ids)
+            .map_err(|e| pa_core::Error::MarketData(e.to_string()))
+    }
+
     /// Access the underlying WebSocket feed for broadcast subscriptions.
     pub async fn ws_feed(&self) -> tokio::sync::RwLockReadGuard<'_, WebSocketFeed> {
         self.ws.read().await

@@ -237,6 +237,17 @@ impl WebSocketFeed {
         Ok(())
     }
 
+    /// Cancel existing subscriptions and subscribe to new tokens.
+    ///
+    /// Cancels all running WS tasks, clears state, then subscribes with new token list.
+    /// Used by the periodic market refresh to update WS subscriptions when new markets appear.
+    pub fn resubscribe(&mut self, token_ids: &[U256]) -> anyhow::Result<()> {
+        self.cancel_token.cancel();
+        self.tasks.clear();
+        self.cancel_token = CancellationToken::new();
+        self.subscribe(token_ids)
+    }
+
     /// Unsubscribe from the given token IDs.
     pub fn unsubscribe(&self, token_ids: &[U256]) -> anyhow::Result<()> {
         tracing::info!(count = token_ids.len(), "Unsubscribing from order book updates");

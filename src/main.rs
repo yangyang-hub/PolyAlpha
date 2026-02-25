@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -68,8 +69,10 @@ async fn main() -> Result<()> {
     let cancel = CancellationToken::new();
 
     // --- Initialize market data ---
-    let market_data = MarketDataService::new(&settings)
-        .context("Failed to initialize market data service")?;
+    let market_data = Arc::new(
+        MarketDataService::new(&settings)
+            .context("Failed to initialize market data service")?
+    );
     tracing::info!("Market data service initialized");
 
     // --- Start health/metrics server ---
@@ -150,6 +153,9 @@ async fn main() -> Result<()> {
     // Update metrics
     pa_monitor::metrics::MONITORED_MARKETS.set(markets.len() as f64);
 
+    // Wrap markets in shared state for periodic refresh
+    let shared_markets = Arc::new(tokio::sync::RwLock::new(markets));
+
     // --- Seed OrderBookCache with gamma best_bid/best_ask ---
     // Directional strategies (crypto, weather, convergence) need order book prices to
     // detect edges. The WS subscription can only hold 500 instruments (~250 markets),
@@ -158,73 +164,21 @@ async fn main() -> Result<()> {
     // WS updates will overwrite these with real-time data for subscribed markets.
     {
         let seed_cache = market_data.cache().clone();
-        let mut seeded_bid_ask = 0u32;
-        let mut seeded_outcome = 0u32;
+        let markets_snapshot = shared_markets.read().await;
+        let mut seeded = 0u32;
         let mut no_price_data = 0u32;
 
-        for m in &markets {
-            if m.tokens.len() < 2 {
-                continue;
+        for m in markets_snapshot.iter() {
+            if seed_market_cache(&seed_cache, m) {
+                seeded += 1;
+            } else if m.tokens.len() >= 2 {
+                no_price_data += 1;
             }
-
-            // Prefer gamma best_bid/best_ask (actual CLOB top-of-book) over outcome_prices (last trade)
-            let (yes_bid, yes_ask) = if let (Some(bid), Some(ask)) = (m.gamma_best_bid, m.gamma_best_ask) {
-                if ask > Decimal::ZERO && ask <= Decimal::ONE && bid > Decimal::ZERO {
-                    seeded_bid_ask += 1;
-                    (bid, ask)
-                } else {
-                    // Invalid bid/ask, try outcome_prices
-                    match m.outcome_prices.as_ref().and_then(|p| p.first().copied()) {
-                        Some(yp) if yp > Decimal::ZERO && yp < Decimal::ONE => {
-                            seeded_outcome += 1;
-                            ((yp - dec!(0.01)).max(dec!(0.01)), yp)
-                        }
-                        _ => { no_price_data += 1; continue; }
-                    }
-                }
-            } else {
-                // No bid/ask from gamma, try outcome_prices as fallback
-                match m.outcome_prices.as_ref().and_then(|p| p.first().copied()) {
-                    Some(yp) if yp > Decimal::ZERO && yp < Decimal::ONE => {
-                        seeded_outcome += 1;
-                        ((yp - dec!(0.01)).max(dec!(0.01)), yp)
-                    }
-                    _ => { no_price_data += 1; continue; }
-                }
-            };
-
-            // Compute NO side prices (approximate: NO ≈ 1 - YES)
-            let no_ask = (Decimal::ONE - yes_bid).min(dec!(0.99));
-            let no_bid = (Decimal::ONE - yes_ask).max(dec!(0.01));
-
-            // Seed YES token order book
-            seed_cache.update(
-                m.tokens[0].token_id,
-                pa_core::types::OrderBook {
-                    token_id: m.tokens[0].token_id,
-                    bids: vec![pa_core::types::PriceLevel { price: yes_bid, size: dec!(1000) }],
-                    asks: vec![pa_core::types::PriceLevel { price: yes_ask, size: dec!(1000) }],
-                    timestamp: Utc::now(),
-                },
-            );
-
-            // Seed NO token order book
-            seed_cache.update(
-                m.tokens[1].token_id,
-                pa_core::types::OrderBook {
-                    token_id: m.tokens[1].token_id,
-                    bids: vec![pa_core::types::PriceLevel { price: no_bid, size: dec!(1000) }],
-                    asks: vec![pa_core::types::PriceLevel { price: no_ask, size: dec!(1000) }],
-                    timestamp: Utc::now(),
-                },
-            );
         }
 
         tracing::info!(
-            seeded_bid_ask,
-            seeded_outcome,
+            seeded,
             no_price_data,
-            total = seeded_bid_ask + seeded_outcome,
             "OrderBookCache seeded with gamma prices"
         );
     }
@@ -261,106 +215,22 @@ async fn main() -> Result<()> {
     // --- Subscribe to WebSocket order book updates ---
     // Smart ordering: filter extreme prices for ALL markets, then prioritize by strategy relevance + mid-ness.
     let ws_max = settings.market_filter.ws_max_instruments;
+    {
+        let markets_snapshot = shared_markets.read().await;
+        let token_ids = build_ws_token_list(
+            &markets_snapshot,
+            &held_position_token_ids,
+            &settings.strategy.enabled,
+            ws_max,
+        );
 
-    let mut strategy_mid: Vec<(alloy::primitives::U256, alloy::primitives::U256, f64)> = Vec::new(); // strategy-relevant, mid-range
-    let mut general_mid: Vec<(alloy::primitives::U256, alloy::primitives::U256, f64)> = Vec::new();  // non-strategy, mid-range
-    let mut extreme_filtered = 0u32;
-    let mut strategy_extreme = 0u32;
-
-    for m in &markets {
-        if m.neg_risk || m.tokens.len() != 2 || !m.active {
-            continue;
-        }
-
-        // Use gamma_best_ask (actual CLOB state) for filtering, fallback to outcome_prices
-        let yes_price = m.gamma_best_ask
-            .and_then(|p| p.to_f64())
-            .or_else(|| {
-                m.outcome_prices.as_ref()
-                    .and_then(|p| p.first().copied())
-                    .and_then(|p| p.to_f64())
-            });
-
-        // Filter extreme prices for ALL markets (including strategy-relevant)
-        // Markets with YES < 0.05 or > 0.95 have extreme order books (0.001/0.999)
-        if let Some(yp) = yes_price {
-            if yp < 0.05 || yp > 0.95 {
-                if GammaFeed::is_relevant_for_strategies(&m.question, &settings.strategy.enabled) {
-                    strategy_extreme += 1;
-                }
-                extreme_filtered += 1;
-                continue;
-            }
-            let dist = (yp - 0.50_f64).abs();
-            if GammaFeed::is_relevant_for_strategies(&m.question, &settings.strategy.enabled) {
-                strategy_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, dist));
-            } else {
-                general_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, dist));
-            }
-        } else {
-            // No price data: include with worst priority in appropriate group
-            if GammaFeed::is_relevant_for_strategies(&m.question, &settings.strategy.enabled) {
-                strategy_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, 1.0));
-            } else {
-                general_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, 1.0));
-            }
-        }
+        tracing::info!(
+            tokens = token_ids.len(),
+            "Subscribing to order book updates (smart ordering)"
+        );
+        market_data.subscribe(&token_ids).await?;
+        pa_monitor::metrics::ACTIVE_SUBSCRIPTIONS.set(token_ids.len() as f64);
     }
-
-    // Sort each group by mid-ness (closest to 0.50 first)
-    strategy_mid.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
-    general_mid.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Build token list: held positions first (exit needs orderbook), then strategy-relevant, then general
-    let mut token_ids: Vec<alloy::primitives::U256> = Vec::new();
-
-    // Priority 0: tokens from held positions — exit scanning requires their orderbooks
-    for tid in &held_position_token_ids {
-        if !token_ids.contains(tid) {
-            token_ids.push(*tid);
-        }
-    }
-    let held_token_count = token_ids.len();
-
-    for (yes_tid, no_tid, _) in &strategy_mid {
-        if !token_ids.contains(yes_tid) { token_ids.push(*yes_tid); }
-        if !token_ids.contains(no_tid) { token_ids.push(*no_tid); }
-    }
-    let strategy_token_count = token_ids.len() - held_token_count;
-    for (yes_tid, no_tid, _) in &general_mid {
-        if !token_ids.contains(yes_tid) { token_ids.push(*yes_tid); }
-        if !token_ids.contains(no_tid) { token_ids.push(*no_tid); }
-    }
-
-    // Append NegRisk tokens after binary
-    let neg_risk_token_ids: Vec<_> = markets
-        .iter()
-        .filter(|m| m.neg_risk)
-        .flat_map(|m| m.tokens.iter().map(|t| t.token_id))
-        .collect();
-    for tid in &neg_risk_token_ids {
-        if !token_ids.contains(tid) {
-            token_ids.push(*tid);
-        }
-    }
-
-    // Truncate to WS limit
-    let total_before_trunc = token_ids.len();
-    token_ids.truncate(ws_max);
-
-    tracing::info!(
-        tokens = token_ids.len(),
-        held_positions = held_token_count,
-        strategy_mid = strategy_token_count,
-        strategy_extreme,
-        general_mid = general_mid.len() * 2,
-        neg_risk = neg_risk_token_ids.len(),
-        extreme_filtered,
-        truncated = total_before_trunc.saturating_sub(ws_max),
-        "Subscribing to order book updates (smart ordering)"
-    );
-    market_data.subscribe(&token_ids).await?;
-    pa_monitor::metrics::ACTIVE_SUBSCRIPTIONS.set(token_ids.len() as f64);
 
     // Get broadcast receiver for strategy engine
     let update_rx = market_data.ws_feed().await.subscribe_updates();
@@ -369,7 +239,7 @@ async fn main() -> Result<()> {
     // Every 60s, scans all binary markets and logs spread distribution.
     // Helps evaluate arbitrage opportunity density without executing trades.
     let observer_cache = market_data.cache().clone();
-    let observer_markets = markets.clone();
+    let observer_markets = shared_markets.read().await.clone();
     let observer_cancel = cancel.clone();
     let observer_settings = settings.strategy.clone();
     tokio::spawn(async move {
@@ -675,11 +545,12 @@ async fn main() -> Result<()> {
     let position_loader = PositionLoader::new(proxy_addr)?;
     let api_positions = position_loader.load_positions().await
         .context("Failed to load positions from Data API")?;
+    let markets_snapshot = shared_markets.read().await;
     let initial_positions: Vec<_> = api_positions
         .iter()
         .map(|p| {
             // Infer strategy_type from market data so exit logic works after restart
-            let strategy_type = infer_strategy_type(p.token_id, &markets, &neg_risk_events);
+            let strategy_type = infer_strategy_type(p.token_id, &markets_snapshot, &neg_risk_events);
             if strategy_type.is_some() {
                 tracing::debug!(
                     token_id = %p.token_id,
@@ -691,6 +562,7 @@ async fn main() -> Result<()> {
             (p.token_id, p.size, p.avg_price, strategy_type, Some(p.condition_id))
         })
         .collect();
+    drop(markets_snapshot);
     let loaded_count = initial_positions.len();
     let tagged_count = initial_positions.iter().filter(|p| p.3.is_some()).count();
     risk_manager_impl.load_initial_positions(initial_positions);
@@ -874,10 +746,11 @@ async fn main() -> Result<()> {
     );
 
     // --- Run trading loop with graceful shutdown ---
-    let all_markets_for_mm = markets.clone(); // clone before markets is moved into engine
+    let all_markets_for_mm = shared_markets.read().await.clone(); // snapshot for MM
+    let engine_shared = Arc::clone(&shared_markets);
     let engine_cancel = cancel.clone();
     let engine_handle = tokio::spawn(async move {
-        engine.run(&markets, update_rx, engine_cancel).await;
+        engine.run(engine_shared, update_rx, engine_cancel).await;
     });
 
     // --- Market Making background task ---
@@ -1091,6 +964,77 @@ async fn main() -> Result<()> {
         tracing::warn!("Market making enabled but CLOB auth failed — MM disabled");
     }
 
+    // --- Periodic market refresh background task ---
+    let refresh_interval = settings.market_filter.market_refresh_interval_secs;
+    if refresh_interval > 0 {
+        let refresh_markets = Arc::clone(&shared_markets);
+        let refresh_market_data = Arc::clone(&market_data);
+        let refresh_cache = market_data.cache().clone();
+        let refresh_cancel = cancel.clone();
+        let refresh_enabled_strategies = settings.strategy.enabled.clone();
+        let refresh_ws_max = settings.market_filter.ws_max_instruments;
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(refresh_interval));
+            interval.tick().await; // skip first immediate tick
+
+            loop {
+                tokio::select! {
+                    _ = refresh_cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        tracing::debug!("Periodic market refresh starting...");
+                        match refresh_market_data.discover_markets().await {
+                            Ok(new_all) => {
+                                let mut current = refresh_markets.write().await;
+                                let old_ids: HashSet<alloy::primitives::B256> = current.iter()
+                                    .map(|m| m.condition_id).collect();
+
+                                let mut added = 0u32;
+                                for m in new_all {
+                                    if !old_ids.contains(&m.condition_id) {
+                                        seed_market_cache(&refresh_cache, &m);
+                                        current.push(m);
+                                        added += 1;
+                                    }
+                                }
+
+                                if added > 0 {
+                                    tracing::info!(added, total = current.len(), "New markets discovered");
+                                    pa_monitor::metrics::MONITORED_MARKETS.set(current.len() as f64);
+
+                                    // Rebuild WS token list and resubscribe
+                                    // Use empty held_position list — held tokens are already subscribed
+                                    let token_ids = build_ws_token_list(
+                                        &current,
+                                        &[],
+                                        &refresh_enabled_strategies,
+                                        refresh_ws_max,
+                                    );
+                                    drop(current); // release write lock before WS call
+                                    if let Err(e) = refresh_market_data.resubscribe(&token_ids).await {
+                                        tracing::warn!(error = %e, "WS resubscribe failed after market refresh");
+                                    } else {
+                                        pa_monitor::metrics::ACTIVE_SUBSCRIPTIONS.set(token_ids.len() as f64);
+                                        tracing::info!(tokens = token_ids.len(), "WS resubscribed after market refresh");
+                                    }
+                                } else {
+                                    tracing::debug!("No new markets found in periodic refresh");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Periodic market refresh failed");
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        tracing::info!(
+            interval_secs = refresh_interval,
+            "Periodic market refresh task started"
+        );
+    }
+
     // --- Auto-redeem resolved positions (every 5 minutes) ---
     // SafeRedeemer routes CTF redeemPositions through GnosisSafe.execTransaction()
     // because tokens live in the Safe proxy wallet, not the EOA.
@@ -1262,6 +1206,141 @@ impl pa_core::traits::Executor for DryRunExecutor {
     async fn cancel_all(&self) -> pa_core::Result<()> {
         Ok(())
     }
+}
+
+/// Seed the OrderBookCache for a single market using its gamma prices.
+///
+/// Uses `gamma_best_bid/ask` when available, falls back to `outcome_prices`.
+/// Returns true if the market was seeded, false otherwise.
+fn seed_market_cache(cache: &pa_market_data::cache::OrderBookCache, m: &pa_core::types::MarketInfo) -> bool {
+    if m.tokens.len() < 2 {
+        return false;
+    }
+
+    let (yes_bid, yes_ask) = if let (Some(bid), Some(ask)) = (m.gamma_best_bid, m.gamma_best_ask) {
+        if ask > Decimal::ZERO && ask <= Decimal::ONE && bid > Decimal::ZERO {
+            (bid, ask)
+        } else {
+            match m.outcome_prices.as_ref().and_then(|p| p.first().copied()) {
+                Some(yp) if yp > Decimal::ZERO && yp < Decimal::ONE => {
+                    ((yp - dec!(0.01)).max(dec!(0.01)), yp)
+                }
+                _ => return false,
+            }
+        }
+    } else {
+        match m.outcome_prices.as_ref().and_then(|p| p.first().copied()) {
+            Some(yp) if yp > Decimal::ZERO && yp < Decimal::ONE => {
+                ((yp - dec!(0.01)).max(dec!(0.01)), yp)
+            }
+            _ => return false,
+        }
+    };
+
+    let no_ask = (Decimal::ONE - yes_bid).min(dec!(0.99));
+    let no_bid = (Decimal::ONE - yes_ask).max(dec!(0.01));
+
+    cache.update(
+        m.tokens[0].token_id,
+        pa_core::types::OrderBook {
+            token_id: m.tokens[0].token_id,
+            bids: vec![pa_core::types::PriceLevel { price: yes_bid, size: dec!(1000) }],
+            asks: vec![pa_core::types::PriceLevel { price: yes_ask, size: dec!(1000) }],
+            timestamp: Utc::now(),
+        },
+    );
+
+    cache.update(
+        m.tokens[1].token_id,
+        pa_core::types::OrderBook {
+            token_id: m.tokens[1].token_id,
+            bids: vec![pa_core::types::PriceLevel { price: no_bid, size: dec!(1000) }],
+            asks: vec![pa_core::types::PriceLevel { price: no_ask, size: dec!(1000) }],
+            timestamp: Utc::now(),
+        },
+    );
+
+    true
+}
+
+/// Build the smart-ordered WS token subscription list.
+///
+/// Priority: held position tokens > strategy-relevant mid-range > general mid-range > NegRisk.
+/// Filters out extreme-priced markets (YES < 0.05 or > 0.95).
+fn build_ws_token_list(
+    markets: &[pa_core::types::MarketInfo],
+    held_position_token_ids: &[alloy::primitives::U256],
+    enabled_strategies: &[String],
+    ws_max: usize,
+) -> Vec<alloy::primitives::U256> {
+    let mut strategy_mid: Vec<(alloy::primitives::U256, alloy::primitives::U256, f64)> = Vec::new();
+    let mut general_mid: Vec<(alloy::primitives::U256, alloy::primitives::U256, f64)> = Vec::new();
+
+    for m in markets {
+        if m.neg_risk || m.tokens.len() != 2 || !m.active {
+            continue;
+        }
+
+        let yes_price = m.gamma_best_ask
+            .and_then(|p| p.to_f64())
+            .or_else(|| {
+                m.outcome_prices.as_ref()
+                    .and_then(|p| p.first().copied())
+                    .and_then(|p| p.to_f64())
+            });
+
+        if let Some(yp) = yes_price {
+            if yp < 0.05 || yp > 0.95 {
+                continue;
+            }
+            let dist = (yp - 0.50_f64).abs();
+            if GammaFeed::is_relevant_for_strategies(&m.question, enabled_strategies) {
+                strategy_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, dist));
+            } else {
+                general_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, dist));
+            }
+        } else {
+            if GammaFeed::is_relevant_for_strategies(&m.question, enabled_strategies) {
+                strategy_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, 1.0));
+            } else {
+                general_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, 1.0));
+            }
+        }
+    }
+
+    strategy_mid.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+    general_mid.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut token_ids: Vec<alloy::primitives::U256> = Vec::new();
+
+    for tid in held_position_token_ids {
+        if !token_ids.contains(tid) {
+            token_ids.push(*tid);
+        }
+    }
+
+    for (yes_tid, no_tid, _) in &strategy_mid {
+        if !token_ids.contains(yes_tid) { token_ids.push(*yes_tid); }
+        if !token_ids.contains(no_tid) { token_ids.push(*no_tid); }
+    }
+    for (yes_tid, no_tid, _) in &general_mid {
+        if !token_ids.contains(yes_tid) { token_ids.push(*yes_tid); }
+        if !token_ids.contains(no_tid) { token_ids.push(*no_tid); }
+    }
+
+    let neg_risk_token_ids: Vec<_> = markets
+        .iter()
+        .filter(|m| m.neg_risk)
+        .flat_map(|m| m.tokens.iter().map(|t| t.token_id))
+        .collect();
+    for tid in &neg_risk_token_ids {
+        if !token_ids.contains(tid) {
+            token_ids.push(*tid);
+        }
+    }
+
+    token_ids.truncate(ws_max);
+    token_ids
 }
 
 /// Infer strategy_type for a loaded position by matching its token_id against discovered markets.

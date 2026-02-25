@@ -206,7 +206,7 @@ impl ResolutionConvergenceStrategy {
             return vec![];
         }
 
-        tracing::info!(
+        tracing::debug!(
             held_positions = held.len(),
             "[Convergence] scanning exits"
         );

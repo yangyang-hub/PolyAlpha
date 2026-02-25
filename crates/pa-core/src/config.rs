@@ -139,7 +139,12 @@ pub struct MarketFilterConfig {
     pub min_volume_24h: Decimal,
     pub max_markets: usize,
     pub ws_max_instruments: usize,
+    /// How often to re-discover markets from Gamma API (seconds). 0 = disabled.
+    #[serde(default = "default_market_refresh_interval")]
+    pub market_refresh_interval_secs: u64,
 }
+
+fn default_market_refresh_interval() -> u64 { 1800 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct WeatherConfig {

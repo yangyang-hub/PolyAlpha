@@ -7,7 +7,7 @@ use rust_decimal::Decimal;
 use pa_core::traits::{Executor, RiskManager, Strategy};
 use pa_core::types::{ArbitrageOpportunity, ExecutionPlan, MarketInfo, OrderBook, RiskDecision, StrategyType};
 use pa_market_data::event_calendar::EventCalendarService;
-use tokio::sync::broadcast;
+use tokio::sync::{RwLock, broadcast};
 use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
 
@@ -65,26 +65,27 @@ impl StrategyEngine {
     /// Run the trading loop.
     ///
     /// Combines event-driven updates (from WS broadcast) with periodic full scans.
+    /// Markets are shared via `Arc<RwLock<...>>` so the periodic market refresh task
+    /// can append new markets while the engine is running.
     /// Shuts down gracefully when the `cancel` token is cancelled.
     pub async fn run(
         &self,
-        markets: &[MarketInfo],
+        shared_markets: Arc<RwLock<Vec<MarketInfo>>>,
         mut update_rx: broadcast::Receiver<OrderBookUpdate>,
         cancel: CancellationToken,
     ) {
+        // Take an initial snapshot of the market list.
+        let mut current_markets = shared_markets.read().await.clone();
+
         tracing::info!(
             strategies = self.strategies.len(),
-            markets = markets.len(),
+            markets = current_markets.len(),
             scan_interval_ms = self.scan_interval.as_millis() as u64,
             "Strategy engine starting"
         );
 
-        // Build a lookup: token_id → index into `markets`
-        let token_to_market: HashMap<U256, usize> = markets
-            .iter()
-            .enumerate()
-            .flat_map(|(idx, m)| m.tokens.iter().map(move |t| (t.token_id, idx)))
-            .collect();
+        // Build a lookup: token_id → index into `current_markets`
+        let mut token_to_market = build_token_to_market(&current_markets);
 
         let mut ticker = interval(self.scan_interval);
 
@@ -100,13 +101,13 @@ impl StrategyEngine {
                         Ok(event) => {
                             if let Some(&market_idx) = token_to_market.get(&event.token_id) {
                                 // Scan only the affected market
-                                let affected = &markets[market_idx..=market_idx];
+                                let affected = &current_markets[market_idx..=market_idx];
                                 self.scan_and_execute(affected).await;
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!(missed = n, "Strategy engine lagged, doing full scan");
-                            self.scan_and_execute(markets).await;
+                            self.scan_and_execute(&current_markets).await;
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             tracing::info!("WebSocket update channel closed, stopping");
@@ -124,7 +125,16 @@ impl StrategyEngine {
                     if let Some(ref ec) = self.event_calendar {
                         ec.refresh_if_needed().await;
                     }
-                    self.scan_and_execute(markets).await;
+                    // Check if shared market list has been updated by the refresh task
+                    {
+                        let latest = shared_markets.read().await;
+                        if latest.len() != current_markets.len() {
+                            current_markets = latest.clone();
+                            token_to_market = build_token_to_market(&current_markets);
+                            tracing::info!(markets = current_markets.len(), "Engine markets refreshed");
+                        }
+                    }
+                    self.scan_and_execute(&current_markets).await;
                 }
             }
         }
@@ -397,6 +407,15 @@ impl StrategyEngine {
             Instant::now() + Duration::from_secs(secs),
         );
     }
+}
+
+/// Build a lookup table mapping each token_id to the index of its parent market.
+fn build_token_to_market(markets: &[MarketInfo]) -> HashMap<U256, usize> {
+    markets
+        .iter()
+        .enumerate()
+        .flat_map(|(idx, m)| m.tokens.iter().map(move |t| (t.token_id, idx)))
+        .collect()
 }
 
 /// Scale all size fields within an execution plan by the given multiplier.
