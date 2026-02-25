@@ -206,9 +206,8 @@ impl ResolutionConvergenceStrategy {
             return vec![];
         }
 
-        tracing::debug!(
+        tracing::info!(
             held_positions = held.len(),
-            available_markets = markets.len(),
             "[Convergence] scanning exits"
         );
 
@@ -224,11 +223,17 @@ impl ResolutionConvergenceStrategy {
         for (token_id, size, avg_cost) in &held {
             let book = match (self.get_orderbook)(*token_id) {
                 Some(b) => b,
-                None => continue,
+                None => {
+                    tracing::debug!(token_id = %token_id, "[Convergence EXIT] no orderbook — token not subscribed?");
+                    continue;
+                }
             };
             let best_bid = match book.best_bid() {
                 Some(b) => b.price,
-                None => continue,
+                None => {
+                    tracing::debug!(token_id = %token_id, "[Convergence EXIT] no bids in orderbook");
+                    continue;
+                }
             };
 
             // Capital efficiency exit: bid >= threshold

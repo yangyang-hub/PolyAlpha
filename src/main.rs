@@ -229,6 +229,35 @@ async fn main() -> Result<()> {
         );
     }
 
+    // --- Compute proxy wallet address (used by position loader and Safe redeemer) ---
+    let proxy_addr = if settings.clob.proxy_wallet.is_empty() {
+        if settings.clob.signature_type != 0 {
+            tracing::warn!(
+                signature_type = settings.clob.signature_type,
+                eoa = %wallet_address,
+                "proxy_wallet not configured — querying Data API with EOA address. \
+                 If positions show 0 but you have holdings, set clob.proxy_wallet \
+                 to your Polymarket proxy wallet address."
+            );
+        }
+        wallet_address
+    } else {
+        settings.clob.proxy_wallet.parse::<alloy::primitives::Address>()
+            .context("Invalid proxy_wallet address")?
+    };
+
+    // --- Load held position token IDs (needed for WS subscription priority) ---
+    let held_position_token_ids: Vec<alloy::primitives::U256> = {
+        let loader = PositionLoader::new(proxy_addr)?;
+        match loader.load_positions().await {
+            Ok(positions) => positions.iter().map(|p| p.token_id).collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "Could not pre-load position tokens for WS priority");
+                Vec::new()
+            }
+        }
+    };
+
     // --- Subscribe to WebSocket order book updates ---
     // Smart ordering: filter extreme prices for ALL markets, then prioritize by strategy relevance + mid-ness.
     let ws_max = settings.market_filter.ws_max_instruments;
@@ -282,16 +311,25 @@ async fn main() -> Result<()> {
     strategy_mid.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
     general_mid.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Build token list: strategy-relevant first, then general
+    // Build token list: held positions first (exit needs orderbook), then strategy-relevant, then general
     let mut token_ids: Vec<alloy::primitives::U256> = Vec::new();
-    for (yes_tid, no_tid, _) in &strategy_mid {
-        token_ids.push(*yes_tid);
-        token_ids.push(*no_tid);
+
+    // Priority 0: tokens from held positions — exit scanning requires their orderbooks
+    for tid in &held_position_token_ids {
+        if !token_ids.contains(tid) {
+            token_ids.push(*tid);
+        }
     }
-    let strategy_token_count = token_ids.len();
+    let held_token_count = token_ids.len();
+
+    for (yes_tid, no_tid, _) in &strategy_mid {
+        if !token_ids.contains(yes_tid) { token_ids.push(*yes_tid); }
+        if !token_ids.contains(no_tid) { token_ids.push(*no_tid); }
+    }
+    let strategy_token_count = token_ids.len() - held_token_count;
     for (yes_tid, no_tid, _) in &general_mid {
-        token_ids.push(*yes_tid);
-        token_ids.push(*no_tid);
+        if !token_ids.contains(yes_tid) { token_ids.push(*yes_tid); }
+        if !token_ids.contains(no_tid) { token_ids.push(*no_tid); }
     }
 
     // Append NegRisk tokens after binary
@@ -312,6 +350,7 @@ async fn main() -> Result<()> {
 
     tracing::info!(
         tokens = token_ids.len(),
+        held_positions = held_token_count,
         strategy_mid = strategy_token_count,
         strategy_extreme,
         general_mid = general_mid.len() * 2,
@@ -633,21 +672,6 @@ async fn main() -> Result<()> {
     let risk_manager_impl = Arc::new(RiskManagerImpl::new(settings.risk.clone()));
 
     // --- Load positions from Data API ---
-    let proxy_addr = if settings.clob.proxy_wallet.is_empty() {
-        if settings.clob.signature_type != 0 {
-            tracing::warn!(
-                signature_type = settings.clob.signature_type,
-                eoa = %wallet_address,
-                "proxy_wallet not configured — querying Data API with EOA address. \
-                 If positions show 0 but you have holdings, set clob.proxy_wallet \
-                 to your Polymarket proxy wallet address."
-            );
-        }
-        wallet_address
-    } else {
-        settings.clob.proxy_wallet.parse::<alloy::primitives::Address>()
-            .context("Invalid proxy_wallet address")?
-    };
     let position_loader = PositionLoader::new(proxy_addr)?;
     let api_positions = position_loader.load_positions().await
         .context("Failed to load positions from Data API")?;
