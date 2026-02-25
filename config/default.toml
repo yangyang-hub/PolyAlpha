@@ -1,9 +1,9 @@
 [chain]
 chain_id = 137
-rpc_url = "https://rpc.ankr.com/polygon"
+rpc_url = "https://polygon-bor-rpc.publicnode.com"
 rpc_fallbacks = [
-    "https://polygon.llamarpc.com",
     "https://1rpc.io/matic",
+    "https://polygon.drpc.org",
 ]
 
 [clob]
