@@ -19,6 +19,7 @@ use pa_core::traits::MarketDataFeed;
 use pa_core::traits::RiskManager as _;
 use pa_execution::clob_executor::ClobExecutor;
 use pa_execution::ctf_executor::CtfExecutor;
+use pa_execution::safe_redeemer::SafeRedeemer;
 use pa_execution::orchestrator::HybridOrchestrator;
 use pa_market_data::gamma_feed::GammaFeed;
 use pa_market_data::service::MarketDataService;
@@ -573,18 +574,6 @@ async fn main() -> Result<()> {
         .context("Failed to create CTF executor")?;
     tracing::info!("CTF executor initialized");
 
-    // Second CTF executor for auto-redeem — needs a wallet provider to sign transactions
-    let redeem_signer = PrivateKeySigner::from_str(&private_key)
-        .context("Invalid private key for redeem signer")?
-        .with_chain_id(Some(settings.chain.chain_id));
-    let redeem_provider = alloy::providers::ProviderBuilder::new()
-        .wallet(redeem_signer)
-        .connect(&settings.chain.rpc_url)
-        .await
-        .context("Failed to connect to RPC for redeem executor")?;
-    let redeem_ctf = CtfExecutor::with_neg_risk(redeem_provider, settings.chain.chain_id)
-        .context("Failed to create redeem CTF executor")?;
-
     // Build executor: real orchestrator if CLOB available, dry-run otherwise
     let trading_enabled = clob.is_some();
     let executor: Arc<dyn pa_core::traits::Executor> = if let Some(clob) = clob {
@@ -1079,6 +1068,19 @@ async fn main() -> Result<()> {
     }
 
     // --- Auto-redeem resolved positions (every 5 minutes) ---
+    // SafeRedeemer routes CTF redeemPositions through GnosisSafe.execTransaction()
+    // because tokens live in the Safe proxy wallet, not the EOA.
+    let redeem_signer = PrivateKeySigner::from_str(&private_key)
+        .context("Invalid private key for redeem signer")?
+        .with_chain_id(Some(settings.chain.chain_id));
+    let redeem_provider = alloy::providers::ProviderBuilder::new()
+        .wallet(redeem_signer.clone())
+        .connect(&settings.chain.rpc_url)
+        .await
+        .context("Failed to connect to RPC for redeem executor")?;
+    let safe_redeemer = SafeRedeemer::new(redeem_provider, redeem_signer, proxy_addr);
+    tracing::info!(safe = %proxy_addr, "SafeRedeemer initialized for auto-redeem");
+
     if trading_enabled {
         let redeem_loader = PositionLoader::new(proxy_addr)?;
         let redeem_cancel = cancel.clone();
@@ -1102,7 +1104,7 @@ async fn main() -> Result<()> {
                                         title = %pos.title,
                                         size = %pos.size,
                                         neg_risk = pos.neg_risk,
-                                        "Redeeming resolved position"
+                                        "Redeeming resolved position via GnosisSafe"
                                     );
                                     let result = if pos.neg_risk {
                                         // NegRisk: convert size to CTF amount (6 decimals) for each outcome
@@ -1110,12 +1112,12 @@ async fn main() -> Result<()> {
                                         let amount = alloy::primitives::U256::from(
                                             amount_raw.to_u64().unwrap_or(0)
                                         );
-                                        redeem_ctf.redeem_neg_risk(
+                                        safe_redeemer.redeem_neg_risk(
                                             pos.condition_id,
                                             vec![amount, amount],
                                         ).await
                                     } else {
-                                        redeem_ctf.redeem(pos.condition_id).await
+                                        safe_redeemer.redeem(pos.condition_id).await
                                     };
                                     match result {
                                         Ok(tx) => {

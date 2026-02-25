@@ -852,7 +852,7 @@ impl CryptoAlphaStrategy {
             return None;
         }
 
-        tracing::info!(
+        tracing::debug!(
             question = %market.question,
             asset = question.asset.name,
             current_price = price_data.current_price,
@@ -1036,7 +1036,7 @@ impl CryptoAlphaStrategy {
             return None;
         }
 
-        tracing::info!(
+        tracing::debug!(
             event_title = %event.title,
             outcome = %market.question,
             asset = asset.name,
@@ -1265,7 +1265,7 @@ impl CryptoAlphaStrategy {
             return None;
         }
 
-        tracing::info!(
+        tracing::debug!(
             group_title = %group.title,
             question = %market.question,
             asset = asset.name,
@@ -1306,6 +1306,12 @@ impl CryptoAlphaStrategy {
         if held.is_empty() {
             return vec![];
         }
+
+        tracing::info!(
+            held_positions = held.len(),
+            available_markets = markets.len(),
+            "[CryptoAlpha] scanning exits"
+        );
 
         // Build reverse map: token_id → market
         let token_to_market: HashMap<U256, &MarketInfo> = markets
@@ -1545,7 +1551,7 @@ impl Strategy for CryptoAlphaStrategy {
             for (i, group) in self.binary_event_groups.iter().enumerate() {
                 if i >= 5 { break; }
                 let has_crypto = find_asset(&group.title).is_some();
-                tracing::info!(
+                tracing::debug!(
                     idx = i,
                     title = %group.title,
                     markets = group.markets.len(),
@@ -1555,7 +1561,7 @@ impl Strategy for CryptoAlphaStrategy {
             }
             // Log sample ungrouped binary crypto questions
             for (i, q) in binary_crypto_samples.iter().enumerate() {
-                tracing::info!(idx = i, question = %q, "[CryptoAlpha] ungrouped binary crypto");
+                tracing::debug!(idx = i, question = %q, "[CryptoAlpha] ungrouped binary crypto");
             }
         }
 

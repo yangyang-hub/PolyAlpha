@@ -206,6 +206,12 @@ impl ResolutionConvergenceStrategy {
             return vec![];
         }
 
+        tracing::info!(
+            held_positions = held.len(),
+            available_markets = markets.len(),
+            "[Convergence] scanning exits"
+        );
+
         // Build reverse map: token_id → market
         let token_to_market: std::collections::HashMap<U256, &MarketInfo> = markets
             .iter()
