@@ -502,7 +502,7 @@ async fn main() -> Result<()> {
                         }
                     }
 
-                    tracing::info!(
+                    tracing::debug!(
                         total_markets,
                         neg_risk = neg_risk_count,
                         binary_checked = total_checked,
@@ -512,7 +512,7 @@ async fn main() -> Result<()> {
                         cache_size = observer_cache.len(),
                         "━━━ Market Spread Observer ━━━"
                     );
-                    tracing::info!(
+                    tracing::debug!(
                         any_spread = bm_any_spread,
                         pass_bps = bm_above_min_bps,
                         pass_profit = bm_above_min_profit,
@@ -521,12 +521,12 @@ async fn main() -> Result<()> {
                         "[BuyAndMerge]"
                     );
                     if !bm_best_question.is_empty() {
-                        tracing::info!(market = %bm_best_question, "[BuyAndMerge] best");
+                        tracing::debug!(market = %bm_best_question, "[BuyAndMerge] best");
                     }
                     if !bm_tightest_info.is_empty() {
-                        tracing::info!(market = %bm_tightest_info, "[BuyAndMerge] tightest");
+                        tracing::debug!(market = %bm_tightest_info, "[BuyAndMerge] tightest");
                     }
-                    tracing::info!(
+                    tracing::debug!(
                         any_spread = ss_any_spread,
                         pass_bps = ss_above_min_bps,
                         pass_profit = ss_above_min_profit,
@@ -535,14 +535,14 @@ async fn main() -> Result<()> {
                         "[SplitAndSell]"
                     );
                     if !ss_best_question.is_empty() {
-                        tracing::info!(market = %ss_best_question, "[SplitAndSell] best");
+                        tracing::debug!(market = %ss_best_question, "[SplitAndSell] best");
                     }
                     if !ss_tightest_info.is_empty() {
-                        tracing::info!(market = %ss_tightest_info, "[SplitAndSell] tightest");
+                        tracing::debug!(market = %ss_tightest_info, "[SplitAndSell] tightest");
                     }
                     // Log sample prices for data validation
                     for (i, sample) in sample_prices.iter().enumerate() {
-                        tracing::info!(idx = i, sample = %sample, "[Sample]");
+                        tracing::debug!(idx = i, sample = %sample, "[Sample]");
                     }
                 }
             }

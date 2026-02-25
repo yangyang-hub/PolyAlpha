@@ -186,7 +186,7 @@ impl GammaFeed {
                             }
                         }
                     }
-                    tracing::info!(
+                    tracing::debug!(
                         term,
                         new_markets = term_count,
                         total = all_markets.len(),
@@ -362,7 +362,7 @@ impl GammaFeed {
                     }
                 }
 
-                tracing::info!(
+                tracing::debug!(
                     offset,
                     page_events = page_count,
                     total_markets = all_markets.len(),

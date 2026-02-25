@@ -170,7 +170,7 @@ impl StrategyEngine {
             match strategy.scan(scan_markets).await {
                 Ok(opportunities) => {
                     if !opportunities.is_empty() {
-                        tracing::info!(
+                        tracing::debug!(
                             strategy = strategy.name(),
                             found = opportunities.len(),
                             "Strategy scan found opportunities"
@@ -193,7 +193,7 @@ impl StrategyEngine {
                         let opp = if let Some(ref ec) = self.event_calendar {
                             let multiplier = ec.position_multiplier(&opp.question, Utc::now()).await;
                             if multiplier < Decimal::ONE {
-                                tracing::info!(
+                                tracing::debug!(
                                     id = %opp.id, multiplier = %multiplier,
                                     "Event calendar reducing position"
                                 );
@@ -232,7 +232,7 @@ impl StrategyEngine {
     }
 
     async fn process_opportunity(&self, opp: &ArbitrageOpportunity) {
-        tracing::info!(
+        tracing::debug!(
             id = %opp.id,
             strategy = ?opp.strategy_type,
             spread = %opp.spread,
@@ -247,7 +247,7 @@ impl StrategyEngine {
         match self.risk_manager.check_pre_trade(opp) {
             RiskDecision::Approve => {}
             RiskDecision::Reject(reason) => {
-                tracing::warn!(id = %opp.id, reason = ?reason, "Opportunity rejected by risk manager");
+                tracing::debug!(id = %opp.id, reason = ?reason, "Opportunity rejected by risk manager");
                 pa_monitor::metrics::OPPORTUNITIES_REJECTED.inc();
                 self.set_cooldown(opp.condition_id, opp.strategy_type, 10);
                 return;
@@ -370,7 +370,7 @@ impl StrategyEngine {
             return None;
         }
 
-        tracing::info!(
+        tracing::debug!(
             id = %opp.id,
             fill_ratio = %min_fill_ratio,
             original_size = %opp.size,

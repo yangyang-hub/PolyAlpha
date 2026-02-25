@@ -164,7 +164,7 @@ impl WebSocketFeed {
                                             "WebSocket CONNECTED — first message received"
                                         );
                                     } else if total_messages % 5000 == 0 {
-                                        tracing::info!(
+                                        tracing::debug!(
                                             total_messages,
                                             cache_size = cache.len(),
                                             "WebSocket message throughput"

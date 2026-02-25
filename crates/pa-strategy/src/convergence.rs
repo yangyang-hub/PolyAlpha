@@ -169,7 +169,7 @@ impl ResolutionConvergenceStrategy {
             return None;
         }
 
-        tracing::info!(
+        tracing::debug!(
             question = %market.question,
             days_remaining = format!("{:.1}", days_remaining),
             ask_price = %ask_price,
@@ -206,7 +206,7 @@ impl ResolutionConvergenceStrategy {
             return vec![];
         }
 
-        tracing::info!(
+        tracing::debug!(
             held_positions = held.len(),
             available_markets = markets.len(),
             "[Convergence] scanning exits"
@@ -420,7 +420,7 @@ impl Strategy for ResolutionConvergenceStrategy {
         }
 
         if log_diag {
-            tracing::info!(
+            tracing::debug!(
                 with_end_date,
                 within_days,
                 above_threshold,
@@ -434,7 +434,7 @@ impl Strategy for ResolutionConvergenceStrategy {
                 "[Convergence] scan diagnostics"
             );
             if let Some(ref info) = best_net_edge_info {
-                tracing::info!(info = %info, "[Convergence] best net-edge opportunity");
+                tracing::debug!(info = %info, "[Convergence] best net-edge opportunity");
             }
         }
 

@@ -1019,7 +1019,7 @@ impl OpenMeteoClient {
         }
         forecast.model_spread = model_spread;
 
-        tracing::info!(
+        tracing::debug!(
             n_models = model_means.len(),
             ensemble_mean = ensemble_mean,
             model_spread = model_spread,
@@ -1621,7 +1621,7 @@ impl WeatherAlphaStrategy {
             return None;
         }
 
-        tracing::info!(
+        tracing::debug!(
             question = %market.question,
             metric = ?parsed.metric,
             location = %parsed.location,
@@ -1952,7 +1952,7 @@ impl WeatherAlphaStrategy {
             return None;
         }
 
-        tracing::info!(
+        tracing::debug!(
             event_title = %event.title,
             outcome = %market.question,
             metric = ?metric,
@@ -1993,7 +1993,7 @@ impl WeatherAlphaStrategy {
             return vec![];
         }
 
-        tracing::info!(
+        tracing::debug!(
             held_positions = held.len(),
             available_markets = markets.len(),
             "[Weather] scanning exits"
@@ -2249,7 +2249,7 @@ impl Strategy for WeatherAlphaStrategy {
         }
 
         if log_diag {
-            tracing::info!(
+            tracing::debug!(
                 total_events = self.neg_risk_events.len(),
                 binary_weather,
                 neg_risk_weather,

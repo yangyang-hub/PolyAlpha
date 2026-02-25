@@ -1307,7 +1307,7 @@ impl CryptoAlphaStrategy {
             return vec![];
         }
 
-        tracing::info!(
+        tracing::debug!(
             held_positions = held.len(),
             available_markets = markets.len(),
             "[CryptoAlpha] scanning exits"
@@ -1534,7 +1534,7 @@ impl Strategy for CryptoAlphaStrategy {
             let best_near_miss = self
                 .near_miss_edge_bps
                 .swap(0, std::sync::atomic::Ordering::Relaxed);
-            tracing::info!(
+            tracing::debug!(
                 binary_groups = self.binary_event_groups.len(),
                 binary_group_crypto,
                 binary_ungrouped = binary_crypto,
