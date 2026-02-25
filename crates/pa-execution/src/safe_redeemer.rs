@@ -7,7 +7,6 @@
 
 use alloy::primitives::{Address, Bytes, B256, U256, address};
 use alloy::providers::Provider;
-use alloy::signers::Signer;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use alloy::sol_types::SolCall;
@@ -169,49 +168,28 @@ impl<P: Provider + Clone> SafeRedeemer<P> {
         let zero = U256::ZERO;
         let zero_addr = Address::ZERO;
 
-        // 1. Get current Safe nonce
-        let nonce = self.safe.nonce().call().await?;
-
-        // 2. Compute Safe transaction hash
-        let tx_hash = self.safe.getTransactionHash(
-            to,
-            zero,          // value
-            data.clone(),
-            0u8,           // operation: Call
-            zero,          // safeTxGas
-            zero,          // baseGas
-            zero,          // gasPrice
-            zero_addr,     // gasToken
-            zero_addr,     // refundReceiver
-            nonce,
-        )
-        .call()
-        .await?;
-
-        tracing::debug!(
-            nonce = %nonce,
-            tx_hash = ?tx_hash,
-            signer = %self.signer.address(),
-            "Safe transaction hash computed"
-        );
-
-        // 3. Sign the hash with the EOA private key (eth_sign mode: v > 30)
-        // GnosisSafe supports two ECDSA modes:
-        //   v=27/28: ecrecover(dataHash, v, r, s)
-        //   v>30 (eth_sign): ecrecover(keccak256("\x19Ethereum Signed Message:\n32" + dataHash), v-4, r, s)
-        // We use eth_sign mode because it's the standard used by MetaMask/browser wallets
-        // and is more widely compatible with Safe implementations.
-        let signature = self.signer.sign_message(tx_hash.as_slice()).await?;
+        // Use GnosisSafe "approved hash" signature mode (v=1).
+        // When v=1, the Safe checks `msg.sender == currentOwner` where
+        // currentOwner = address(uint256(r)). Since our EOA is both the
+        // sender and the sole owner, no ECDSA signing is needed.
         let sig_bytes = {
             let mut buf = [0u8; 65];
-            buf[..32].copy_from_slice(&signature.r().to_be_bytes::<32>());
-            buf[32..64].copy_from_slice(&signature.s().to_be_bytes::<32>());
-            // eth_sign: v = original_v + 4 (27→31, 28→32)
-            buf[64] = if signature.v() { 32 } else { 31 };
+            // r = owner address (left-padded to 32 bytes)
+            buf[12..32].copy_from_slice(self.signer.address().as_slice());
+            // s = 0 (already zeroed)
+            // v = 1 (approved hash mode)
+            buf[64] = 1;
             Bytes::from(buf.to_vec())
         };
 
-        // 4. Send execTransaction through the Safe
+        tracing::debug!(
+            to = %to,
+            safe = %self.safe_address,
+            signer = %self.signer.address(),
+            "Sending Safe execTransaction (v=1 sender-approved mode)"
+        );
+
+        // Send execTransaction through the Safe
         let receipt = self.safe.execTransaction(
             to,
             zero,
