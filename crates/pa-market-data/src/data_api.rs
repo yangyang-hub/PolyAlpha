@@ -12,6 +12,15 @@ pub struct ApiPosition {
     pub condition_id: B256,
 }
 
+/// A redeemable position (market resolved, tokens can be claimed).
+pub struct RedeemablePosition {
+    pub condition_id: B256,
+    pub token_id: U256,
+    pub size: Decimal,
+    pub title: String,
+    pub neg_risk: bool,
+}
+
 /// Loads positions from the Polymarket Data API (no authentication required).
 pub struct PositionLoader {
     client: DataApiClient,
@@ -81,5 +90,47 @@ impl PositionLoader {
         );
 
         Ok(all_positions)
+    }
+
+    /// Find positions that are redeemable (market resolved).
+    pub async fn find_redeemable(&self) -> Result<Vec<RedeemablePosition>> {
+        let mut redeemable = Vec::new();
+        let mut offset = 0i32;
+        let limit = 500i32;
+
+        loop {
+            let req = PositionsRequest::builder()
+                .user(self.wallet)
+                .limit(limit)?
+                .offset(offset)?
+                .build();
+
+            let page = self.client.positions(&req).await
+                .context("Data API redeemable check failed")?;
+
+            let page_len = page.len();
+
+            for pos in page {
+                if pos.redeemable && pos.size > Decimal::ZERO {
+                    redeemable.push(RedeemablePosition {
+                        condition_id: pos.condition_id,
+                        token_id: pos.asset,
+                        size: pos.size,
+                        title: pos.title,
+                        neg_risk: pos.negative_risk,
+                    });
+                }
+            }
+
+            if (page_len as i32) < limit {
+                break;
+            }
+            offset += limit;
+            if offset >= 10000 {
+                break;
+            }
+        }
+
+        Ok(redeemable)
     }
 }

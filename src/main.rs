@@ -573,6 +573,14 @@ async fn main() -> Result<()> {
         .context("Failed to create CTF executor")?;
     tracing::info!("CTF executor initialized");
 
+    // Second CTF executor for auto-redeem (independent of HybridOrchestrator)
+    let redeem_provider = alloy::providers::ProviderBuilder::new()
+        .connect(&settings.chain.rpc_url)
+        .await
+        .context("Failed to connect to RPC for redeem executor")?;
+    let redeem_ctf = CtfExecutor::with_neg_risk(redeem_provider, settings.chain.chain_id)
+        .context("Failed to create redeem CTF executor")?;
+
     // Build executor: real orchestrator if CLOB available, dry-run otherwise
     let trading_enabled = clob.is_some();
     let executor: Arc<dyn pa_core::traits::Executor> = if let Some(clob) = clob {
@@ -1054,6 +1062,62 @@ async fn main() -> Result<()> {
         );
     } else if settings.market_making.enabled && !trading_enabled {
         tracing::warn!("Market making enabled but CLOB auth failed — MM disabled");
+    }
+
+    // --- Auto-redeem resolved positions (every 5 minutes) ---
+    if trading_enabled {
+        let redeem_loader = PositionLoader::new(proxy_addr)?;
+        let redeem_cancel = cancel.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            interval.tick().await; // skip immediate tick
+            loop {
+                tokio::select! {
+                    _ = redeem_cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        match redeem_loader.find_redeemable().await {
+                            Ok(positions) if positions.is_empty() => {}
+                            Ok(positions) => {
+                                tracing::info!(
+                                    count = positions.len(),
+                                    "Found redeemable positions, claiming..."
+                                );
+                                for pos in &positions {
+                                    tracing::info!(
+                                        condition_id = %pos.condition_id,
+                                        title = %pos.title,
+                                        size = %pos.size,
+                                        neg_risk = pos.neg_risk,
+                                        "Redeeming resolved position"
+                                    );
+                                    let result = redeem_ctf.redeem(pos.condition_id).await;
+                                    match result {
+                                        Ok(tx) => {
+                                            tracing::info!(
+                                                condition_id = %pos.condition_id,
+                                                tx_hash = %tx.tx_hash,
+                                                "Redeem successful"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                condition_id = %pos.condition_id,
+                                                error = %e,
+                                                "Redeem failed"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::debug!(error = %e, "Redeemable check failed");
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        tracing::info!("Auto-redeem task started (checks every 5 min)");
     }
 
     // --- Daily circuit breaker reset at midnight UTC ---
