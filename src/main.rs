@@ -1109,17 +1109,24 @@ async fn main() -> Result<()> {
                                         title = %pos.title,
                                         size = %pos.size,
                                         neg_risk = pos.neg_risk,
+                                        outcome_index = pos.outcome_index,
                                         "Redeeming resolved position via GnosisSafe"
                                     );
                                     let result = if pos.neg_risk {
-                                        // NegRisk: convert size to CTF amount (6 decimals) for each outcome
+                                        // NegRisk: convert size to CTF amount (6 decimals)
+                                        // Only redeem the outcome we actually hold (other is 0)
                                         let amount_raw = pos.size * rust_decimal::Decimal::from(1_000_000u64);
                                         let amount = alloy::primitives::U256::from(
                                             amount_raw.to_u64().unwrap_or(0)
                                         );
+                                        let amounts = if pos.outcome_index == 0 {
+                                            vec![amount, alloy::primitives::U256::ZERO]
+                                        } else {
+                                            vec![alloy::primitives::U256::ZERO, amount]
+                                        };
                                         safe_redeemer.redeem_neg_risk(
                                             pos.condition_id,
-                                            vec![amount, amount],
+                                            amounts,
                                         ).await
                                     } else {
                                         safe_redeemer.redeem(pos.condition_id).await

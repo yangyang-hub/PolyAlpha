@@ -3,10 +3,11 @@
 //! When `signature_type = 2` (GnosisSafe), tokens live in the Safe proxy wallet,
 //! not the EOA. The `redeemPositions()` function redeems for `msg.sender`, so the
 //! call must originate FROM the Safe. This module encodes CTF calldata and routes it
-//! through `GnosisSafe.execTransaction()`.
+//! through `GnosisSafe.execTransaction()` using ETH_SIGN signatures (v > 30).
 
 use alloy::primitives::{Address, Bytes, B256, U256, address};
 use alloy::providers::Provider;
+use alloy::signers::Signer;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use alloy::sol_types::SolCall;
@@ -71,10 +72,11 @@ sol! {
 
 /// Redeems resolved positions by routing calls through a GnosisSafe proxy wallet.
 ///
+/// Uses ETH_SIGN signature mode (v > 30) — the same mode the Polymarket website uses.
 /// For a 1-of-1 Safe where the EOA is the sole owner, we:
 /// 1. Encode the CTF `redeemPositions` calldata
-/// 2. Get the Safe's nonce and compute the transaction hash
-/// 3. Sign the hash with the EOA private key
+/// 2. Get the Safe's nonce and compute the EIP-712 transaction hash
+/// 3. Sign the hash with EIP-191 prefix (eth_sign mode)
 /// 4. Call `Safe.execTransaction()` — the Safe becomes `msg.sender` for the CTF call
 pub struct SafeRedeemer<P: Provider + Clone> {
     safe: IGnosisSafe::IGnosisSafeInstance<P>,
@@ -111,7 +113,7 @@ impl<P: Provider + Clone> SafeRedeemer<P> {
             tracing::error!(
                 signer = %signer_addr,
                 owners = ?owners,
-                "EOA is NOT an owner of the Safe — execTransaction will fail with GS013"
+                "EOA is NOT an owner of the Safe — execTransaction will fail"
             );
         }
         Ok(is_owner)
@@ -138,6 +140,9 @@ impl<P: Provider + Clone> SafeRedeemer<P> {
     }
 
     /// Redeem a NegRisk market position.
+    ///
+    /// `amounts[i]` is the number of outcome-i tokens to redeem.
+    /// Pass the held amount for the outcome you own and 0 for the other.
     pub async fn redeem_neg_risk(
         &self,
         condition_id: B256,
@@ -146,7 +151,7 @@ impl<P: Provider + Clone> SafeRedeemer<P> {
         tracing::info!(
             condition_id = %condition_id,
             safe = %self.safe_address,
-            amounts_len = amounts.len(),
+            amounts = ?amounts,
             "Redeeming NegRisk via GnosisSafe"
         );
 
@@ -160,6 +165,11 @@ impl<P: Provider + Clone> SafeRedeemer<P> {
     }
 
     /// Execute an arbitrary call through the GnosisSafe's `execTransaction`.
+    ///
+    /// Uses ETH_SIGN signature mode (v > 30):
+    /// 1. Compute safeTxHash via `getTransactionHash()`
+    /// 2. Sign with EIP-191: `sign_message(safeTxHash)` → adds "\x19Ethereum Signed Message:\n32" prefix
+    /// 3. Set v = ecdsa_v + 4 (27→31, 28→32) to indicate eth_sign mode
     async fn exec_through_safe(
         &self,
         to: Address,
@@ -168,26 +178,42 @@ impl<P: Provider + Clone> SafeRedeemer<P> {
         let zero = U256::ZERO;
         let zero_addr = Address::ZERO;
 
-        // Use GnosisSafe "approved hash" signature mode (v=1).
-        // When v=1, the Safe checks `msg.sender == currentOwner` where
-        // currentOwner = address(uint256(r)). Since our EOA is both the
-        // sender and the sole owner, no ECDSA signing is needed.
-        let sig_bytes = {
-            let mut buf = [0u8; 65];
-            // r = owner address (left-padded to 32 bytes)
-            buf[12..32].copy_from_slice(self.signer.address().as_slice());
-            // s = 0 (already zeroed)
-            // v = 1 (approved hash mode)
-            buf[64] = 1;
-            Bytes::from(buf.to_vec())
-        };
+        // 1. Get current nonce and compute the EIP-712 Safe transaction hash
+        let nonce = self.safe.nonce().call().await?;
+        let safe_tx_hash = self.safe.getTransactionHash(
+            to,
+            zero,
+            data.clone(),
+            0u8,
+            zero,
+            zero,
+            zero,
+            zero_addr,
+            zero_addr,
+            nonce,
+        ).call().await?;
 
         tracing::debug!(
             to = %to,
             safe = %self.safe_address,
             signer = %self.signer.address(),
-            "Sending Safe execTransaction (v=1 sender-approved mode)"
+            nonce = %nonce,
+            safe_tx_hash = %safe_tx_hash,
+            "Signing Safe transaction (ETH_SIGN mode)"
         );
+
+        // 2. Sign with EIP-191 prefix (eth_sign mode)
+        // sign_message internally computes: keccak256("\x19Ethereum Signed Message:\n32" + hash)
+        // then signs with ECDSA. The Safe's checkNSignatures does the same prefix
+        // when v > 30, so ecrecover will recover our address.
+        let sig = self.signer.sign_message(safe_tx_hash.as_slice()).await?;
+        let sig_raw = sig.as_bytes();
+
+        // 3. Adjust v for eth_sign mode: v + 4
+        // alloy's as_bytes() returns v as 27 or 28 (27 + y_parity), so: v_final = v + 4 → 31 or 32
+        let mut sig_bytes = [0u8; 65];
+        sig_bytes[..64].copy_from_slice(&sig_raw[..64]); // r + s
+        sig_bytes[64] = sig_raw[64] + 4; // 27→31 or 28→32 for eth_sign mode
 
         // Send execTransaction through the Safe
         let receipt = self.safe.execTransaction(
@@ -200,7 +226,7 @@ impl<P: Provider + Clone> SafeRedeemer<P> {
             zero,
             zero_addr,
             zero_addr,
-            sig_bytes,
+            Bytes::from(sig_bytes.to_vec()),
         )
         .send()
         .await?

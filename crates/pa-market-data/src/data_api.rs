@@ -19,6 +19,8 @@ pub struct RedeemablePosition {
     pub size: Decimal,
     pub title: String,
     pub neg_risk: bool,
+    /// Which outcome this position is (0=YES, 1=NO for binary; 0..N for multi-outcome).
+    pub outcome_index: i32,
 }
 
 /// Loads positions from the Polymarket Data API (no authentication required).
@@ -123,6 +125,7 @@ impl PositionLoader {
                         size: pos.size,
                         title: pos.title,
                         neg_risk: pos.negative_risk,
+                        outcome_index: pos.outcome_index,
                     });
                 }
             }
