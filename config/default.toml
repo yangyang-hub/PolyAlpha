@@ -1,6 +1,6 @@
 [chain]
 chain_id = 137
-rpc_url = "https://polygon-bor-rpc.publicnode.com"
+rpc_url = "https://polygon-mainnet.g.alchemy.com/v2/5bVIx7BUkCsGm-EQ0st5JMz9lYwaf6Qa"
 rpc_fallbacks = [
     "https://1rpc.io/matic",
     "https://polygon.drpc.org",
