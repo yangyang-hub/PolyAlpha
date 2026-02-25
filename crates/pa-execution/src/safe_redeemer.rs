@@ -195,13 +195,19 @@ impl<P: Provider + Clone> SafeRedeemer<P> {
             "Safe transaction hash computed"
         );
 
-        // 3. Sign the hash with the EOA private key (ECDSA)
-        let signature = self.signer.sign_hash(&tx_hash).await?;
+        // 3. Sign the hash with the EOA private key (eth_sign mode: v > 30)
+        // GnosisSafe supports two ECDSA modes:
+        //   v=27/28: ecrecover(dataHash, v, r, s)
+        //   v>30 (eth_sign): ecrecover(keccak256("\x19Ethereum Signed Message:\n32" + dataHash), v-4, r, s)
+        // We use eth_sign mode because it's the standard used by MetaMask/browser wallets
+        // and is more widely compatible with Safe implementations.
+        let signature = self.signer.sign_message(tx_hash.as_slice()).await?;
         let sig_bytes = {
             let mut buf = [0u8; 65];
             buf[..32].copy_from_slice(&signature.r().to_be_bytes::<32>());
             buf[32..64].copy_from_slice(&signature.s().to_be_bytes::<32>());
-            buf[64] = if signature.v() { 28 } else { 27 };
+            // eth_sign: v = original_v + 4 (27→31, 28→32)
+            buf[64] = if signature.v() { 32 } else { 31 };
             Bytes::from(buf.to_vec())
         };
 
