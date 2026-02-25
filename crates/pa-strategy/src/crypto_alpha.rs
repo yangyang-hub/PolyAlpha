@@ -1352,7 +1352,14 @@ impl CryptoAlphaStrategy {
             // Model reversal: recompute model probability
             let market = match token_to_market.get(token_id) {
                 Some(m) => *m,
-                None => continue,
+                None => {
+                    tracing::debug!(
+                        token_id = %token_id,
+                        best_bid = %best_bid,
+                        "[CryptoAlpha EXIT] token not in scanned markets"
+                    );
+                    continue;
+                }
             };
 
             let parsed = match parse_crypto_question(&market.question) {

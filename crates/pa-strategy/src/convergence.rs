@@ -252,7 +252,14 @@ impl ResolutionConvergenceStrategy {
             // Model reversal: recompute model_prob for this market
             let market = match token_to_market.get(token_id) {
                 Some(m) => *m,
-                None => continue,
+                None => {
+                    tracing::debug!(
+                        token_id = %token_id,
+                        best_bid = %best_bid,
+                        "[Convergence EXIT] token not in scanned markets"
+                    );
+                    continue;
+                }
             };
 
             let end_date = match market.end_date {

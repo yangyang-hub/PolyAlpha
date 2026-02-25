@@ -2038,7 +2038,14 @@ impl WeatherAlphaStrategy {
             // Model reversal: recompute model_prob using cached forecast
             let market = match token_to_market.get(token_id) {
                 Some(m) => *m,
-                None => continue,
+                None => {
+                    tracing::debug!(
+                        token_id = %token_id,
+                        best_bid = %best_bid,
+                        "[Weather EXIT] token not in scanned markets — market may be filtered by max_market_end_days"
+                    );
+                    continue;
+                }
             };
 
             // For NegRisk outcomes (e.g. "36-37°F"), parse_weather_question fails because

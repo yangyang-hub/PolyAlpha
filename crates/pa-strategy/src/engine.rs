@@ -158,6 +158,8 @@ impl StrategyEngine {
 
         // Filter markets by end_date if max_market_end_days is configured.
         // Markets without end_date are always included (weather/crypto don't have end_date).
+        // NOTE: expired markets (end_date <= now) are still included so that exit scanning
+        // can find held positions and trigger model reversal / capital efficiency exits.
         let filtered: Vec<MarketInfo>;
         let scan_markets: &[MarketInfo] = if let Some(max_days) = self.max_market_end_days {
             let now = Utc::now();
@@ -166,7 +168,7 @@ impl StrategyEngine {
                 .iter()
                 .filter(|m| {
                     m.end_date
-                        .map(|ed| ed > now && ed <= cutoff)
+                        .map(|ed| ed <= cutoff)
                         .unwrap_or(true) // no end_date → include (weather/crypto markets)
                 })
                 .cloned()

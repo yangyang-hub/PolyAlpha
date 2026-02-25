@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
-use tokio::time::Duration;
+use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::cache::OrderBookCache;
@@ -135,6 +135,8 @@ impl WebSocketFeed {
                 };
                 let mut stream = Box::pin(stream);
                 let mut awaiting_first = true;
+                let mut last_message = Instant::now();
+                let staleness_timeout = Duration::from_secs(60);
 
                 loop {
                     tokio::select! {
@@ -150,10 +152,21 @@ impl WebSocketFeed {
                             );
                             awaiting_first = false;
                         }
+                        // Staleness watchdog: force reconnect if no data for 60s
+                        _ = tokio::time::sleep_until(last_message + staleness_timeout), if !awaiting_first => {
+                            tracing::warn!(
+                                elapsed_secs = last_message.elapsed().as_secs(),
+                                "WebSocket stale: no data received for 60s, forcing reconnect"
+                            );
+                            ws_connected.store(false, Ordering::Relaxed);
+                            pa_monitor::metrics::WS_RECONNECT_COUNT.inc();
+                            break;
+                        }
                         item = stream.next() => {
                             awaiting_first = false;
                             match item {
                                 Some(Ok(book_update)) => {
+                                    last_message = Instant::now();
                                     total_messages += 1;
                                     if total_messages == 1 {
                                         ws_connected.store(true, Ordering::Relaxed);
