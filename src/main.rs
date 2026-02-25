@@ -652,15 +652,29 @@ async fn main() -> Result<()> {
         .context("Failed to load positions from Data API")?;
     let initial_positions: Vec<_> = api_positions
         .iter()
-        .map(|p| (p.token_id, p.size, p.avg_price, None, Some(p.condition_id)))
+        .map(|p| {
+            // Infer strategy_type from market data so exit logic works after restart
+            let strategy_type = infer_strategy_type(p.token_id, &markets, &neg_risk_events);
+            if strategy_type.is_some() {
+                tracing::debug!(
+                    token_id = %p.token_id,
+                    strategy = ?strategy_type,
+                    size = %p.size,
+                    "Position tagged with inferred strategy"
+                );
+            }
+            (p.token_id, p.size, p.avg_price, strategy_type, Some(p.condition_id))
+        })
         .collect();
     let loaded_count = initial_positions.len();
+    let tagged_count = initial_positions.iter().filter(|p| p.3.is_some()).count();
     risk_manager_impl.load_initial_positions(initial_positions);
     if loaded_count > 0 {
-        tracing::warn!(
+        tracing::info!(
             loaded = loaded_count,
-            "Loaded positions have no strategy_type tag — exit logic will not fire \
-             for pre-existing positions until new trades are opened this session"
+            tagged = tagged_count,
+            untagged = loaded_count - tagged_count,
+            "Positions loaded from Data API (exit logic active for tagged positions)"
         );
     }
     tracing::info!(
@@ -1120,4 +1134,55 @@ impl pa_core::traits::Executor for DryRunExecutor {
     async fn cancel_all(&self) -> pa_core::Result<()> {
         Ok(())
     }
+}
+
+/// Infer strategy_type for a loaded position by matching its token_id against discovered markets.
+///
+/// Checks weather → crypto → convergence in order. Returns None if no match found.
+fn infer_strategy_type(
+    token_id: alloy::primitives::U256,
+    markets: &[pa_core::types::MarketInfo],
+    neg_risk_events: &[pa_core::types::NegRiskEvent],
+) -> Option<pa_core::types::StrategyType> {
+    use pa_core::types::StrategyType;
+
+    // Check NegRisk events first (weather and crypto both use them)
+    for event in neg_risk_events {
+        let has_token = event.markets.iter().any(|m| {
+            m.tokens.iter().any(|t| t.token_id == token_id)
+        });
+        if has_token {
+            if pa_strategy::weather::parse_weather_event_title(&event.title).is_some() {
+                return Some(StrategyType::Weather);
+            }
+            if pa_strategy::crypto_alpha::parse_crypto_event_title(&event.title).is_some() {
+                return Some(StrategyType::CryptoAlpha);
+            }
+        }
+    }
+
+    // Check individual markets
+    for market in markets {
+        let has_token = market.tokens.iter().any(|t| t.token_id == token_id);
+        if !has_token {
+            continue;
+        }
+
+        // Weather binary market
+        if pa_strategy::weather::parse_weather_question(&market.question).is_some() {
+            return Some(StrategyType::Weather);
+        }
+
+        // Crypto binary market
+        if pa_strategy::crypto_alpha::parse_crypto_question(&market.question).is_some() {
+            return Some(StrategyType::CryptoAlpha);
+        }
+
+        // Convergence: non-NegRisk market with end_date
+        if !market.neg_risk && market.end_date.is_some() {
+            return Some(StrategyType::ResolutionConvergence);
+        }
+    }
+
+    None
 }

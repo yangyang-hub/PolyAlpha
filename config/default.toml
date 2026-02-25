@@ -56,7 +56,7 @@ max_markets = 500
 ws_max_instruments = 500
 
 [weather]
-min_edge_bps = 100
+min_edge_bps = 300
 max_position_usdc = 5.0
 kelly_fraction = 0.25
 refresh_interval_secs = 3600
