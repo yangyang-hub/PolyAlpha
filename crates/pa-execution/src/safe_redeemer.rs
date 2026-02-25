@@ -49,6 +49,9 @@ sol! {
             address refundReceiver,
             uint256 _nonce
         ) external view returns (bytes32);
+
+        function getOwners() external view returns (address[] memory);
+        function getThreshold() external view returns (uint256);
     }
 }
 
@@ -88,6 +91,31 @@ impl<P: Provider + Clone> SafeRedeemer<P> {
             signer,
             safe_address,
         }
+    }
+
+    /// Verify the EOA signer is an owner of the Safe. Call at startup for diagnostics.
+    pub async fn verify_ownership(&self) -> anyhow::Result<bool> {
+        let signer_addr = self.signer.address();
+        let owners = self.safe.getOwners().call().await?;
+        let threshold = self.safe.getThreshold().call().await?;
+
+        tracing::info!(
+            safe = %self.safe_address,
+            signer = %signer_addr,
+            owners = ?owners,
+            threshold = %threshold,
+            "GnosisSafe ownership check"
+        );
+
+        let is_owner = owners.iter().any(|o| *o == signer_addr);
+        if !is_owner {
+            tracing::error!(
+                signer = %signer_addr,
+                owners = ?owners,
+                "EOA is NOT an owner of the Safe — execTransaction will fail with GS013"
+            );
+        }
+        Ok(is_owner)
     }
 
     /// Redeem a standard (non-NegRisk) binary market position.
@@ -159,6 +187,13 @@ impl<P: Provider + Clone> SafeRedeemer<P> {
         )
         .call()
         .await?;
+
+        tracing::debug!(
+            nonce = %nonce,
+            tx_hash = ?tx_hash,
+            signer = %self.signer.address(),
+            "Safe transaction hash computed"
+        );
 
         // 3. Sign the hash with the EOA private key (ECDSA)
         let signature = self.signer.sign_hash(&tx_hash).await?;

@@ -1079,7 +1079,12 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to connect to RPC for redeem executor")?;
     let safe_redeemer = SafeRedeemer::new(redeem_provider, redeem_signer, proxy_addr);
-    tracing::info!(safe = %proxy_addr, "SafeRedeemer initialized for auto-redeem");
+    // Verify EOA is an owner of the Safe (diagnostic for GS013 errors)
+    match safe_redeemer.verify_ownership().await {
+        Ok(true) => tracing::info!(safe = %proxy_addr, "SafeRedeemer initialized — EOA is Safe owner"),
+        Ok(false) => tracing::error!(safe = %proxy_addr, "SafeRedeemer: EOA is NOT a Safe owner — redeem will fail"),
+        Err(e) => tracing::warn!(safe = %proxy_addr, error = %e, "SafeRedeemer: could not verify ownership"),
+    }
 
     if trading_enabled {
         let redeem_loader = PositionLoader::new(proxy_addr)?;
