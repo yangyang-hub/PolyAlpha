@@ -27,7 +27,16 @@ pub async fn start_server(health_port: u16, state: Arc<HealthState>) -> anyhow::
     let addr = SocketAddr::from(([0, 0, 0, 0], health_port));
     tracing::info!(%addr, "Starting health/metrics server");
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(1024)?;
+    let listener = tokio::net::TcpListener::from_std(socket.into())?;
     axum::serve(listener, app).await?;
     Ok(())
 }
