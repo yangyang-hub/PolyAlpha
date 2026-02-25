@@ -55,19 +55,26 @@ sol! {
     }
 }
 
-// Calldata encoders — only the function signatures, no contract instance needed.
-sol! {
-    function redeemPositionsCTF(
-        address collateralToken,
-        bytes32 parentCollectionId,
-        bytes32 conditionId,
-        uint256[] calldata indexSets
-    ) external;
+// Calldata encoders — use inner modules so both can be named `redeemPositions`
+// (matching the actual on-chain function name) without Rust name collisions.
+mod ctf_calls {
+    alloy::sol! {
+        function redeemPositions(
+            address collateralToken,
+            bytes32 parentCollectionId,
+            bytes32 conditionId,
+            uint256[] calldata indexSets
+        ) external;
+    }
+}
 
-    function redeemPositionsNR(
-        bytes32 conditionId,
-        uint256[] calldata amounts
-    ) external;
+mod neg_risk_calls {
+    alloy::sol! {
+        function redeemPositions(
+            bytes32 conditionId,
+            uint256[] calldata amounts
+        ) external;
+    }
 }
 
 /// Redeems resolved positions by routing calls through a GnosisSafe proxy wallet.
@@ -128,7 +135,7 @@ impl<P: Provider + Clone> SafeRedeemer<P> {
         );
 
         // Encode redeemPositions(collateral, parentCollectionId=0, conditionId, [1,2])
-        let calldata = redeemPositionsCTFCall {
+        let calldata = ctf_calls::redeemPositionsCall {
             collateralToken: USDC,
             parentCollectionId: B256::ZERO,
             conditionId: condition_id,
@@ -155,7 +162,7 @@ impl<P: Provider + Clone> SafeRedeemer<P> {
             "Redeeming NegRisk via GnosisSafe"
         );
 
-        let calldata = redeemPositionsNRCall {
+        let calldata = neg_risk_calls::redeemPositionsCall {
             conditionId: condition_id,
             amounts,
         }
