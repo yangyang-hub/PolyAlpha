@@ -381,12 +381,16 @@ impl ClobExecutor {
     pub async fn get_balance(&self) -> anyhow::Result<Decimal> {
         let request = BalanceAllowanceRequest::default(); // AssetType::Collateral
         let response = self.client.balance_allowance(request).await?;
+        // CLOB API returns balance in micro-USDC (6 decimal raw on-chain units).
+        // Convert to human-readable USDC.
+        let balance_usdc = response.balance / Decimal::from(1_000_000u64);
         tracing::debug!(
-            balance = %response.balance,
+            raw = %response.balance,
+            usdc = %balance_usdc,
             allowances = ?response.allowances,
             "CLOB balance_allowance response"
         );
-        Ok(response.balance)
+        Ok(balance_usdc)
     }
 
     /// Parse the SDK's PostOrderResponse into our OrderResult.

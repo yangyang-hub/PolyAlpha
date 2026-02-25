@@ -13,7 +13,7 @@ ws_host = "wss://ws-subscriptions-clob.polymarket.com"
 signature_type = 2
 # Polymarket proxy wallet address for Data API position loading.
 # Leave empty to fallback to the EOA signer address.
-proxy_wallet = "0xd33b52236ab50e0aaacb45a27c465ce9a7e17616"
+proxy_wallet = ""
 
 [gamma]
 host = "https://gamma-api.polymarket.com"

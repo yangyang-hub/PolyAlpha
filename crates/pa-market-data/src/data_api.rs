@@ -38,7 +38,7 @@ impl PositionLoader {
     /// Load all open positions for the configured wallet.
     ///
     /// Automatically paginates through results (limit=500 per page).
-    /// Uses API default size_threshold (1.0 shares) to skip dust positions.
+    /// Sets size_threshold=0 to include all positions (default=1 would miss small ones).
     pub async fn load_positions(&self) -> Result<Vec<ApiPosition>> {
         let mut all_positions = Vec::new();
         let mut offset = 0i32;
@@ -47,6 +47,7 @@ impl PositionLoader {
         loop {
             let req = PositionsRequest::builder()
                 .user(self.wallet)
+                .size_threshold(Decimal::ZERO)
                 .limit(limit)?
                 .offset(offset)?
                 .build();
@@ -93,6 +94,8 @@ impl PositionLoader {
     }
 
     /// Find positions that are redeemable (market resolved).
+    ///
+    /// Uses the `redeemable=true` API filter to only fetch resolved positions.
     pub async fn find_redeemable(&self) -> Result<Vec<RedeemablePosition>> {
         let mut redeemable = Vec::new();
         let mut offset = 0i32;
@@ -101,6 +104,8 @@ impl PositionLoader {
         loop {
             let req = PositionsRequest::builder()
                 .user(self.wallet)
+                .redeemable(true)
+                .size_threshold(Decimal::ZERO)
                 .limit(limit)?
                 .offset(offset)?
                 .build();
@@ -111,7 +116,7 @@ impl PositionLoader {
             let page_len = page.len();
 
             for pos in page {
-                if pos.redeemable && pos.size > Decimal::ZERO {
+                if pos.size > Decimal::ZERO {
                     redeemable.push(RedeemablePosition {
                         condition_id: pos.condition_id,
                         token_id: pos.asset,
