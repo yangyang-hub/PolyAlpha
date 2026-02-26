@@ -68,6 +68,16 @@ impl MarketDataService {
         self.ws.read().await
     }
 
+    /// Fetch markets for held positions, bypassing active/closed filters.
+    ///
+    /// Used to ensure exit scanning can find markets even after they expire.
+    pub async fn fetch_position_markets(
+        &self,
+        condition_ids: &[alloy::primitives::B256],
+    ) -> Vec<MarketInfo> {
+        self.gamma.fetch_position_markets(condition_ids).await
+    }
+
     /// Get the WebSocket connected status flag.
     pub async fn ws_feed_ws_connected(&self) -> Arc<AtomicBool> {
         self.ws.read().await.ws_connected()

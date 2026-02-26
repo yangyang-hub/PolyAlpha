@@ -690,6 +690,123 @@ impl GammaFeed {
         Ok(self.convert_market(&market, false, None, None))
     }
 
+    /// Fetch markets for held positions, bypassing active/closed filters.
+    ///
+    /// Used to ensure exit scanning can find markets for positions even after
+    /// the market has expired or been resolved.
+    pub async fn fetch_position_markets(
+        &self,
+        condition_ids: &[B256],
+    ) -> Vec<MarketInfo> {
+        let mut results = Vec::new();
+
+        for condition_id in condition_ids {
+            let url = format!(
+                "{}/markets?condition_ids={}",
+                self.gamma_host.trim_end_matches('/'),
+                condition_id,
+            );
+
+            match self.http_client.get(&url).send().await {
+                Ok(resp) => {
+                    match resp.json::<Vec<polymarket_client_sdk::gamma::types::response::Market>>().await {
+                        Ok(markets) => {
+                            if let Some(market) = markets.into_iter().next() {
+                                if let Some(info) = self.convert_market_for_exit(&market) {
+                                    results.push(info);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                condition_id = %condition_id,
+                                error = %e,
+                                "Failed to parse position market from Gamma API"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        condition_id = %condition_id,
+                        error = %e,
+                        "Failed to fetch position market from Gamma API"
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
+            requested = condition_ids.len(),
+            found = results.len(),
+            "Fetched position markets (bypassing active/closed filter)"
+        );
+
+        results
+    }
+
+    /// Convert a market response to MarketInfo without active/closed checks.
+    ///
+    /// Used for held position markets that may be expired/closed but still
+    /// need to be in the scan list for exit logic.
+    fn convert_market_for_exit(
+        &self,
+        market: &polymarket_client_sdk::gamma::types::response::Market,
+    ) -> Option<MarketInfo> {
+        let condition_id = market.condition_id?;
+        let question_id = market.question_id.unwrap_or(B256::ZERO);
+        let question = market.question.clone().unwrap_or_default();
+        let active = market.active.unwrap_or(false);
+
+        // No active/closed check here — we need these for exit scanning
+
+        let clob_token_ids = market.clob_token_ids.as_ref()?;
+        if clob_token_ids.len() != 2 {
+            return None;
+        }
+
+        let yes_token_id = clob_token_ids[0];
+        let no_token_id = clob_token_ids[1];
+
+        let tick_size = market.order_price_min_tick_size.unwrap_or(Decimal::new(1, 2));
+        let fee_rate_bps = market.taker_base_fee.unwrap_or(0) as u32;
+
+        let neg_risk = market.neg_risk.unwrap_or(false);
+        let neg_risk_market_id = market.neg_risk_market_id;
+
+        let liquidity = market.liquidity.unwrap_or(Decimal::ZERO);
+
+        Some(MarketInfo {
+            condition_id,
+            question_id,
+            question,
+            neg_risk,
+            neg_risk_market_id,
+            tokens: vec![
+                TokenInfo {
+                    token_id: yes_token_id,
+                    outcome: Outcome::Yes,
+                    complement_id: no_token_id,
+                },
+                TokenInfo {
+                    token_id: no_token_id,
+                    outcome: Outcome::No,
+                    complement_id: yes_token_id,
+                },
+            ],
+            tick_size,
+            fee_rate_bps,
+            active,
+            liquidity,
+            event_title: None,
+            end_date: market.end_date,
+            category: market.category.clone(),
+            outcome_prices: market.outcome_prices.clone(),
+            gamma_best_bid: market.best_bid,
+            gamma_best_ask: market.best_ask,
+        })
+    }
+
     /// Get all token IDs from discovered markets (for WebSocket subscription).
     pub fn extract_token_ids(markets: &[MarketInfo]) -> Vec<U256> {
         markets

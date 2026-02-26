@@ -545,6 +545,57 @@ async fn main() -> Result<()> {
     let position_loader = PositionLoader::new(proxy_addr)?;
     let api_positions = position_loader.load_positions().await
         .context("Failed to load positions from Data API")?;
+
+    // Ensure held position markets are in the shared markets list,
+    // even if they're expired/closed (needed for exit scanning).
+    if !api_positions.is_empty() {
+        let markets_snapshot = shared_markets.read().await;
+        let known_condition_ids: HashSet<_> = markets_snapshot
+            .iter()
+            .map(|m| m.condition_id)
+            .collect();
+        let missing_condition_ids: Vec<_> = api_positions
+            .iter()
+            .map(|p| p.condition_id)
+            .filter(|cid| !known_condition_ids.contains(cid))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        drop(markets_snapshot);
+
+        if !missing_condition_ids.is_empty() {
+            tracing::info!(
+                missing = missing_condition_ids.len(),
+                "Fetching market data for held positions not in discovery (expired/closed)"
+            );
+            let position_markets = market_data
+                .fetch_position_markets(&missing_condition_ids)
+                .await;
+            if !position_markets.is_empty() {
+                // Seed the order book cache with gamma prices for these markets
+                let seed_cache = market_data.cache();
+                let mut seeded = 0;
+                for m in &position_markets {
+                    if seed_market_cache(seed_cache, m) {
+                        seeded += 1;
+                    }
+                }
+                tracing::info!(
+                    fetched = position_markets.len(),
+                    seeded,
+                    "Position markets seeded into order book cache"
+                );
+                // Add to shared markets
+                let mut markets_write = shared_markets.write().await;
+                markets_write.extend(position_markets);
+                tracing::info!(
+                    total_markets = markets_write.len(),
+                    "Position markets injected into shared market list"
+                );
+            }
+        }
+    }
+
     let markets_snapshot = shared_markets.read().await;
     let initial_positions: Vec<_> = api_positions
         .iter()
@@ -973,6 +1024,7 @@ async fn main() -> Result<()> {
         let refresh_cancel = cancel.clone();
         let refresh_enabled_strategies = settings.strategy.enabled.clone();
         let refresh_ws_max = settings.market_filter.ws_max_instruments;
+        let refresh_risk_manager = Arc::clone(&risk_manager_impl);
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(refresh_interval));
@@ -1003,10 +1055,15 @@ async fn main() -> Result<()> {
                                     pa_monitor::metrics::MONITORED_MARKETS.set(current.len() as f64);
 
                                     // Rebuild WS token list and resubscribe
-                                    // Use empty held_position list — held tokens are already subscribed
+                                    // Include current held position tokens so exit scanning keeps working
+                                    let held_tokens: Vec<alloy::primitives::U256> = refresh_risk_manager
+                                        .snapshot_positions()
+                                        .iter()
+                                        .map(|(tid, _)| *tid)
+                                        .collect();
                                     let token_ids = build_ws_token_list(
                                         &current,
-                                        &[],
+                                        &held_tokens,
                                         &refresh_enabled_strategies,
                                         refresh_ws_max,
                                     );
