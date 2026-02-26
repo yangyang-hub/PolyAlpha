@@ -264,7 +264,18 @@ impl ResolutionConvergenceStrategy {
 
             let end_date = match market.end_date {
                 Some(d) if d > Utc::now() => d,
-                _ => continue,
+                Some(d) => {
+                    tracing::debug!(
+                        token_id = %token_id,
+                        end_date = %d,
+                        "[Convergence EXIT] market expired (end_date in past)"
+                    );
+                    continue;
+                }
+                None => {
+                    tracing::debug!(token_id = %token_id, "[Convergence EXIT] no end_date");
+                    continue;
+                }
             };
             let days_remaining = (end_date.signed_duration_since(Utc::now()).num_hours() as f64) / 24.0;
             let max_days = self.config.max_days_to_resolution as f64;

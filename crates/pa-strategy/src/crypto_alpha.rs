@@ -1364,17 +1364,26 @@ impl CryptoAlphaStrategy {
 
             let parsed = match parse_crypto_question(&market.question) {
                 Some(p) => p,
-                None => continue,
+                None => {
+                    tracing::debug!(token_id = %token_id, question = %market.question, "[CryptoAlpha EXIT] parse_crypto_question failed — not a crypto market?");
+                    continue;
+                }
             };
 
             let price_data = match self.get_price_data(parsed.asset).await {
                 Ok(d) => d,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::debug!(token_id = %token_id, asset = ?parsed.asset, error = %e, "[CryptoAlpha EXIT] price data fetch failed");
+                    continue;
+                }
             };
 
             let (mu, sigma) = match calculate_volatility(&price_data.daily_closes) {
                 Some(v) => v,
-                None => continue,
+                None => {
+                    tracing::debug!(token_id = %token_id, "[CryptoAlpha EXIT] volatility calculation failed");
+                    continue;
+                }
             };
             if sigma <= 0.0 {
                 continue;

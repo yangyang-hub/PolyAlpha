@@ -2054,11 +2054,17 @@ impl WeatherAlphaStrategy {
             let (location, metric, target_date, precipitation_unit, binary_parsed) = if market.neg_risk {
                 let event_title = match &market.event_title {
                     Some(t) => t.as_str(),
-                    None => continue,
+                    None => {
+                        tracing::debug!(token_id = %token_id, "[Weather EXIT] NegRisk market has no event_title");
+                        continue;
+                    }
                 };
                 let (metric, location) = match parse_weather_event_title(event_title) {
                     Some(r) => r,
-                    None => continue,
+                    None => {
+                        tracing::debug!(token_id = %token_id, event_title, "[Weather EXIT] parse_weather_event_title failed");
+                        continue;
+                    }
                 };
                 let target_date = parse_target_date(event_title);
                 let precipitation_unit = if matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
@@ -2070,7 +2076,10 @@ impl WeatherAlphaStrategy {
             } else {
                 let parsed = match parse_weather_question(&market.question) {
                     Some(p) => p,
-                    None => continue,
+                    None => {
+                        tracing::debug!(token_id = %token_id, question = %market.question, "[Weather EXIT] parse_weather_question failed — not a weather market?");
+                        continue;
+                    }
                 };
                 let target_date = parse_target_date(&market.question);
                 let precipitation_unit = if matches!(parsed.metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
@@ -2091,7 +2100,10 @@ impl WeatherAlphaStrategy {
                     .await
                 {
                     Some(f) => f,
-                    None => continue,
+                    None => {
+                        tracing::debug!(token_id = %token_id, %location, "[Weather EXIT] forecast fetch failed (NegRisk)");
+                        continue;
+                    }
                 }
             } else {
                 let parsed = match &binary_parsed {
@@ -2103,7 +2115,10 @@ impl WeatherAlphaStrategy {
                     .await
                 {
                     Some(f) => f,
-                    None => continue,
+                    None => {
+                        tracing::debug!(token_id = %token_id, question = %market.question, "[Weather EXIT] forecast fetch failed (binary)");
+                        continue;
+                    }
                 }
             };
 
