@@ -1408,6 +1408,15 @@ impl CryptoAlphaStrategy {
                 );
                 exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
                 pa_monitor::metrics::EXIT_TRADES.inc();
+            } else {
+                tracing::debug!(
+                    token_id = %token_id,
+                    model_prob = %model_prob_dec,
+                    best_bid = %best_bid,
+                    exit_buffer = %exit_buffer,
+                    threshold = %(best_bid - exit_buffer),
+                    "[CryptoAlpha EXIT] No reversal: model_prob >= best_bid - buffer"
+                );
             }
         }
 

@@ -2169,6 +2169,15 @@ impl WeatherAlphaStrategy {
                 );
                 exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
                 pa_monitor::metrics::EXIT_TRADES.inc();
+            } else {
+                tracing::debug!(
+                    token_id = %token_id,
+                    effective_prob = %effective_prob,
+                    best_bid = %best_bid,
+                    exit_buffer = %exit_buffer,
+                    threshold = %(best_bid - exit_buffer),
+                    "[Weather EXIT] No reversal: effective_prob >= best_bid - buffer"
+                );
             }
         }
 
