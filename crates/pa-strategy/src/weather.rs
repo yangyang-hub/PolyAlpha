@@ -1594,9 +1594,9 @@ impl WeatherAlphaStrategy {
         let size = kelly_size.min(remaining).min(available);
 
         // Ensure size meets CLOB minimum cost ($1.00).
-        // If Kelly recommends a positive size but it's below the minimum,
-        // bump up to the minimum — the edge is real, just the bankroll is small.
-        let size = if size > Decimal::ZERO && ask_price > Decimal::ZERO {
+        // Only bump up when kelly_raw >= 0.04 (meaningful conviction).
+        // If kelly_raw is tiny, the edge is noise — don't force a $1 bet.
+        let size = if size > Decimal::ZERO && ask_price > Decimal::ZERO && kelly_raw >= dec!(0.04) {
             let min_cost_size = (Decimal::ONE / ask_price).ceil();
             size.max(min_cost_size)
         } else {
@@ -1927,9 +1927,9 @@ impl WeatherAlphaStrategy {
         let size = kelly_size.min(remaining).min(available);
 
         // Ensure size meets CLOB minimum cost ($1.00).
-        // If Kelly recommends a positive size but it's below the minimum,
-        // bump up to the minimum — the edge is real, just the bankroll is small.
-        let size = if size > Decimal::ZERO && ask_price > Decimal::ZERO {
+        // Only bump up when kelly_raw >= 0.04 (meaningful conviction).
+        // If kelly_raw is tiny, the edge is noise — don't force a $1 bet.
+        let size = if size > Decimal::ZERO && ask_price > Decimal::ZERO && kelly_raw >= dec!(0.04) {
             let min_cost_size = (Decimal::ONE / ask_price).ceil();
             size.max(min_cost_size)
         } else {

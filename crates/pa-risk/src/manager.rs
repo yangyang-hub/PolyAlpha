@@ -41,6 +41,19 @@ impl RiskManagerImpl {
         self.positions.load_initial(entries);
     }
 
+    /// Sync a single position from Data API reconciliation.
+    /// Handles both adding new positions and zeroing out stale ones.
+    pub fn sync_position(
+        &self,
+        token_id: U256,
+        size: Decimal,
+        avg_cost: Decimal,
+        strategy_type: Option<pa_core::types::StrategyType>,
+        condition_id: Option<alloy::primitives::B256>,
+    ) {
+        self.positions.sync_position(token_id, size, avg_cost, strategy_type, condition_id);
+    }
+
     /// Snapshot all current positions for persistence.
     pub fn snapshot_positions(&self) -> Vec<(U256, crate::position::PositionEntry)> {
         self.positions.snapshot_all()

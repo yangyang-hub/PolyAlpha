@@ -1186,6 +1186,112 @@ async fn main() -> Result<()> {
         tracing::info!("Auto-redeem task started (checks every 5 min)");
     }
 
+    // --- Periodic position sync (reconcile with Data API every 5 min) ---
+    // Safety net: catches positions missed due to Delayed status, crashes, etc.
+    {
+        let sync_rm = Arc::clone(&risk_manager_impl);
+        let sync_markets = Arc::clone(&shared_markets);
+        let sync_neg_risk = neg_risk_events.clone();
+        let sync_cancel = cancel.clone();
+        let sync_proxy = proxy_addr;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            interval.tick().await; // skip immediate tick
+            loop {
+                tokio::select! {
+                    _ = sync_cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        let loader = match PositionLoader::new(sync_proxy) {
+                            Ok(l) => l,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Position sync: failed to create loader");
+                                continue;
+                            }
+                        };
+                        let api_positions = match loader.load_positions().await {
+                            Ok(p) => p,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Position sync: Data API fetch failed");
+                                continue;
+                            }
+                        };
+
+                        // Build set of known positions
+                        let current = sync_rm.snapshot_positions();
+                        let known: std::collections::HashMap<alloy::primitives::U256, Decimal> =
+                            current.iter().map(|(tid, e)| (*tid, e.size)).collect();
+
+                        let markets_snapshot = sync_markets.read().await;
+                        let mut added = 0u32;
+                        let mut updated = 0u32;
+                        for pos in &api_positions {
+                            let existing_size = known.get(&pos.token_id).copied().unwrap_or(Decimal::ZERO);
+                            if existing_size == pos.size {
+                                continue; // already in sync
+                            }
+                            if existing_size == Decimal::ZERO && pos.size > Decimal::ZERO {
+                                // New position not tracked by RiskManager
+                                let strategy_type = infer_strategy_type(
+                                    pos.token_id, &markets_snapshot, &sync_neg_risk,
+                                );
+                                sync_rm.sync_position(
+                                    pos.token_id, pos.size, pos.avg_price,
+                                    strategy_type, Some(pos.condition_id),
+                                );
+                                tracing::info!(
+                                    token_id = %pos.token_id,
+                                    size = %pos.size,
+                                    strategy = ?strategy_type,
+                                    "Position sync: discovered missing position"
+                                );
+                                added += 1;
+                            } else if pos.size == Decimal::ZERO && existing_size > Decimal::ZERO {
+                                // Position closed externally (redeemed, etc.) — zero it out
+                                sync_rm.sync_position(
+                                    pos.token_id, Decimal::ZERO, Decimal::ZERO,
+                                    None, Some(pos.condition_id),
+                                );
+                                tracing::info!(
+                                    token_id = %pos.token_id,
+                                    prev_size = %existing_size,
+                                    "Position sync: cleared stale position"
+                                );
+                                updated += 1;
+                            }
+                        }
+                        // Also check for positions in RiskManager but gone from Data API (redeemed)
+                        let api_tokens: HashSet<alloy::primitives::U256> =
+                            api_positions.iter().map(|p| p.token_id).collect();
+                        for (tid, entry) in &current {
+                            if entry.size > Decimal::ZERO && !api_tokens.contains(tid) {
+                                sync_rm.sync_position(
+                                    *tid, Decimal::ZERO, Decimal::ZERO,
+                                    None, entry.condition_id,
+                                );
+                                tracing::info!(
+                                    token_id = %tid,
+                                    prev_size = %entry.size,
+                                    "Position sync: cleared position no longer in Data API"
+                                );
+                                updated += 1;
+                            }
+                        }
+                        drop(markets_snapshot);
+
+                        if added > 0 || updated > 0 {
+                            tracing::info!(
+                                added, updated,
+                                total_api = api_positions.len(),
+                                "Position sync complete — reconciled with Data API"
+                            );
+                        }
+                    }
+                }
+            }
+        });
+        tracing::info!("Position sync task started (reconciles every 5 min)");
+    }
+
     // --- Daily circuit breaker reset at midnight UTC ---
     let daily_rm = Arc::clone(&risk_manager);
     let daily_cancel = cancel.clone();

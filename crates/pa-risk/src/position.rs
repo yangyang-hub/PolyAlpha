@@ -138,6 +138,38 @@ impl PositionTracker {
         }
     }
 
+    /// Sync a single position from external data (Data API reconciliation).
+    /// Unlike `load_initial`, this handles zero-size entries (removes the position).
+    pub fn sync_position(
+        &self,
+        token_id: U256,
+        size: Decimal,
+        avg_cost: Decimal,
+        strategy_type: Option<StrategyType>,
+        condition_id: Option<B256>,
+    ) {
+        if size > Decimal::ZERO {
+            self.positions.entry(token_id)
+                .and_modify(|e| {
+                    e.size = size;
+                    e.avg_cost = avg_cost;
+                    if e.strategy_type.is_none() {
+                        e.strategy_type = strategy_type;
+                    }
+                    if e.condition_id.is_none() {
+                        e.condition_id = condition_id;
+                    }
+                })
+                .or_insert(PositionEntry { size, avg_cost, strategy_type, condition_id });
+        } else {
+            // Zero out the position
+            if let Some(mut entry) = self.positions.get_mut(&token_id) {
+                entry.size = Decimal::ZERO;
+                entry.avg_cost = Decimal::ZERO;
+            }
+        }
+    }
+
     /// Snapshot all positions for persistence (including zeros, so DB can clean up stale rows).
     pub fn snapshot_all(&self) -> Vec<(U256, PositionEntry)> {
         self.positions

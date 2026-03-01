@@ -87,7 +87,7 @@ exit_buffer_bps = 50
 capital_efficiency_threshold = 0.98
 
 [crypto_alpha]
-min_edge_bps = 50
+min_edge_bps = 300
 max_position_pct = 0.50
 kelly_fraction = 0.25
 refresh_interval_secs = 300
