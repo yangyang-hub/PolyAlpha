@@ -141,17 +141,17 @@ impl ResolutionConvergenceStrategy {
         let remaining = (effective_max - existing).max(Decimal::ZERO);
         let size = kelly_size.min(remaining).min(available);
 
-        // Skip if Kelly-sized order below CLOB minimum cost ($1.00)
-        // Do NOT bump up — Kelly says "edge too small to bet" and we should respect that
+        // Ensure size meets CLOB minimum cost ($1.00).
+        // If Kelly recommends a positive size but it's below the minimum,
+        // bump up to the minimum — the edge is real, just the bankroll is small.
         let size = if size > Decimal::ZERO && ask_price > Decimal::ZERO {
             let min_cost_size = (Decimal::ONE / ask_price).ceil();
-            if size < min_cost_size {
-                return None;
-            }
-            size
+            size.max(min_cost_size)
         } else {
             size
         };
+        // Cap again after bump-up: never exceed available capital or remaining room
+        let size = size.min(remaining).min(available);
 
         if size <= Decimal::ZERO {
             return None;
