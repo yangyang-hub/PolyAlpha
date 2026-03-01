@@ -153,7 +153,9 @@ impl ResolutionConvergenceStrategy {
         // Cap again after bump-up: never exceed available capital or remaining room
         let size = size.min(remaining).min(available);
 
-        if size <= Decimal::ZERO {
+        // After capping, verify we still meet CLOB minimum ($1.00 cost).
+        // E.g. at price $0.019, min_cost_size=53 but available may only allow 2 shares.
+        if size <= Decimal::ZERO || (ask_price > Decimal::ZERO && size * ask_price < Decimal::ONE) {
             return None;
         }
 

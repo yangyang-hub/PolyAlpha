@@ -787,6 +787,7 @@ async fn main() -> Result<()> {
         settings.strategy.scan_interval_ms,
         event_calendar,
         Box::new(move |token_id| engine_cache.get(&token_id)),
+        make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
         settings.risk.min_order_usdc,
         settings.strategy.max_market_end_days,
     );

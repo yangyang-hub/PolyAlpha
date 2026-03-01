@@ -404,8 +404,10 @@ impl ClobExecutor {
             OrderFillStatus::Rejected
         } else {
             match response.status {
-                OrderStatusType::Matched => {
-                    // For FOK orders, matched means fully filled
+                OrderStatusType::Matched | OrderStatusType::Delayed => {
+                    // Matched = filled synchronously.
+                    // Delayed = filled but settlement is async (common for FOK).
+                    // Both mean the order was accepted and matched by the CLOB.
                     OrderFillStatus::Filled
                 }
                 OrderStatusType::Live => {

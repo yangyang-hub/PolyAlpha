@@ -26,6 +26,8 @@ pub struct StrategyEngine {
     event_calendar: Option<Arc<EventCalendarService>>,
     /// Order book lookup for depth validation.
     get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+    /// Available capital query (balance - exposure). Used for per-cycle budget tracking.
+    get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
     /// Minimum order size in USDC; opportunities below this after scaling are rejected.
     min_order_usdc: Decimal,
     /// Only trade markets ending within this many days. None = no filter.
@@ -45,6 +47,7 @@ impl StrategyEngine {
         scan_interval_ms: u64,
         event_calendar: Option<Arc<EventCalendarService>>,
         get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+        get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
         min_order_usdc: Decimal,
         max_market_end_days: Option<u64>,
     ) -> Self {
@@ -55,6 +58,7 @@ impl StrategyEngine {
             scan_interval: Duration::from_millis(scan_interval_ms),
             event_calendar,
             get_orderbook,
+            get_available_capital,
             min_order_usdc,
             max_market_end_days,
             cooldowns: Mutex::new(HashMap::new()),
@@ -156,6 +160,11 @@ impl StrategyEngine {
 
         let timer = pa_monitor::metrics::SCAN_LATENCY.start_timer();
 
+        // Per-cycle budget tracking: query available capital once, then deduct
+        // as we commit orders. Prevents over-spending when multiple strategies
+        // generate opportunities against the same balance in a single cycle.
+        let mut budget_remaining = (self.get_available_capital)();
+
         // Filter markets by end_date if max_market_end_days is configured.
         // Markets without end_date are always included (weather/crypto don't have end_date).
         // NOTE: expired markets (end_date <= now) are still included so that exit scanning
@@ -230,6 +239,24 @@ impl StrategyEngine {
                                 continue;
                             }
                         };
+
+                        // Budget guard: skip if estimated cost exceeds remaining budget.
+                        // Exit orders bypass this — selling held positions doesn't cost USDC.
+                        let cost = opp.execution_plan.estimated_cost();
+                        if !opp.execution_plan.is_exit() && cost > Decimal::ZERO {
+                            if cost > budget_remaining {
+                                tracing::debug!(
+                                    id = %opp.id,
+                                    cost = %cost,
+                                    budget_remaining = %budget_remaining,
+                                    "Skipping — budget exhausted for this cycle"
+                                );
+                                self.set_cooldown(opp.condition_id, opp.strategy_type, 10);
+                                continue;
+                            }
+                            // Deduct budget before execution (conservative: assume it will fill).
+                            budget_remaining -= cost;
+                        }
 
                         self.process_opportunity(&opp).await;
                     }

@@ -474,6 +474,24 @@ impl ExecutionPlan {
             ExecutionPlan::CrossMarket { .. } => Some(Decimal::ONE),
         }
     }
+
+    /// Estimated USDC cost to execute this plan (price × size for each leg).
+    pub fn estimated_cost(&self) -> Decimal {
+        match self {
+            ExecutionPlan::DirectionalBuy { price, size, .. } => *price * *size,
+            ExecutionPlan::BuyAndMerge { yes_price, no_price, merge_amount, .. } => {
+                (*yes_price + *no_price) * *merge_amount
+            }
+            ExecutionPlan::SplitAndSell { split_amount, .. } => *split_amount,
+            ExecutionPlan::NegRiskArbitrage { legs, .. } => {
+                legs.iter().map(|l| l.price * l.size).sum()
+            }
+            ExecutionPlan::CrossMarket { leg_a, leg_b, .. } => {
+                (leg_a.yes_price + leg_a.no_price) * leg_a.size
+                    + (leg_b.yes_price + leg_b.no_price) * leg_b.size
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
