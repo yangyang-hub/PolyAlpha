@@ -60,6 +60,24 @@ impl ClobExecutor {
         Ok(Self { client, signer })
     }
 
+    /// Compute the step size (in hundredths) for valid cost-precision-compliant sizes at a given price.
+    ///
+    /// Returns `(s_step, numer, denom)` where valid sizes are multiples of `s_step / 100`.
+    fn cost_precision_step(price: Decimal) -> (u64, u64, u64) {
+        let scale = price.scale();
+        let denom = 10u64.pow(scale);
+        let numer = (price * Decimal::from(denom))
+            .round()
+            .to_u64()
+            .unwrap_or(1);
+        if numer == 0 {
+            return (1, 0, denom);
+        }
+        let g = gcd(numer, denom);
+        let s_step = denom / g;
+        (s_step, numer, denom)
+    }
+
     /// Adjust order size so that `price * size` (USDC cost) has at most 2 decimal places.
     ///
     /// The Polymarket CLOB API requires maker_amount (USDC) to have max 2dp precision.
@@ -74,23 +92,10 @@ impl ClobExecutor {
             return size;
         }
 
-        // Express price = numer / denom where denom = 10^scale
-        let scale = price.scale();
-        let denom = 10u64.pow(scale);
-        let numer = (price * Decimal::from(denom))
-            .round()
-            .to_u64()
-            .unwrap_or(1);
-
+        let (s_step, numer, _) = Self::cost_precision_step(price);
         if numer == 0 {
             return size;
         }
-
-        // For cost to have ≤ 2dp with size having 2dp (size = S/100):
-        //   cost * 100 = numer * S / denom must be integer
-        //   → S must be a multiple of denom / gcd(numer, denom)
-        let g = gcd(numer, denom);
-        let s_step = denom / g;
 
         // Round S down to nearest multiple of s_step
         let s_val = (size * Decimal::from(100u64))
@@ -104,6 +109,38 @@ impl ClobExecutor {
 
         let s_rounded = (s_val / s_step) * s_step;
         Decimal::new(s_rounded as i64, 2)
+    }
+
+    /// Find the smallest cost-precision-valid size where `price * size >= $1.00`.
+    ///
+    /// When `adjust_size_for_cost_precision` rounds a size DOWN below the $1.00 CLOB minimum,
+    /// this function computes the next valid size UP that meets the minimum.
+    /// Returns `Decimal::ZERO` if no valid size can be found within reasonable bounds.
+    fn min_cost_adjusted_size(price: Decimal) -> Decimal {
+        if price <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+
+        let (s_step, numer, denom) = Self::cost_precision_step(price);
+        if numer == 0 || s_step == 0 {
+            return Decimal::ZERO;
+        }
+
+        // We need: price * (s / 100) >= 1.00
+        // i.e.  numer * s / (denom * 100) >= 1
+        // i.e.  s >= (denom * 100) / numer   (ceiling)
+        let target = denom * 100;
+        let min_s = (target + numer - 1) / numer; // ceiling division
+
+        // Round up to next multiple of s_step
+        let s = ((min_s + s_step - 1) / s_step) * s_step;
+
+        // Safety cap: don't produce absurdly large orders (>50 shares)
+        if s > 5000 {
+            return Decimal::ZERO;
+        }
+
+        Decimal::new(s as i64, 2)
     }
 
     /// Place a FOK (Fill-Or-Kill) buy order for a given token.
@@ -120,11 +157,19 @@ impl ClobExecutor {
         // Round size to 2 decimal places (Polymarket CLOB lot size constraint)
         let size = size.round_dp(2);
         // Ensure price * size (USDC cost) has at most 2 decimal places
-        let size = Self::adjust_size_for_cost_precision(price, size);
+        let mut size = Self::adjust_size_for_cost_precision(price, size);
         if size <= Decimal::ZERO {
             anyhow::bail!("Order size too small after rounding to lot size");
         }
         // Polymarket minimum marketable order cost is $1.00
+        // If precision adjustment reduced size below minimum, bump up to the
+        // smallest valid size that meets $1.00.
+        if price * size < Decimal::ONE {
+            let bumped = Self::min_cost_adjusted_size(price);
+            if bumped > Decimal::ZERO {
+                size = bumped;
+            }
+        }
         let cost = price * size;
         if cost < Decimal::ONE {
             tracing::warn!(
@@ -228,9 +273,16 @@ impl ClobExecutor {
     ) -> anyhow::Result<OrderResult> {
         // Round size to 2 decimal places (Polymarket CLOB lot size constraint)
         let size = size.round_dp(2);
-        let size = Self::adjust_size_for_cost_precision(price, size);
+        let mut size = Self::adjust_size_for_cost_precision(price, size);
         if size <= Decimal::ZERO {
             anyhow::bail!("Order size too small after rounding to lot size");
+        }
+        // Bump to meet $1.00 minimum if precision adjustment reduced below it
+        if price * size < Decimal::ONE {
+            let bumped = Self::min_cost_adjusted_size(price);
+            if bumped > Decimal::ZERO {
+                size = bumped;
+            }
         }
         let cost = price * size;
         if cost < Decimal::ONE {
@@ -534,5 +586,95 @@ mod tests {
         assert_eq!(gcd(0, 100), 100);
         assert_eq!(gcd(100, 0), 100);
         assert_eq!(gcd(12, 18), 6);
+    }
+
+    /// Verify min_cost_adjusted_size produces valid costs.
+    fn assert_min_cost_valid(price: Decimal) {
+        let size = ClobExecutor::min_cost_adjusted_size(price);
+        if size > Decimal::ZERO {
+            let cost = price * size;
+            assert!(
+                cost >= Decimal::ONE,
+                "price={} min_size={} cost={} < $1.00",
+                price, size, cost,
+            );
+            assert_eq!(
+                cost, cost.round_dp(2),
+                "price={} min_size={} cost={} has >2dp",
+                price, size, cost,
+            );
+        }
+    }
+
+    #[test]
+    fn test_min_cost_adjusted_size_common_prices() {
+        // price=0.82: s_step=50, min_size=1.50, cost=1.23
+        let size = ClobExecutor::min_cost_adjusted_size(dec!(0.82));
+        assert_eq!(size, dec!(1.50));
+        assert_eq!(dec!(0.82) * size, dec!(1.23));
+
+        // price=0.84: s_step=25, min_size=1.25, cost=1.05
+        let size = ClobExecutor::min_cost_adjusted_size(dec!(0.84));
+        assert_eq!(size, dec!(1.25));
+        assert_eq!(dec!(0.84) * size, dec!(1.05));
+
+        // price=0.97: s_step=100, min_size=2.00, cost=1.94
+        let size = ClobExecutor::min_cost_adjusted_size(dec!(0.97));
+        assert_eq!(size, dec!(2.00));
+        assert_eq!(dec!(0.97) * size, dec!(1.94));
+
+        // price=0.98: s_step=50, min_size=1.50, cost=1.47
+        let size = ClobExecutor::min_cost_adjusted_size(dec!(0.98));
+        assert_eq!(size, dec!(1.50));
+        assert_eq!(dec!(0.98) * size, dec!(1.47));
+
+        // price=0.95: s_step=20, min_size=1.20, cost=1.14
+        let size = ClobExecutor::min_cost_adjusted_size(dec!(0.95));
+        assert_eq!(size, dec!(1.20));
+        assert_eq!(dec!(0.95) * size, dec!(1.14));
+    }
+
+    #[test]
+    fn test_min_cost_adjusted_size_3dp_prices() {
+        // price=0.954: s_step=500, min_size=5.00, cost=4.77
+        let size = ClobExecutor::min_cost_adjusted_size(dec!(0.954));
+        assert_eq!(size, dec!(5.00));
+
+        // price=0.981: s_step=1000/gcd(981,1000)=1000/1=1000
+        // min_s needs to be ≥ 100000/981 ≈ 102, rounded up to 1000
+        // size = 10.00, cost = 9.81 — too expensive for small balance
+        let size = ClobExecutor::min_cost_adjusted_size(dec!(0.981));
+        assert_eq!(size, dec!(10.00));
+
+        // price=0.949: s_step=1000/gcd(949,1000)=1000/1=1000
+        // size = 10.00, cost = 9.49
+        let size = ClobExecutor::min_cost_adjusted_size(dec!(0.949));
+        assert_eq!(size, dec!(10.00));
+    }
+
+    #[test]
+    fn test_min_cost_adjusted_size_validity() {
+        // All common prices should produce valid costs
+        for price in [dec!(0.50), dec!(0.75), dec!(0.80), dec!(0.82), dec!(0.84),
+                      dec!(0.90), dec!(0.95), dec!(0.97), dec!(0.98), dec!(0.99)] {
+            assert_min_cost_valid(price);
+        }
+    }
+
+    #[test]
+    fn test_adjust_then_bump_flow() {
+        // Simulate the actual flow: adjust rounds down, bump recovers
+        let price = dec!(0.82);
+        let size = dec!(1.23); // typical after round_dp(2)
+
+        // Step 1: precision adjustment rounds to 1.00
+        let adjusted = ClobExecutor::adjust_size_for_cost_precision(price, size);
+        assert_eq!(adjusted, dec!(1.00));
+        assert!(price * adjusted < Decimal::ONE); // cost = 0.82 < 1.00
+
+        // Step 2: bump to minimum valid
+        let bumped = ClobExecutor::min_cost_adjusted_size(price);
+        assert_eq!(bumped, dec!(1.50));
+        assert!(price * bumped >= Decimal::ONE); // cost = 1.23 >= 1.00
     }
 }

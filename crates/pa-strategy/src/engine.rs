@@ -250,7 +250,7 @@ impl StrategyEngine {
                         let opp = match self.validate_depth(&opp) {
                             Some(validated) => validated,
                             None => {
-                                self.set_cooldown(opp.condition_id, opp.strategy_type, 10);
+                                self.set_cooldown(opp.condition_id, opp.strategy_type, 60);
                                 continue;
                             }
                         };
@@ -266,7 +266,7 @@ impl StrategyEngine {
                                     budget_remaining = %budget_remaining,
                                     "Skipping — budget exhausted for this cycle"
                                 );
-                                self.set_cooldown(opp.condition_id, opp.strategy_type, 10);
+                                self.set_cooldown(opp.condition_id, opp.strategy_type, 120);
                                 continue;
                             }
                             // Deduct budget before execution (conservative: assume it will fill).
@@ -334,7 +334,12 @@ impl StrategyEngine {
                     pa_monitor::metrics::REALIZED_PNL.add(pnl);
                 }
                 self.risk_manager.update_position(&result);
-                self.set_cooldown(opp.condition_id, opp.strategy_type, 10);
+                // Longer cooldown for NoFill/Rejected (market conditions unlikely to change soon)
+                if result.status == pa_core::types::ExecutionStatus::NoFill {
+                    self.set_cooldown(opp.condition_id, opp.strategy_type, 120);
+                } else {
+                    self.set_cooldown(opp.condition_id, opp.strategy_type, 10);
+                }
             }
             Err(e) => {
                 timer.observe_duration();
@@ -492,9 +497,28 @@ impl StrategyEngine {
                 continue;
             }
 
+            // Cap sell size to available bid depth.
+            // FOK requires the full order to be filled. If our position exceeds available
+            // bid depth, the FOK will be killed. Instead, sell what the book can absorb
+            // and come back for the rest on the next scan.
+            let bid_depth = book.available_depth(TradeSide::Sell, best_bid);
+            let sell_size = pos.size.min(bid_depth).round_dp(2);
+            if sell_size < dec!(0.01) {
+                tracing::debug!(
+                    token_id = %pos.token_id,
+                    best_bid = %best_bid,
+                    bid_depth = %bid_depth,
+                    pos_size = %pos.size,
+                    "[STOP-LOSS] No bid liquidity — cannot sell, waiting"
+                );
+                self.set_cooldown(condition_id, st, 3600); // 1 hour
+                continue;
+            }
+
             tracing::warn!(
                 token_id = %pos.token_id,
                 size = %pos.size,
+                sell_size = %sell_size,
                 avg_cost = %pos.avg_cost,
                 best_bid = %best_bid,
                 loss_pct = %(((pos.avg_cost - best_bid) / pos.avg_cost * dec!(100)).round_dp(1)),
@@ -508,14 +532,14 @@ impl StrategyEngine {
                 question: format!("[STOP-LOSS] Force exit token {}", pos.token_id),
                 strategy_type: st,
                 spread: pos.avg_cost - best_bid,
-                size: pos.size,
-                estimated_profit: (best_bid - pos.avg_cost) * pos.size, // negative = loss
+                size: sell_size,
+                estimated_profit: (best_bid - pos.avg_cost) * sell_size, // negative = loss
                 detected_at: chrono::Utc::now(),
                 execution_plan: ExecutionPlan::DirectionalBuy {
                     token_id: pos.token_id,
                     side: TradeSide::Sell,
                     price: best_bid,
-                    size: pos.size,
+                    size: sell_size,
                     condition_id,
                 },
             };
