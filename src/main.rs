@@ -609,6 +609,19 @@ async fn main() -> Result<()> {
                     size = %p.size,
                     "Position tagged with inferred strategy"
                 );
+            } else {
+                // Find the market question for diagnostics
+                let question = markets_snapshot.iter()
+                    .find(|m| m.tokens.iter().any(|t| t.token_id == p.token_id))
+                    .map(|m| m.question.as_str())
+                    .unwrap_or("<market not found in discovery>");
+                tracing::warn!(
+                    token_id = %p.token_id,
+                    size = %p.size,
+                    avg_cost = %p.avg_price,
+                    question = %question,
+                    "UNTAGGED position — strategy inference failed, strategy exits won't work (stop-loss safety net active)"
+                );
             }
             (p.token_id, p.size, p.avg_price, strategy_type, Some(p.condition_id))
         })
@@ -780,6 +793,7 @@ async fn main() -> Result<()> {
     };
 
     let engine_cache = market_data.cache().clone();
+    let engine_rm_all = Arc::clone(&risk_manager_impl);
     let engine = StrategyEngine::new(
         strategies,
         executor.clone(),
@@ -788,6 +802,18 @@ async fn main() -> Result<()> {
         event_calendar,
         Box::new(move |token_id| engine_cache.get(&token_id)),
         make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
+        Box::new(move || {
+            engine_rm_all.snapshot_positions()
+                .into_iter()
+                .map(|(token_id, entry)| pa_strategy::engine::StopLossPosition {
+                    token_id,
+                    size: entry.size,
+                    avg_cost: entry.avg_cost,
+                    strategy_type: entry.strategy_type,
+                    condition_id: entry.condition_id,
+                })
+                .collect()
+        }),
         settings.risk.min_order_usdc,
         settings.strategy.max_market_end_days,
     );
@@ -1224,10 +1250,35 @@ async fn main() -> Result<()> {
                         let markets_snapshot = sync_markets.read().await;
                         let mut added = 0u32;
                         let mut updated = 0u32;
+                        let mut retagged = 0u32;
                         for pos in &api_positions {
                             let existing_size = known.get(&pos.token_id).copied().unwrap_or(Decimal::ZERO);
-                            if existing_size == pos.size {
-                                continue; // already in sync
+
+                            // Re-tag positions with missing strategy_type even if size is unchanged.
+                            // This fixes positions that failed inference at startup (e.g. market not yet discovered).
+                            if existing_size == pos.size && existing_size > Decimal::ZERO {
+                                // Check if strategy_type is None — try to re-infer
+                                let needs_retag = current.iter().any(|(tid, entry)| {
+                                    *tid == pos.token_id && entry.strategy_type.is_none()
+                                });
+                                if needs_retag {
+                                    let strategy_type = infer_strategy_type(
+                                        pos.token_id, &markets_snapshot, &sync_neg_risk,
+                                    );
+                                    if strategy_type.is_some() {
+                                        sync_rm.sync_position(
+                                            pos.token_id, pos.size, pos.avg_price,
+                                            strategy_type, Some(pos.condition_id),
+                                        );
+                                        tracing::info!(
+                                            token_id = %pos.token_id,
+                                            strategy = ?strategy_type,
+                                            "Position sync: re-tagged untagged position"
+                                        );
+                                        retagged += 1;
+                                    }
+                                }
+                                continue;
                             }
                             if existing_size == Decimal::ZERO && pos.size > Decimal::ZERO {
                                 // New position not tracked by RiskManager
@@ -1278,9 +1329,9 @@ async fn main() -> Result<()> {
                         }
                         drop(markets_snapshot);
 
-                        if added > 0 || updated > 0 {
+                        if added > 0 || updated > 0 || retagged > 0 {
                             tracing::info!(
-                                added, updated,
+                                added, updated, retagged,
                                 total_api = api_positions.len(),
                                 "Position sync complete — reconciled with Data API"
                             );

@@ -4,12 +4,14 @@ use std::time::Instant;
 use alloy::primitives::{B256, U256};
 use chrono::{TimeDelta, Utc};
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use pa_core::traits::{Executor, RiskManager, Strategy};
-use pa_core::types::{ArbitrageOpportunity, ExecutionPlan, MarketInfo, OrderBook, RiskDecision, StrategyType};
+use pa_core::types::{ArbitrageOpportunity, ExecutionPlan, MarketInfo, OrderBook, RiskDecision, StrategyType, TradeSide};
 use pa_market_data::event_calendar::EventCalendarService;
 use tokio::sync::{RwLock, broadcast};
 use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use pa_market_data::ws_feed::OrderBookUpdate;
 
@@ -18,6 +20,15 @@ use pa_market_data::ws_feed::OrderBookUpdate;
 /// Operates in two modes simultaneously:
 /// 1. **Event-driven**: reacts to `OrderBookUpdate` events from the WebSocket feed
 /// 2. **Periodic fallback**: full market scan on a timer to catch any missed events
+/// Position snapshot entry for the universal stop-loss scanner.
+pub struct StopLossPosition {
+    pub token_id: U256,
+    pub size: Decimal,
+    pub avg_cost: Decimal,
+    pub strategy_type: Option<StrategyType>,
+    pub condition_id: Option<B256>,
+}
+
 pub struct StrategyEngine {
     strategies: Vec<Box<dyn Strategy>>,
     executor: Arc<dyn Executor>,
@@ -28,6 +39,8 @@ pub struct StrategyEngine {
     get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
     /// Available capital query (balance - exposure). Used for per-cycle budget tracking.
     get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
+    /// Get ALL positions for universal stop-loss scanning.
+    get_all_positions: Box<dyn Fn() -> Vec<StopLossPosition> + Send + Sync>,
     /// Minimum order size in USDC; opportunities below this after scaling are rejected.
     min_order_usdc: Decimal,
     /// Only trade markets ending within this many days. None = no filter.
@@ -48,6 +61,7 @@ impl StrategyEngine {
         event_calendar: Option<Arc<EventCalendarService>>,
         get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
         get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
+        get_all_positions: Box<dyn Fn() -> Vec<StopLossPosition> + Send + Sync>,
         min_order_usdc: Decimal,
         max_market_end_days: Option<u64>,
     ) -> Self {
@@ -59,6 +73,7 @@ impl StrategyEngine {
             event_calendar,
             get_orderbook,
             get_available_capital,
+            get_all_positions,
             min_order_usdc,
             max_market_end_days,
             cooldowns: Mutex::new(HashMap::new()),
@@ -267,6 +282,14 @@ impl StrategyEngine {
             }
         }
 
+        // ── Universal stop-loss safety net ──
+        // Scans ALL held positions (regardless of strategy_type) for deep losses.
+        // This catches positions that strategies can't exit due to:
+        //   - strategy_type = None (inference failed)
+        //   - parse failure in scan_exits (e.g. NegRisk question format)
+        //   - market not in shared_markets
+        self.scan_stop_loss(scan_markets).await;
+
         timer.observe_duration();
     }
 
@@ -326,6 +349,89 @@ impl StrategyEngine {
                 }
                 self.set_cooldown(opp.condition_id, opp.strategy_type, 60);
             }
+        }
+    }
+
+    /// Universal stop-loss safety net: exit any position that has lost >= 50% of cost basis.
+    ///
+    /// This runs AFTER strategy-specific exit scanning. It catches positions that
+    /// strategies can't handle (untagged, unparseable, missing from market list).
+    /// Uses a simple heuristic: if best_bid < avg_cost × 0.50, force exit.
+    async fn scan_stop_loss(&self, markets: &[MarketInfo]) {
+        let positions = (self.get_all_positions)();
+        if positions.is_empty() {
+            return;
+        }
+
+        // Build token_id → condition_id lookup from markets for positions without condition_id
+        let token_to_condition: HashMap<U256, B256> = markets
+            .iter()
+            .flat_map(|m| m.tokens.iter().map(move |t| (t.token_id, m.condition_id)))
+            .collect();
+
+        for pos in &positions {
+            if pos.size <= Decimal::ZERO || pos.avg_cost <= Decimal::ZERO {
+                continue;
+            }
+
+            let book = match (self.get_orderbook)(pos.token_id) {
+                Some(b) => b,
+                None => continue,
+            };
+            let best_bid = match book.best_bid() {
+                Some(b) => b.price,
+                None => continue,
+            };
+
+            // Stop-loss: exit when best_bid < 50% of avg_cost (lost >= 50%)
+            let stop_threshold = pos.avg_cost * dec!(0.50);
+            if best_bid >= stop_threshold {
+                continue;
+            }
+
+            // Determine condition_id
+            let condition_id = pos.condition_id
+                .or_else(|| token_to_condition.get(&pos.token_id).copied())
+                .unwrap_or(B256::ZERO);
+
+            // Use a synthetic strategy_type for cooldown tracking
+            let st = pos.strategy_type.unwrap_or(StrategyType::CryptoAlpha);
+
+            // Check cooldown to avoid retry flooding
+            if self.is_cooled_down(condition_id, st) {
+                continue;
+            }
+
+            tracing::warn!(
+                token_id = %pos.token_id,
+                size = %pos.size,
+                avg_cost = %pos.avg_cost,
+                best_bid = %best_bid,
+                loss_pct = %(((pos.avg_cost - best_bid) / pos.avg_cost * dec!(100)).round_dp(1)),
+                strategy = ?pos.strategy_type,
+                "[STOP-LOSS] Forced exit — position lost >= 50%"
+            );
+
+            let opp = ArbitrageOpportunity {
+                id: Uuid::new_v4(),
+                condition_id,
+                question: format!("[STOP-LOSS] Force exit token {}", pos.token_id),
+                strategy_type: st,
+                spread: pos.avg_cost - best_bid,
+                size: pos.size,
+                estimated_profit: (best_bid - pos.avg_cost) * pos.size, // negative = loss
+                detected_at: chrono::Utc::now(),
+                execution_plan: ExecutionPlan::DirectionalBuy {
+                    token_id: pos.token_id,
+                    side: TradeSide::Sell,
+                    price: best_bid,
+                    size: pos.size,
+                    condition_id,
+                },
+            };
+
+            pa_monitor::metrics::EXIT_TRADES.inc();
+            self.process_opportunity(&opp).await;
         }
     }
 
