@@ -20,8 +20,8 @@ proxy_wallet = "0x92D8cF3B70178f8C374AeE25f311c0B4FE398dC5"
 host = "https://gamma-api.polymarket.com"
 
 [strategy]
-enabled = ["weather", "convergence", "crypto"]
-# enabled = ["weather"]
+# enabled = ["weather", "convergence", "crypto"]
+enabled = ["weather", "crypto"]
 scan_interval_ms = 100
 min_spread_bps = 200
 min_profit_usdc = 0.20
