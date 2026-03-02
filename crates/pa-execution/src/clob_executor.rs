@@ -155,20 +155,34 @@ impl ClobExecutor {
         size: Decimal,
     ) -> anyhow::Result<OrderResult> {
         // Round size to 2 decimal places (Polymarket CLOB lot size constraint)
-        let size = size.round_dp(2);
+        let requested_size = size.round_dp(2);
         // Ensure price * size (USDC cost) has at most 2 decimal places
-        let mut size = Self::adjust_size_for_cost_precision(price, size);
+        let mut size = Self::adjust_size_for_cost_precision(price, requested_size);
         if size <= Decimal::ZERO {
-            anyhow::bail!("Order size too small after rounding to lot size");
+            // Size too small for this price's lot step (e.g. price=0.942 needs
+            // size >= 5.00).  Try bumping to the minimum valid lot size, but cap
+            // at 5× the requested cost to avoid oversized orders.
+            let min_size = Self::min_cost_adjusted_size(price);
+            let max_cost = requested_size * price * Decimal::from(5u32);
+            if min_size > Decimal::ZERO && min_size * price <= max_cost {
+                tracing::info!(
+                    token_id = %token_id, price = %price,
+                    requested_size = %requested_size, bumped_size = %min_size,
+                    "Size below lot step — bumping to minimum valid lot size"
+                );
+                size = min_size;
+            } else {
+                anyhow::bail!("Order size too small after rounding to lot size");
+            }
         }
         // Polymarket minimum marketable order cost is $1.00
         // If precision adjustment reduced size below minimum, bump up to the
-        // smallest valid size that meets $1.00 — but NEVER exceed the original
-        // requested size, as that would bypass risk controls.
+        // smallest valid size that meets $1.00 — but cap at the requested size
+        // to avoid bypassing risk controls.
         let original_size = size;
         if price * size < Decimal::ONE {
             let bumped = Self::min_cost_adjusted_size(price);
-            if bumped > Decimal::ZERO && bumped <= original_size {
+            if bumped > Decimal::ZERO && bumped <= requested_size.max(original_size) {
                 size = bumped;
             }
         }

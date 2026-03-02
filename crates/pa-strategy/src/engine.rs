@@ -356,7 +356,13 @@ impl StrategyEngine {
                     *self.execution_paused_until.lock().unwrap() =
                         Instant::now() + Duration::from_secs(300);
                 }
-                self.set_cooldown(opp.condition_id, opp.strategy_type, 60);
+                // Lot-size errors won't resolve until price or Kelly sizing changes
+                // significantly — use a longer cooldown to avoid retry spam.
+                if err_msg.contains("lot size") {
+                    self.set_cooldown(opp.condition_id, opp.strategy_type, 600);
+                } else {
+                    self.set_cooldown(opp.condition_id, opp.strategy_type, 60);
+                }
             }
         }
     }
