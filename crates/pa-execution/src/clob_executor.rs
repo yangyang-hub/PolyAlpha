@@ -163,18 +163,21 @@ impl ClobExecutor {
         }
         // Polymarket minimum marketable order cost is $1.00
         // If precision adjustment reduced size below minimum, bump up to the
-        // smallest valid size that meets $1.00.
+        // smallest valid size that meets $1.00 — but NEVER exceed the original
+        // requested size, as that would bypass risk controls.
+        let original_size = size;
         if price * size < Decimal::ONE {
             let bumped = Self::min_cost_adjusted_size(price);
-            if bumped > Decimal::ZERO {
+            if bumped > Decimal::ZERO && bumped <= original_size {
                 size = bumped;
             }
         }
         let cost = price * size;
         if cost < Decimal::ONE {
-            tracing::warn!(
+            tracing::debug!(
                 token_id = %token_id, price = %price, size = %size, cost = %cost,
-                "Order cost below $1.00 minimum, skipping"
+                original_size = %original_size,
+                "Order cost below $1.00 minimum after precision adjustment, skipping"
             );
             return Ok(OrderResult {
                 order_id: String::new(),
@@ -277,18 +280,21 @@ impl ClobExecutor {
         if size <= Decimal::ZERO {
             anyhow::bail!("Order size too small after rounding to lot size");
         }
-        // Bump to meet $1.00 minimum if precision adjustment reduced below it
+        // Bump to meet $1.00 minimum if precision adjustment reduced below it,
+        // but NEVER exceed the original requested size (risk control boundary).
+        let original_size = size;
         if price * size < Decimal::ONE {
             let bumped = Self::min_cost_adjusted_size(price);
-            if bumped > Decimal::ZERO {
+            if bumped > Decimal::ZERO && bumped <= original_size {
                 size = bumped;
             }
         }
         let cost = price * size;
         if cost < Decimal::ONE {
-            tracing::warn!(
+            tracing::debug!(
                 token_id = %token_id, price = %price, size = %size, cost = %cost,
-                "Order cost below $1.00 minimum, skipping"
+                original_size = %original_size,
+                "Order cost below $1.00 minimum after precision adjustment, skipping"
             );
             return Ok(OrderResult {
                 order_id: String::new(),

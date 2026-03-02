@@ -288,7 +288,9 @@ impl StrategyEngine {
         //   - strategy_type = None (inference failed)
         //   - parse failure in scan_exits (e.g. NegRisk question format)
         //   - market not in shared_markets
-        self.scan_stop_loss(scan_markets).await;
+        // Uses FULL (unfiltered) market list so safety checks work for all positions,
+        // including markets beyond max_market_end_days.
+        self.scan_stop_loss(markets).await;
 
         timer.observe_duration();
     }
@@ -334,8 +336,10 @@ impl StrategyEngine {
                     pa_monitor::metrics::REALIZED_PNL.add(pnl);
                 }
                 self.risk_manager.update_position(&result);
-                // Longer cooldown for NoFill/Rejected (market conditions unlikely to change soon)
-                if result.status == pa_core::types::ExecutionStatus::NoFill {
+                // Longer cooldown for NoFill/Failed (market conditions unlikely to change soon)
+                if result.status == pa_core::types::ExecutionStatus::NoFill
+                    || result.status == pa_core::types::ExecutionStatus::Failed
+                {
                     self.set_cooldown(opp.condition_id, opp.strategy_type, 120);
                 } else {
                     self.set_cooldown(opp.condition_id, opp.strategy_type, 10);
@@ -657,6 +661,12 @@ impl StrategyEngine {
             (condition_id, strategy_type),
             Instant::now() + Duration::from_secs(secs),
         );
+        // Prune expired entries periodically to prevent unbounded growth.
+        // Only prune when the map exceeds 500 entries (amortized O(1)).
+        if cooldowns.len() > 500 {
+            let now = Instant::now();
+            cooldowns.retain(|_, until| *until > now);
+        }
     }
 }
 

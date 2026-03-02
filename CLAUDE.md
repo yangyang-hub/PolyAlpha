@@ -8,14 +8,14 @@ Polymarket 量化套利交易机器人（Rust）。通过实时订单簿监控�
 
 - **语言**: Rust Edition 2024, MSRV 1.88.0
 - **工具链**: rustc 1.93.0, cargo 1.93.0
-- **代码量**: ~9700 行 Rust
-- **测试**: 192 个（全部通过）
+- **代码量**: ~19500 行 Rust
+- **测试**: 199 个（全部通过）
 
 ## 常用命令
 
 ```bash
 cargo check --workspace          # 编译检查
-cargo test --workspace           # 运行全部 86 个测试
+cargo test --workspace           # 运行全部 199 个测试
 cargo build --release            # 构建 release
 cargo run --release              # 运行机器人
 cargo run --bin backtest -- --from "2025-01-01T00:00:00" --to "2025-01-31T23:59:59"  # 回测
@@ -27,13 +27,13 @@ cd docker && docker compose up -d  # Docker 全栈部署
 ```
 polyalpha (root binary)       # src/main.rs — 主入口, src/bin/backtest.rs — 回测CLI
 ├── pa-core                   # 核心类型、traits、配置、错误
-├── pa-market-data            # Gamma API + WebSocket + OrderBookCache + EventCalendar
+├── pa-market-data            # Gamma API + WebSocket + OrderBookCache + EventCalendar + DataAPI
 ├── pa-strategy               # YesNo / NegRisk / CrossMarket / Weather / Convergence / CryptoAlpha 策略 + StrategyEngine
-├── pa-execution              # ClobExecutor + CtfExecutor + HybridOrchestrator
+├── pa-execution              # ClobExecutor + CtfExecutor + HybridOrchestrator + SafeRedeemer
 ├── pa-risk                   # RiskManagerImpl (仓位/损失限制/熔断器)
 ├── pa-storage                # PostgreSQL Repository (sqlx)
 ├── pa-backtest               # BacktestEngine + DataLoader + TradeSimulator + Report
-└── pa-monitor                # Prometheus 指标(13个) + Health/Ready/Metrics HTTP
+└── pa-monitor                # Prometheus 指标(22个) + Health/Ready/Metrics HTTP
 ```
 
 ### Crate 依赖方向
@@ -91,13 +91,15 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 
 关键结构: `Settings { chain, clob, gamma, strategy, risk, database, monitor, market_filter, weather, convergence, crypto_alpha, event_calendar, market_making }`
 
-`WeatherConfig` fields: `min_edge_bps`, `max_position_usdc`, `kelly_fraction`, `forecast_error: ForecastErrorConfig`, `refresh_interval_secs`, `dynamic_sigma(true)`, `ensemble_enabled(false)`, `ensemble_models(["gfs_seamless","ecmwf_ifs025","icon_seamless"])`, `forecast_change_detection(false)`, `forecast_change_threshold(0.5)`
+`MarketFilterConfig` fields: `ws_max_instruments(500)`, `market_refresh_interval_secs(1800)`
+
+`WeatherConfig` fields: `min_edge_bps`, `max_position_usdc`, `kelly_fraction`, `forecast_error: ForecastErrorConfig`, `refresh_interval_secs`, `dynamic_sigma(true)`, `ensemble_enabled(false)`, `ensemble_models(["gfs_seamless","ecmwf_ifs025","icon_seamless"])`, `forecast_change_detection(false)`, `forecast_change_threshold(0.5)`, `exit_buffer_bps(50)`, `capital_efficiency_threshold(0.98)`
 
 `ForecastErrorConfig` — 每指标预报误差σ: `temperature_sigma_f(3.0°F)`, `precipitation_sigma_in(0.3in)`, `snowfall_sigma_in(2.0in)`, `wind_sigma_mph(5.0mph)`
 
-`ConvergenceConfig` fields: `min_price_threshold(0.93)`, `max_days_to_resolution(7)`, `max_position_usdc(100)`, `kelly_fraction(0.25)`, `time_decay_boost(true)`, `time_decay_rate(0.03)`
+`ConvergenceConfig` fields: `min_price_threshold(0.93)`, `max_days_to_resolution(7)`, `max_position_usdc(100)`, `kelly_fraction(0.25)`, `time_decay_boost(true)`, `time_decay_rate(0.03)`, `exit_buffer_bps(50)`, `capital_efficiency_threshold(0.98)`
 
-`CryptoAlphaConfig` fields: `min_edge_bps(500, config default 100)`, `max_position_usdc(100)`, `kelly_fraction(0.25)`, `refresh_interval_secs(300)`, `coingecko_api_key("")`
+`CryptoAlphaConfig` fields: `min_edge_bps(500, config default 100)`, `max_position_usdc(100)`, `kelly_fraction(0.25)`, `refresh_interval_secs(300)`, `coingecko_api_key("")`, `exit_buffer_bps(50)`, `capital_efficiency_threshold(0.98)`
 
 `EventCalendarConfig` fields: `enabled(false)`, `finnhub_api_key("")`, `coinmarketcal_api_key("")`, `refresh_interval_secs(3600)`, `pre_event_hours(4)`, `post_event_hours(2)`, `high_impact_multiplier(0.25)`, `medium_impact_multiplier(0.50)`, `low_impact_multiplier(0.75)`, `static_events([])`
 
@@ -239,7 +241,26 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 - `SplitAndSell` → CTF split + CLOB 卖出
 - `NegRiskConvert` → 多笔 CLOB 买入 + NegRiskAdapter merge
 - `CrossMarket` → `tokio::join!` 并发执行两条腿
-- `DirectionalBuy` → 单笔 CLOB FOK 买入（Weather 策略，无链上操作）
+- `DirectionalBuy` (Buy) → 单笔 CLOB FOK 买入（方向性策略）
+- `DirectionalBuy` (Sell) → 单笔 CLOB FOK 卖出（模型反转/止损退出）
+
+### CLOB 订单精度处理
+
+Polymarket CLOB 要求 maker_amount (USDC cost) 最多 2dp 精度，且最低可成交订单金额为 $1.00。
+
+- `adjust_size_for_cost_precision(price, size)`: 使用 GCD 算术将 size 向下舍入，确保 `price × size` 为合法 2dp cost
+- `min_cost_adjusted_size(price)`: 找到满足 `price × size >= $1.00` 的最小合法 size（向上舍入）
+- 安全限制: bump 后 size 不得超过原始请求的 size（防止绕过风控）
+- 对于 3dp 价格（如 0.981），s_step 可达 1000（最小 size = 10.00），此时低 size 订单不可行
+
+### 自动赎回（SafeRedeemer）
+
+已解决市场的 winning tokens 通过 GnosisSafe 的 `execTransaction()` 赎回，因为代币在 Safe 代理钱包中。
+
+- 每 5 分钟扫描可赎回仓位（Data API `find_redeemable()`）
+- 普通市场: `CTF.redeemPositions(condition_id)`
+- NegRisk 市场: `NegRiskAdapter.redeemPositions(condition_id, amounts)`
+- 需要 EOA 为 Safe 的 owner（启动时验证）
 
 ### Market Making 后台任务
 
@@ -266,11 +287,90 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 ### Smart WS 订阅
 
 基于 Gamma API `outcome_prices` 智能排序 WebSocket 订阅:
-1. 策略相关市场（weather/crypto 关键词）: 最高优先
-2. 过滤极端市场: YES price < 0.05 或 > 0.95
-3. 按 "mid-ness" 排序: 越接近 0.50 优先级越高
-4. NegRisk tokens 追加在二元市场之后
-5. 截断至 `ws_max_instruments` 限制
+1. 持仓 token: 最高优先（确保退出扫描有实时价格）
+2. 策略相关市场（weather/crypto 关键词）: 次高优先
+3. 过滤极端市场: YES price < 0.05 或 > 0.95
+4. 按 "mid-ness" 排序: 越接近 0.50 优先级越高
+5. NegRisk tokens 追加在二元市场之后
+6. 截断至 `ws_max_instruments` 限制
+
+## Strategy Engine（运行时特性）
+
+`StrategyEngine` 是核心交易循环，事件驱动 + 定时扫描双模。
+
+### 市场过滤
+
+- `max_market_end_days`: 只扫描 end_date 在 N 天内的市场（策略扫描）
+- 止损扫描使用**完整**市场列表（不过滤），确保所有持仓都能进行安全检查
+- 无 end_date 的市场（weather/crypto）始终包含
+
+### 冷却机制
+
+- `HashMap<(B256, StrategyType), Instant>` 追踪每个市场+策略的冷却时间
+- 冷却时间: 成功 10s, NoFill/Failed 120s, 执行错误 60s, 深度不足 60s, 预算耗尽 120s
+- 止损冷却: 300s（5分钟）, 过期市场 3600s, 数据可疑 600s
+- 自动剪枝: 超过 500 条目时清理过期条目，防止无界内存增长
+
+### 执行暂停
+
+- 余额/授权错误后全局暂停 5 分钟（防止连续失败洪泛）
+- 中途暂停: 批量处理中某个机会触发暂停后，跳过剩余机会
+
+### 预算追踪
+
+- 每扫描周期查询一次可用资金，逐个扣减
+- 防止多策略对同一余额重复花费
+- 退出订单绕过预算检查（卖出不花 USDC）
+
+### 深度验证
+
+- 从 ExecutionPlan 提取流动性需求，检查 orderbook 深度
+- 深度不足时按比例缩小（scale down）机会大小
+- 缩小后低于 `min_order_usdc` 则拒绝
+- 退出订单绕过深度验证
+
+### 模型反转退出
+
+- 各方向性策略（Weather/Crypto/Convergence）内置 `scan_exits()`
+- 退出条件: (1) model_prob < best_bid - exit_buffer_bps (模型反转), (2) best_bid >= capital_efficiency_threshold (资金效率)
+- 退出使用 `DirectionalBuy { side: Sell }`
+- 退出订单绕过风控积累检查（仅受熔断器限制）
+
+### 万能止损安全网
+
+- 在策略扫描之后运行，检查**所有**持仓（无论 strategy_type）
+- 触发条件: best_bid < avg_cost × 50%（亏损 >= 50%）
+- 安全检查 (防误杀):
+  1. best_ask >= avg_cost → 市场仍看好此 token，不卖
+  2. 过期市场 → 跳过（让自动赎回处理）
+  3. 对手方 token 的 best_bid < 0.50 → 数据可疑，跳过
+  4. 卖出金额 < $0.05 → 太小无法成交，跳过
+- FOK 卖出量上限为 bid 侧可用深度（防止 FOK 被杀）
+
+## 仓位管理
+
+### Data API 加载
+
+- 启动时从 Polymarket Data API 加载持仓（无需 PostgreSQL）
+- 策略标签推断: weather → crypto → convergence（需匹配价格阈值）
+- 未发现的市场（过期/关闭）通过 `fetch_position_markets()` 补充
+- 持仓 token 加入 WS 订阅优先列表
+
+### 定期同步（每 5 分钟）
+
+- 与 Data API 对账，处理 4 种情况:
+  1. 新仓位（本地无）→ 同步添加
+  2. 大小变化（部分成交/外部交易）→ 同步更新
+  3. 仓位清零（赎回等）→ 同步清除
+  4. 本地有但 Data API 无 → 清除
+- 重新标签: strategy_type = None 的仓位每次重试推断
+
+### 定期市场刷新
+
+- `market_refresh_interval_secs`（默认 1800 = 30分钟）
+- 仅追加新市场（不删除已知市场）
+- 新市场: seed OrderBookCache + 重建 WS 订阅
+- Engine 每次 tick 检查 shared_markets 长度变化，自动更新内部 token_to_market 索引
 
 ## WebSocket 断线重连
 
@@ -283,9 +383,10 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 
 7 张表: markets, tokens, orderbook_snapshots, opportunities, trades, positions, pnl_log
 
-- 迁移: `migrations/001..005_*.sql` 通过 `sqlx::migrate!` 执行
+- **实盘模式不需要 PostgreSQL** — 仓位从 Polymarket Data API 加载
+- **回测模式仍需要 PostgreSQL** — 从 orderbook_snapshots 重放历史数据
+- 迁移: `migrations/001..006_*.sql` 通过 `sqlx::migrate!` 执行
 - `Repository` 已 derive `Clone`（PgPool 内部 Arc）
-- 快照录制: 后台任务每 60s 从 OrderBookCache 读取 → insert_orderbook_snapshot
 
 ## 回测系统
 
@@ -297,8 +398,8 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 
 ## 监控（pa-monitor）
 
-19 个 Prometheus 指标（`LazyLock` + 全局 `REGISTRY`）:
-- Counters: opportunities_detected, opportunities_rejected, executions, execution_errors, ws_reconnect, snapshots_recorded, event_filter_applied, mm_orders_placed, mm_orders_cancelled, exit_trades
+22 个 Prometheus 指标（`LazyLock` + 全局 `REGISTRY`）:
+- Counters: opportunities_detected, opportunities_rejected, executions, execution_errors, ws_reconnect, snapshots_recorded, event_filter_applied, mm_orders_placed, mm_orders_cancelled, exit_trades, depth_validation_scaled, depth_validation_rejected
 - Gauges: realized_pnl_usd, usdc_balance, active_ws_subscriptions, monitored_markets, circuit_breaker_active, total_exposure_usd, mm_active_markets
 - Histograms: execution_latency_seconds, scan_latency_seconds
 
@@ -347,14 +448,16 @@ Grafana 仪表盘: PnL, Exposure gauge, Circuit breaker, Market stats, Opportuni
 7. `crates/pa-backtest/src/engine.rs` — build_strategies() 中添加
 8. 测试: 至少覆盖 detect 逻辑 + profitability 计算
 
-## 测试分布（180 个）
+## 测试分布（199 个）
 
 | Crate | 数量 | 覆盖 |
 |-------|------|------|
 | pa-backtest | 11 | DataLoader 解析, Report 构建/统计, Simulator 执行模拟 |
-| pa-strategy | 138 | ProfitCalculator(12), CrossMarket(4), Weather(79: binary parser, NegRisk outcome range parser(5), event title parser(2), date parser(8: full month, abbreviated, slash, none, bare month, by end of, today, tomorrow, may modal verb, in may), precipitation unit(3), CDF models(8: normal, lognormal, weibull, dispatcher, degenerate temperature), CDF zero-mean(4: lognormal mean=0, lognormal sigma=0, weibull mean=0, snow zero forecast), celsius conversion(3: detection, conversion, probability correction), forecast error sigma(2), dynamic sigma(5), model spread/ensemble(4), forecast change detection(6), probability model(3), position sizing(3), cache eviction, NegRisk NO-side, edge detection, exit change detection, exit NegRisk range, exit celsius NegRisk), Convergence(10: filters(4), detection(3), time decay, position sizing, neg_risk skip), CryptoAlpha(24: question parser(6), volatility, GBM probability(4), asset mapping, NegRisk event title parser(3), NegRisk outcome range parser(3), GBM range probability(2), binary group(4: asset from title, reach/dip questions, group type)), YesNo(内含于profitability) |
-| pa-execution | 1 | Gas 估算 |
-| pa-market-data | 17 | OrderBook 排序(1), EventCalendar(12: Finnhub/CoinMarketCal parsing, static loading, window tests(3), impact multipliers(3), overlapping events, keyword matching, no-match different category), GammaFeed(4: binary group basic, excludes neg_risk, no title, multiple groups) |
+| pa-core | 10 | OrderBook depth(3), walk_book(4), liquidity_requirements(3) |
+| pa-execution | 11 | Gas 估算(1), cost precision(5), GCD(1), min_cost_adjusted_size(4: common, 3dp, validity, adjust-then-bump) |
+| pa-market-data | 17 | OrderBook 排序(1), EventCalendar(12), GammaFeed(4: binary group) |
+| pa-risk | 9 | PositionTracker(3: size_by_market, exposure_by_strategy, market_count), RiskManager(5), exit_bypass(1) |
+| pa-strategy | 141 | ProfitCalculator(14: +directional_sell), CrossMarket(4), Weather(79: binary parser, NegRisk, CDF, ensemble, dynamic sigma, forecast change, exit), Convergence(14: filters, detection, time_decay, sizing, neg_risk skip, exit), CryptoAlpha(26: question parser, GBM, NegRisk, binary group, exit), YesNo(4) |
 
 ## Polygon 合约地址
 
@@ -371,36 +474,39 @@ Chain ID: 137, ~2s blocks, ~$0.01 gas, ERC-1155 approval required for CTF ops.
 
 | 文件 | 职责 |
 |------|------|
-| `src/main.rs` | 入口: 配置→签名→DB→市场发现→Smart WS订阅→快照录制→执行层→策略引擎→做市任务→交易循环 |
+| `src/main.rs` | 入口: 配置→签名→市场发现→Smart WS订阅→执行层→策略引擎→做市→市场刷新→仓位同步→自动赎回 |
 | `src/bin/backtest.rs` | 回测CLI: clap参数→DB连接→BacktestEngine→Report输出 |
 | `crates/pa-core/src/types.rs` | 所有领域类型定义 |
 | `crates/pa-core/src/traits.rs` | 4 个核心 trait |
 | `crates/pa-core/src/config.rs` | Settings 分层加载 |
 | `crates/pa-core/src/error.rs` | Error 枚举 (10 变体) |
 | `crates/pa-market-data/src/service.rs` | MarketDataService (Gamma + WS + Cache 组合) |
-| `crates/pa-market-data/src/ws_feed.rs` | WebSocket 订单簿流 + 断线重连 |
+| `crates/pa-market-data/src/ws_feed.rs` | WebSocket 订单簿流 + 断线重连 + resubscribe |
 | `crates/pa-market-data/src/cache.rs` | DashMap OrderBookCache |
-| `crates/pa-market-data/src/gamma_feed.rs` | Gamma API 市场发现 + NegRisk 分组 |
+| `crates/pa-market-data/src/gamma_feed.rs` | Gamma API 市场发现 + NegRisk 分组 + binary event 分组 |
+| `crates/pa-market-data/src/data_api.rs` | Polymarket Data API: PositionLoader (仓位加载) + find_redeemable |
 | `crates/pa-market-data/src/event_calendar.rs` | EventCalendarService: Finnhub/CoinMarketCal/Static providers + 关键词匹配 + 仓位乘数 |
-| `crates/pa-strategy/src/engine.rs` | StrategyEngine 事件驱动+定时扫描双模 |
+| `crates/pa-strategy/src/engine.rs` | StrategyEngine: 事件驱动+定时扫描+冷却+深度验证+预算追踪+止损安全网 |
 | `crates/pa-strategy/src/yes_no.rs` | YesNo 二元市场套利 |
 | `crates/pa-strategy/src/neg_risk.rs` | NegRisk 多结果套利 |
 | `crates/pa-strategy/src/cross_market.rs` | 跨市场套利 + detect_cross_market_pairs() |
-| `crates/pa-strategy/src/weather.rs` | Weather Alpha: 问题解析 + Open-Meteo客户端 + 概率模型 + Strategy impl |
-| `crates/pa-strategy/src/convergence.rs` | Resolution Convergence: 到期收敛策略 + detect_convergence() + Strategy impl |
-| `crates/pa-strategy/src/crypto_alpha.rs` | Crypto Alpha: 资产映射 + 问题解析 + Binance/CoinGecko客户端 + GBM模型 + Strategy impl |
-| `crates/pa-strategy/src/profitability.rs` | ProfitCalculator (4种策略利润计算，含directional_buy) |
+| `crates/pa-strategy/src/weather.rs` | Weather Alpha: 问题解析 + Open-Meteo客户端 + 概率模型 + 退出扫描 |
+| `crates/pa-strategy/src/convergence.rs` | Resolution Convergence: 到期收敛策略 + detect_convergence() + 退出扫描 |
+| `crates/pa-strategy/src/crypto_alpha.rs` | Crypto Alpha: 资产映射 + 问题解析 + Binance/CoinGecko客户端 + GBM模型 + 退出扫描 |
+| `crates/pa-strategy/src/profitability.rs` | ProfitCalculator (5种利润计算: buy_and_merge, split_and_sell, neg_risk, directional_buy, directional_sell) |
 | `crates/pa-execution/src/orchestrator.rs` | HybridOrchestrator (CLOB + CTF 路由) |
-| `crates/pa-execution/src/clob_executor.rs` | CLOB API FOK 下单 |
+| `crates/pa-execution/src/clob_executor.rs` | CLOB API: FOK/GTC 下单 + cost precision + min_cost bump + balance 查询 |
 | `crates/pa-execution/src/ctf_executor.rs` | 链上 CTF split/merge/NegRisk |
-| `crates/pa-risk/src/manager.rs` | RiskManagerImpl (线程安全) |
+| `crates/pa-execution/src/safe_redeemer.rs` | GnosisSafe 代理钱包赎回 (CTF + NegRisk) |
+| `crates/pa-risk/src/manager.rs` | RiskManagerImpl (线程安全，3层风控) |
+| `crates/pa-risk/src/position.rs` | PositionTracker: DashMap 并发仓位跟踪 + 按策略/市场查询 |
 | `crates/pa-storage/src/repository.rs` | PostgreSQL CRUD (Clone, sqlx) |
 | `crates/pa-storage/src/models.rs` | DB row 模型 |
 | `crates/pa-backtest/src/engine.rs` | BacktestEngine 回放循环 |
 | `crates/pa-backtest/src/simulator.rs` | TradeSimulator (滑点+手续费模拟) |
 | `crates/pa-backtest/src/report.rs` | BacktestResult + Display |
 | `crates/pa-backtest/src/data_loader.rs` | DB → SnapshotFrame 加载 |
-| `crates/pa-monitor/src/metrics.rs` | 19 个 Prometheus 指标 |
+| `crates/pa-monitor/src/metrics.rs` | 22 个 Prometheus 指标 |
 | `crates/pa-monitor/src/health.rs` | Health/Ready/Metrics HTTP 服务 |
 | `config/default.toml` | 默认配置 |
 | `docker/docker-compose.yml` | 全栈 Docker 部署 |

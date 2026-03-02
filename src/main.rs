@@ -1296,6 +1296,22 @@ async fn main() -> Result<()> {
                                     "Position sync: discovered missing position"
                                 );
                                 added += 1;
+                            } else if pos.size > Decimal::ZERO && existing_size > Decimal::ZERO && pos.size != existing_size {
+                                // Size changed (partial fill, external trade, etc.)
+                                let strategy_type = infer_strategy_type(
+                                    pos.token_id, &markets_snapshot, &sync_neg_risk,
+                                );
+                                sync_rm.sync_position(
+                                    pos.token_id, pos.size, pos.avg_price,
+                                    strategy_type, Some(pos.condition_id),
+                                );
+                                tracing::info!(
+                                    token_id = %pos.token_id,
+                                    prev_size = %existing_size,
+                                    new_size = %pos.size,
+                                    "Position sync: size changed"
+                                );
+                                updated += 1;
                             } else if pos.size == Decimal::ZERO && existing_size > Decimal::ZERO {
                                 // Position closed externally (redeemed, etc.) — zero it out
                                 sync_rm.sync_position(
@@ -1600,9 +1616,18 @@ fn infer_strategy_type(
             return Some(StrategyType::CryptoAlpha);
         }
 
-        // Convergence: non-NegRisk market with end_date
-        if !market.neg_risk && market.end_date.is_some() {
-            return Some(StrategyType::ResolutionConvergence);
+        // Convergence: non-NegRisk binary market with end_date AND
+        // outcome price near 0 or 1 (convergence only buys tokens priced > 0.90).
+        // Without the price check, ALL markets with end_date get tagged as convergence,
+        // preventing proper exit scanning by the real owning strategy.
+        if !market.neg_risk && market.end_date.is_some() && market.tokens.len() == 2 {
+            let looks_converging = market.outcome_prices.as_ref()
+                .and_then(|p| p.first())
+                .map(|&yp| yp >= dec!(0.90) || yp <= dec!(0.10))
+                .unwrap_or(false);
+            if looks_converging {
+                return Some(StrategyType::ResolutionConvergence);
+            }
         }
     }
 
