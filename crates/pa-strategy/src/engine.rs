@@ -378,6 +378,30 @@ impl StrategyEngine {
             return;
         }
 
+        // Log position diagnostics (debug level; enable with RUST_LOG=pa_strategy::engine=debug)
+        for pos in &positions {
+            if pos.size <= Decimal::ZERO {
+                continue;
+            }
+            let bid = (self.get_orderbook)(pos.token_id)
+                .and_then(|b| b.best_bid().map(|l| l.price));
+            let ask = (self.get_orderbook)(pos.token_id)
+                .and_then(|b| b.best_ask().map(|l| l.price));
+            let stop_threshold = pos.avg_cost * dec!(0.50);
+            let triggered = bid.map(|b| b < stop_threshold).unwrap_or(false);
+            tracing::debug!(
+                token_id = %pos.token_id,
+                size = %pos.size,
+                avg_cost = %pos.avg_cost,
+                best_bid = ?bid,
+                best_ask = ?ask,
+                stop_threshold = %stop_threshold,
+                triggered = triggered,
+                strategy = ?pos.strategy_type,
+                "[STOP-LOSS] Position scan"
+            );
+        }
+
         // Build lookups from markets
         let token_to_market: HashMap<U256, &MarketInfo> = markets
             .iter()
@@ -416,21 +440,36 @@ impl StrategyEngine {
                 continue;
             }
 
-            // Safety check 0: If best_ask >= avg_cost, the market still values this token
-            // above our cost basis. The low best_bid is just thin buy-side liquidity
-            // (common in illiquid weather/niche markets), NOT a real loss.
-            // e.g. best_bid=$0.01 (bot), best_ask=$0.77 (real price), avg_cost=$0.63 → profitable!
+            // Safety check 0: If best_ask >= avg_cost AND the spread is reasonable,
+            // the market still values this token above our cost basis. The low best_bid
+            // is just thin buy-side liquidity (common in illiquid weather/niche markets).
+            // e.g. best_bid=$0.01 (bot), best_ask=$0.77 (real price), avg_cost=$0.63
+            //
+            // BUT: only trust ask when bid is at least 10% of ask. If the spread is
+            // extremely wide (bid < 10% of ask), the ask is likely stale while the bid
+            // reflects real demand. Cross-validation (Safety check 2) provides a second
+            // layer of protection for genuinely profitable wide-spread positions.
             let best_ask = book.best_ask().map(|a| a.price);
             if let Some(ask) = best_ask {
-                if ask >= pos.avg_cost {
+                if ask >= pos.avg_cost && best_bid >= ask * dec!(0.10) {
                     tracing::debug!(
                         token_id = %pos.token_id,
                         best_bid = %best_bid,
                         best_ask = %ask,
                         avg_cost = %pos.avg_cost,
-                        "[STOP-LOSS] Skipping — best_ask >= avg_cost, thin buy-side but not a loss"
+                        "[STOP-LOSS] Skipping — best_ask >= avg_cost with reasonable spread"
                     );
                     continue;
+                }
+                if ask >= pos.avg_cost && best_bid < ask * dec!(0.10) {
+                    tracing::info!(
+                        token_id = %pos.token_id,
+                        best_bid = %best_bid,
+                        best_ask = %ask,
+                        avg_cost = %pos.avg_cost,
+                        "[STOP-LOSS] Wide spread — ask >= avg_cost but bid < 10% of ask, not trusting ask"
+                    );
+                    // Fall through to further safety checks
                 }
             }
 
@@ -496,7 +535,7 @@ impl StrategyEngine {
                             let condition_id = pos.condition_id.unwrap_or(m.condition_id);
                             let st = pos.strategy_type.unwrap_or(StrategyType::CryptoAlpha);
                             if !self.is_cooled_down(condition_id, st) {
-                                tracing::debug!(
+                                tracing::info!(
                                     token_id = %pos.token_id,
                                     our_bid = %best_bid,
                                     other_bid = %other_bid,
