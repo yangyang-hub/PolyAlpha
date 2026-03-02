@@ -184,20 +184,8 @@ impl ClobExecutor {
         if size <= Decimal::ZERO {
             anyhow::bail!("Order size too small after rounding to lot size");
         }
-        let cost = price * size;
-        if cost < Decimal::ONE {
-            tracing::warn!(
-                token_id = %token_id, price = %price, size = %size, cost = %cost,
-                "Order cost below $1.00 minimum, skipping"
-            );
-            return Ok(OrderResult {
-                order_id: String::new(),
-                filled_size: Decimal::ZERO,
-                avg_price: price,
-                status: OrderFillStatus::Rejected,
-                tx_hashes: vec![],
-            });
-        }
+        // No $1.00 minimum for sell orders — exiting positions should always be allowed.
+        // The CLOB may still reject very small sells, but we let it decide.
 
         tracing::info!(
             token_id = %token_id,
@@ -296,20 +284,7 @@ impl ClobExecutor {
         if size <= Decimal::ZERO {
             anyhow::bail!("Order size too small after rounding to lot size");
         }
-        let cost = price * size;
-        if cost < Decimal::ONE {
-            tracing::warn!(
-                token_id = %token_id, price = %price, size = %size, cost = %cost,
-                "Order cost below $1.00 minimum, skipping"
-            );
-            return Ok(OrderResult {
-                order_id: String::new(),
-                filled_size: Decimal::ZERO,
-                avg_price: price,
-                status: OrderFillStatus::Rejected,
-                tx_hashes: vec![],
-            });
-        }
+        // No $1.00 minimum for sell orders — exiting positions should always be allowed.
 
         tracing::info!(
             token_id = %token_id,

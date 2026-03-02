@@ -651,15 +651,15 @@ async fn main() -> Result<()> {
     // --- Initialize strategy engine ---
     let cache = market_data.cache().clone();
 
-    // Shared available capital closure: balance - total_exposure
-    // Cloned for each strategy that needs it.
-    let make_capital_fn = |bal: Arc<std::sync::RwLock<Decimal>>,
-                           rm: Arc<dyn pa_core::traits::RiskManager>|
+    // Shared available capital closure: returns current USDC balance.
+    // The balance already reflects money spent on existing positions —
+    // subtracting exposure would double-count (the cash is already gone).
+    // Per-strategy and per-market limits are enforced by RiskManager::check_pre_trade().
+    let make_capital_fn = |bal: Arc<std::sync::RwLock<Decimal>>|
      -> Box<dyn Fn() -> Decimal + Send + Sync> {
         Box::new(move || {
             let balance = *bal.read().unwrap();
-            let exposure = rm.total_exposure();
-            (balance - exposure).max(Decimal::ZERO)
+            balance.max(Decimal::ZERO)
         })
     };
 
@@ -683,7 +683,7 @@ async fn main() -> Result<()> {
                 let c = cache.clone();
                 move |token_id| c.get(&token_id)
             }),
-            make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
+            make_capital_fn(Arc::clone(&usdc_balance)),
         );
         strategies.push(Box::new(yes_no_strategy));
         tracing::info!("YesNo arbitrage strategy enabled");
@@ -701,7 +701,7 @@ async fn main() -> Result<()> {
                 let c = cache.clone();
                 move |token_id| c.get(&token_id)
             }),
-            make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
+            make_capital_fn(Arc::clone(&usdc_balance)),
         );
         strategies.push(Box::new(neg_risk_strategy));
         tracing::info!("NegRisk arbitrage strategy enabled");
@@ -719,7 +719,7 @@ async fn main() -> Result<()> {
                 let c = cache.clone();
                 move |token_id| c.get(&token_id)
             }),
-            make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
+            make_capital_fn(Arc::clone(&usdc_balance)),
         );
         strategies.push(Box::new(cross_market_strategy));
         tracing::info!("CrossMarket arbitrage strategy enabled");
@@ -734,7 +734,7 @@ async fn main() -> Result<()> {
             settings.weather.clone(),
             dec!(0.00), // no gas for CLOB-only
             Box::new(move |token_id| weather_cache.get(&token_id)),
-            make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
+            make_capital_fn(Arc::clone(&usdc_balance)),
             Box::new(move |tid: alloy::primitives::U256| rm_pos.get_position_size(&tid)),
             neg_risk_events.clone(),
             Box::new(move || rm_held.positions_by_strategy(pa_core::types::StrategyType::Weather)),
@@ -753,7 +753,7 @@ async fn main() -> Result<()> {
             settings.convergence.clone(),
             dec!(0.00), // no gas for CLOB-only
             Box::new(move |token_id| conv_cache.get(&token_id)),
-            make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
+            make_capital_fn(Arc::clone(&usdc_balance)),
             Box::new(move |tid: alloy::primitives::U256| rm_pos_conv.get_position_size(&tid)),
             Box::new(move || rm_held_conv.positions_by_strategy(pa_core::types::StrategyType::ResolutionConvergence)),
             make_balance_fn(Arc::clone(&usdc_balance)),
@@ -771,7 +771,7 @@ async fn main() -> Result<()> {
             settings.crypto_alpha.clone(),
             dec!(0.00), // no gas for CLOB-only
             Box::new(move |token_id| crypto_cache.get(&token_id)),
-            make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
+            make_capital_fn(Arc::clone(&usdc_balance)),
             Box::new(move |tid: alloy::primitives::U256| rm_pos_crypto.get_position_size(&tid)),
             neg_risk_events.clone(),
             binary_event_groups.clone(),
@@ -801,7 +801,7 @@ async fn main() -> Result<()> {
         settings.strategy.scan_interval_ms,
         event_calendar,
         Box::new(move |token_id| engine_cache.get(&token_id)),
-        make_capital_fn(Arc::clone(&usdc_balance), Arc::clone(&risk_manager)),
+        make_capital_fn(Arc::clone(&usdc_balance)),
         Box::new(move || {
             engine_rm_all.snapshot_positions()
                 .into_iter()

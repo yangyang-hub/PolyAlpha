@@ -356,17 +356,23 @@ impl StrategyEngine {
     ///
     /// This runs AFTER strategy-specific exit scanning. It catches positions that
     /// strategies can't handle (untagged, unparseable, missing from market list).
-    /// Uses a simple heuristic: if best_bid < avg_cost × 0.50, force exit.
+    ///
+    /// Safety checks to avoid selling winning positions at low prices:
+    /// 1. Skip expired markets (let auto-redeem handle them — winning tokens redeem at $1.00)
+    /// 2. Cross-validate with counter-token: if the OTHER side also has low bids,
+    ///    the market is likely stale/illiquid — skip to avoid acting on bad data.
+    ///    If the OTHER side has high bids (>0.80), our side is genuinely losing.
+    /// 3. Skip positions too small to sell on CLOB.
     async fn scan_stop_loss(&self, markets: &[MarketInfo]) {
         let positions = (self.get_all_positions)();
         if positions.is_empty() {
             return;
         }
 
-        // Build token_id → condition_id lookup from markets for positions without condition_id
-        let token_to_condition: HashMap<U256, B256> = markets
+        // Build lookups from markets
+        let token_to_market: HashMap<U256, &MarketInfo> = markets
             .iter()
-            .flat_map(|m| m.tokens.iter().map(move |t| (t.token_id, m.condition_id)))
+            .flat_map(|m| m.tokens.iter().map(move |t| (t.token_id, m)))
             .collect();
 
         for pos in &positions {
@@ -389,9 +395,79 @@ impl StrategyEngine {
                 continue;
             }
 
+            // Safety check 0: If best_ask >= avg_cost, the market still values this token
+            // above our cost basis. The low best_bid is just thin buy-side liquidity
+            // (common in illiquid weather/niche markets), NOT a real loss.
+            // e.g. best_bid=$0.01 (bot), best_ask=$0.77 (real price), avg_cost=$0.63 → profitable!
+            let best_ask = book.best_ask().map(|a| a.price);
+            if let Some(ask) = best_ask {
+                if ask >= pos.avg_cost {
+                    continue; // Market values token above cost — not a loss
+                }
+            }
+
+            // Look up the market for this token
+            let market = token_to_market.get(&pos.token_id).copied();
+
+            // Safety check 1: Skip expired markets — auto-redeem handles them.
+            // Winning tokens in resolved markets have low bids because nobody trades them,
+            // but they redeem at $1.00. Selling at $0.01 would be catastrophic.
+            if let Some(m) = market {
+                if let Some(end_date) = m.end_date {
+                    if end_date <= chrono::Utc::now() {
+                        let condition_id = pos.condition_id.unwrap_or(m.condition_id);
+                        let st = pos.strategy_type.unwrap_or(StrategyType::CryptoAlpha);
+                        if !self.is_cooled_down(condition_id, st) {
+                            tracing::info!(
+                                token_id = %pos.token_id,
+                                end_date = %end_date,
+                                best_bid = %best_bid,
+                                "[STOP-LOSS] Skipping expired market — auto-redeem will handle"
+                            );
+                            self.set_cooldown(condition_id, st, 3600); // 1 hour
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            // Safety check 2: Cross-validate with counter-token.
+            // In a binary market (YES/NO), if our token has low bids, check the OTHER token.
+            // If the other side has high bids (>0.80), our side is genuinely losing.
+            // If the other side ALSO has low bids, data is likely stale — don't act.
+            if let Some(m) = market {
+                if m.tokens.len() == 2 {
+                    let other_token = m.tokens.iter()
+                        .find(|t| t.token_id != pos.token_id)
+                        .map(|t| t.token_id);
+                    if let Some(other_id) = other_token {
+                        let other_bid = (self.get_orderbook)(other_id)
+                            .and_then(|b| b.best_bid().map(|l| l.price))
+                            .unwrap_or(Decimal::ZERO);
+                        // If the other side's best_bid < 0.50, market data is suspicious.
+                        // In a proper binary market, YES + NO should sum close to $1.00.
+                        // If both sides have low bids, the orderbook is stale/empty.
+                        if other_bid < dec!(0.50) {
+                            let condition_id = pos.condition_id.unwrap_or(m.condition_id);
+                            let st = pos.strategy_type.unwrap_or(StrategyType::CryptoAlpha);
+                            if !self.is_cooled_down(condition_id, st) {
+                                tracing::debug!(
+                                    token_id = %pos.token_id,
+                                    our_bid = %best_bid,
+                                    other_bid = %other_bid,
+                                    "[STOP-LOSS] Both sides have low bids — data likely stale, skipping"
+                                );
+                                self.set_cooldown(condition_id, st, 600); // 10 min
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+
             // Determine condition_id
             let condition_id = pos.condition_id
-                .or_else(|| token_to_condition.get(&pos.token_id).copied())
+                .or_else(|| market.map(|m| m.condition_id))
                 .unwrap_or(B256::ZERO);
 
             // Use a synthetic strategy_type for cooldown tracking
@@ -399,6 +475,20 @@ impl StrategyEngine {
 
             // Check cooldown to avoid retry flooding
             if self.is_cooled_down(condition_id, st) {
+                continue;
+            }
+
+            // Skip positions that are too small to sell on CLOB.
+            let sell_value = best_bid * pos.size;
+            if sell_value < dec!(0.05) {
+                tracing::info!(
+                    token_id = %pos.token_id,
+                    size = %pos.size,
+                    best_bid = %best_bid,
+                    sell_value = %sell_value,
+                    "[STOP-LOSS] Position too small to sell on CLOB — waiting for market resolution"
+                );
+                self.set_cooldown(condition_id, st, 3600); // 1 hour
                 continue;
             }
 
@@ -432,6 +522,8 @@ impl StrategyEngine {
 
             pa_monitor::metrics::EXIT_TRADES.inc();
             self.process_opportunity(&opp).await;
+            // Long cooldown for stop-loss to avoid spam (5 minutes)
+            self.set_cooldown(condition_id, st, 300);
         }
     }
 
