@@ -391,11 +391,23 @@ impl StrategyEngine {
 
             let book = match (self.get_orderbook)(pos.token_id) {
                 Some(b) => b,
-                None => continue,
+                None => {
+                    tracing::debug!(
+                        token_id = %pos.token_id,
+                        "[STOP-LOSS] No orderbook for position, skipping"
+                    );
+                    continue;
+                }
             };
             let best_bid = match book.best_bid() {
                 Some(b) => b.price,
-                None => continue,
+                None => {
+                    tracing::debug!(
+                        token_id = %pos.token_id,
+                        "[STOP-LOSS] No bids in orderbook, skipping"
+                    );
+                    continue;
+                }
             };
 
             // Stop-loss: exit when best_bid < 50% of avg_cost (lost >= 50%)
@@ -411,7 +423,14 @@ impl StrategyEngine {
             let best_ask = book.best_ask().map(|a| a.price);
             if let Some(ask) = best_ask {
                 if ask >= pos.avg_cost {
-                    continue; // Market values token above cost — not a loss
+                    tracing::debug!(
+                        token_id = %pos.token_id,
+                        best_bid = %best_bid,
+                        best_ask = %ask,
+                        avg_cost = %pos.avg_cost,
+                        "[STOP-LOSS] Skipping — best_ask >= avg_cost, thin buy-side but not a loss"
+                    );
+                    continue;
                 }
             }
 
@@ -421,21 +440,38 @@ impl StrategyEngine {
             // Safety check 1: Skip expired markets — auto-redeem handles them.
             // Winning tokens in resolved markets have low bids because nobody trades them,
             // but they redeem at $1.00. Selling at $0.01 would be catastrophic.
+            //
+            // EXCEPTION: If best_bid is very low (< $0.10), the token is likely the LOSING
+            // side. Auto-redeem won't help (losing tokens redeem at $0.00). In this case,
+            // selling at the current bid salvages some value.
             if let Some(m) = market {
                 if let Some(end_date) = m.end_date {
                     if end_date <= chrono::Utc::now() {
-                        let condition_id = pos.condition_id.unwrap_or(m.condition_id);
-                        let st = pos.strategy_type.unwrap_or(StrategyType::CryptoAlpha);
-                        if !self.is_cooled_down(condition_id, st) {
-                            tracing::info!(
-                                token_id = %pos.token_id,
-                                end_date = %end_date,
-                                best_bid = %best_bid,
-                                "[STOP-LOSS] Skipping expired market — auto-redeem will handle"
-                            );
-                            self.set_cooldown(condition_id, st, 3600); // 1 hour
+                        // If price is very low, this is likely a losing position.
+                        // Auto-redeem won't help — try to sell to salvage whatever we can.
+                        if best_bid >= dec!(0.10) {
+                            let condition_id = pos.condition_id.unwrap_or(m.condition_id);
+                            let st = pos.strategy_type.unwrap_or(StrategyType::CryptoAlpha);
+                            if !self.is_cooled_down(condition_id, st) {
+                                tracing::info!(
+                                    token_id = %pos.token_id,
+                                    end_date = %end_date,
+                                    best_bid = %best_bid,
+                                    "[STOP-LOSS] Skipping expired market (bid >= $0.10) — auto-redeem will handle"
+                                );
+                                self.set_cooldown(condition_id, st, 3600); // 1 hour
+                            }
+                            continue;
                         }
-                        continue;
+                        // Low-priced expired position — likely losing side, try to sell
+                        tracing::info!(
+                            token_id = %pos.token_id,
+                            end_date = %end_date,
+                            best_bid = %best_bid,
+                            size = %pos.size,
+                            "[STOP-LOSS] Expired market with low price — likely losing side, attempting sell"
+                        );
+                        // Fall through to sell logic below
                     }
                 }
             }
