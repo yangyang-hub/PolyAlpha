@@ -187,7 +187,7 @@ impl WebSocketFeed {
                                     let token_id = book_update.asset_id;
                                     let timestamp = timestamp_ms_to_datetime(book_update.timestamp);
 
-                                    let bids: Vec<PriceLevel> = book_update
+                                    let mut bids: Vec<PriceLevel> = book_update
                                         .bids
                                         .into_iter()
                                         .map(|level| PriceLevel {
@@ -196,7 +196,7 @@ impl WebSocketFeed {
                                         })
                                         .collect();
 
-                                    let asks: Vec<PriceLevel> = book_update
+                                    let mut asks: Vec<PriceLevel> = book_update
                                         .asks
                                         .into_iter()
                                         .map(|level| PriceLevel {
@@ -204,6 +204,14 @@ impl WebSocketFeed {
                                             size: level.size,
                                         })
                                         .collect();
+
+                                    // Ensure correct sort order:
+                                    // bids descending (best/highest first),
+                                    // asks ascending (best/lowest first).
+                                    // The WS/CLOB API may return levels in
+                                    // arbitrary order.
+                                    bids.sort_by(|a, b| b.price.cmp(&a.price));
+                                    asks.sort_by(|a, b| a.price.cmp(&b.price));
 
                                     let orderbook = OrderBook {
                                         token_id,

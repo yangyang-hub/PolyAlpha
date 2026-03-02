@@ -413,6 +413,14 @@ impl StrategyEngine {
                 continue;
             }
 
+            // Early cooldown check: skip all processing for cooled-down positions.
+            // This prevents redundant orderbook lookups, safety checks, and log spam.
+            let early_condition_id = pos.condition_id.unwrap_or(B256::ZERO);
+            let early_st = pos.strategy_type.unwrap_or(StrategyType::CryptoAlpha);
+            if self.is_cooled_down(early_condition_id, early_st) {
+                continue;
+            }
+
             let book = match (self.get_orderbook)(pos.token_id) {
                 Some(b) => b,
                 None => {
@@ -462,7 +470,7 @@ impl StrategyEngine {
                     continue;
                 }
                 if ask >= pos.avg_cost && best_bid < ask * dec!(0.10) {
-                    tracing::info!(
+                    tracing::debug!(
                         token_id = %pos.token_id,
                         best_bid = %best_bid,
                         best_ask = %ask,
@@ -534,15 +542,17 @@ impl StrategyEngine {
                         if other_bid < dec!(0.50) {
                             let condition_id = pos.condition_id.unwrap_or(m.condition_id);
                             let st = pos.strategy_type.unwrap_or(StrategyType::CryptoAlpha);
-                            if !self.is_cooled_down(condition_id, st) {
-                                tracing::info!(
-                                    token_id = %pos.token_id,
-                                    our_bid = %best_bid,
-                                    other_bid = %other_bid,
-                                    "[STOP-LOSS] Both sides have low bids — data likely stale, skipping"
-                                );
-                                self.set_cooldown(condition_id, st, 600); // 10 min
-                            }
+                            let sell_value = best_bid * pos.size;
+                            tracing::info!(
+                                token_id = %pos.token_id,
+                                our_bid = %best_bid,
+                                other_bid = %other_bid,
+                                avg_cost = %pos.avg_cost,
+                                size = %pos.size,
+                                sell_value = %sell_value,
+                                "[STOP-LOSS] Both sides low bids — market illiquid/stale, cannot sell (will retry in 1h)"
+                            );
+                            self.set_cooldown(condition_id, st, 3600); // 1 hour
                             continue;
                         }
                     }
