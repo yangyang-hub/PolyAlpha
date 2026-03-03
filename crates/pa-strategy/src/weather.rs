@@ -2029,13 +2029,12 @@ impl WeatherAlphaStrategy {
 
             // Capital efficiency exit: bid >= threshold
             if best_bid >= self.config.capital_efficiency_threshold {
-                tracing::info!(
+                tracing::debug!(
                     token_id = %token_id,
                     best_bid = %best_bid,
                     "[EXIT] Capital efficiency — weather"
                 );
                 exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
-                pa_monitor::metrics::EXIT_TRADES.inc();
                 continue;
             }
 
@@ -2180,14 +2179,13 @@ impl WeatherAlphaStrategy {
             let effective_prob = if is_yes { model_prob_dec } else { Decimal::ONE - model_prob_dec };
 
             if effective_prob < best_bid - exit_buffer {
-                tracing::info!(
+                tracing::debug!(
                     token_id = %token_id,
                     effective_prob = %effective_prob,
                     best_bid = %best_bid,
                     "[EXIT] Model reversal — weather"
                 );
                 exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
-                pa_monitor::metrics::EXIT_TRADES.inc();
             } else {
                 tracing::debug!(
                     token_id = %token_id,

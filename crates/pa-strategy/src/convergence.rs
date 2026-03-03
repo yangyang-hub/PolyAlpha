@@ -240,14 +240,13 @@ impl ResolutionConvergenceStrategy {
 
             // Capital efficiency exit: bid >= threshold
             if best_bid >= self.config.capital_efficiency_threshold {
-                tracing::info!(
+                tracing::debug!(
                     token_id = %token_id,
                     best_bid = %best_bid,
                     threshold = %self.config.capital_efficiency_threshold,
                     "[EXIT] Capital efficiency — convergence"
                 );
                 exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
-                pa_monitor::metrics::EXIT_TRADES.inc();
                 continue;
             }
 
@@ -293,7 +292,7 @@ impl ResolutionConvergenceStrategy {
             };
 
             if model_prob < best_bid - exit_buffer {
-                tracing::info!(
+                tracing::debug!(
                     token_id = %token_id,
                     model_prob = %model_prob,
                     best_bid = %best_bid,
@@ -301,7 +300,6 @@ impl ResolutionConvergenceStrategy {
                     "[EXIT] Model reversal — convergence"
                 );
                 exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
-                pa_monitor::metrics::EXIT_TRADES.inc();
             } else {
                 tracing::debug!(
                     token_id = %token_id,

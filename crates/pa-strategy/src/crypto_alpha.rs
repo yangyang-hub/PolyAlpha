@@ -1345,13 +1345,12 @@ impl CryptoAlphaStrategy {
 
             // Capital efficiency exit: bid >= threshold
             if best_bid >= self.config.capital_efficiency_threshold {
-                tracing::info!(
+                tracing::debug!(
                     token_id = %token_id,
                     best_bid = %best_bid,
                     "[EXIT] Capital efficiency — crypto"
                 );
                 exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
-                pa_monitor::metrics::EXIT_TRADES.inc();
                 continue;
             }
 
@@ -1415,14 +1414,13 @@ impl CryptoAlphaStrategy {
             };
 
             if model_prob_dec < best_bid - exit_buffer {
-                tracing::info!(
+                tracing::debug!(
                     token_id = %token_id,
                     model_prob = %model_prob_dec,
                     best_bid = %best_bid,
                     "[EXIT] Model reversal — crypto"
                 );
                 exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
-                pa_monitor::metrics::EXIT_TRADES.inc();
             } else {
                 tracing::debug!(
                     token_id = %token_id,

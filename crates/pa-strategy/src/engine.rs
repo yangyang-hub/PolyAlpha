@@ -319,6 +319,7 @@ impl StrategyEngine {
         }
 
         // Execute
+        let is_exit = opp.execution_plan.is_exit();
         let timer = pa_monitor::metrics::EXECUTION_LATENCY.start_timer();
         match self.executor.execute(opp).await {
             Ok(result) => {
@@ -327,9 +328,13 @@ impl StrategyEngine {
                     id = %opp.id,
                     status = ?result.status,
                     profit = %result.realized_profit,
+                    is_exit,
                     "Execution complete"
                 );
                 pa_monitor::metrics::EXECUTIONS_TOTAL.inc();
+                if is_exit {
+                    pa_monitor::metrics::EXIT_TRADES.inc();
+                }
                 // Update realized PnL gauge
                 use rust_decimal::prelude::ToPrimitive;
                 if let Some(pnl) = result.realized_profit.to_f64() {
