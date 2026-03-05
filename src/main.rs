@@ -1431,11 +1431,19 @@ async fn main() -> Result<()> {
                 .context(format!("Failed to connect RPC for redeem (account {})", acct_name))?;
             let safe_redeemer = SafeRedeemer::new(redeem_provider, redeem_signer, ctx.proxy_addr);
 
-            match safe_redeemer.verify_ownership().await {
-                Ok(true) => tracing::info!(account = %acct_name, safe = %ctx.proxy_addr, "SafeRedeemer: EOA is Safe owner"),
-                Ok(false) => tracing::error!(account = %acct_name, safe = %ctx.proxy_addr, "SafeRedeemer: EOA is NOT a Safe owner"),
-                Err(e) => tracing::warn!(account = %acct_name, error = %e, "SafeRedeemer: could not verify ownership"),
-            }
+            let _is_owner = match safe_redeemer.verify_ownership().await {
+                Ok(true) => {
+                    tracing::info!(account = %acct_name, safe = %ctx.proxy_addr, "SafeRedeemer: EOA is Safe owner");
+                }
+                Ok(false) => {
+                    tracing::warn!(account = %acct_name, safe = %ctx.proxy_addr, "SafeRedeemer: EOA is NOT a Safe owner, skipping auto-redeem");
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(account = %acct_name, error = %e, "SafeRedeemer: could not verify ownership, skipping auto-redeem");
+                    continue;
+                }
+            };
 
             let redeem_proxy = ctx.proxy_addr;
             let redeem_cancel = cancel.clone();
