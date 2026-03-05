@@ -14,7 +14,7 @@ ws_host = "wss://ws-subscriptions-clob.polymarket.com"
 signature_type = 2
 # Polymarket proxy wallet address for Data API position loading.
 # Leave empty to fallback to the EOA signer address.
-proxy_wallet = "0x92D8cF3B70178f8C374AeE25f311c0B4FE398dC5"
+proxy_wallet = "xxxx"
 
 [gamma]
 host = "https://gamma-api.polymarket.com"
@@ -124,3 +124,23 @@ verify_scoring = false
 quote_yes = true
 quote_no = true
 fill_check_secs = 10
+
+# ──── Multi-Account Configuration ────
+# Define named accounts to run different strategies with different wallets.
+# If no [[accounts]] sections are defined, a single "default" account is created
+# from POLYMARKET_PRIVATE_KEY env var + clob.signature_type + clob.proxy_wallet,
+# running all enabled strategies.
+#
+# [[accounts]]
+# name = "main"
+# private_key_env = "POLYMARKET_PRIVATE_KEY"
+# signature_type = 2
+# proxy_wallet = "0x..."
+# strategies = ["weather", "crypto"]
+#
+# [[accounts]]
+# name = "lr_bot"
+# private_key_env = "POLYMARKET_PRIVATE_KEY_2"
+# signature_type = 2
+# proxy_wallet = "0x..."
+# strategies = ["liquidity_rewards"]

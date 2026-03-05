@@ -23,6 +23,10 @@ pub struct Settings {
     pub event_calendar: EventCalendarConfig,
     #[serde(default)]
     pub liquidity_rewards: LiquidityRewardsConfig,
+    /// Named trading accounts. When empty, a single "default" account is created
+    /// from `POLYMARKET_PRIVATE_KEY` env var + `clob.signature_type` + `clob.proxy_wallet`.
+    #[serde(default)]
+    pub accounts: Vec<AccountConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -433,6 +437,34 @@ pub struct StaticEventConfig {
     pub keywords: Vec<String>,
 }
 
+/// Named trading account configuration.
+///
+/// Each account uses a separate private key, proxy wallet, and can run
+/// different strategies independently. Accounts share market data but have
+/// isolated execution, risk management, and position tracking.
+#[derive(Debug, Deserialize, Clone)]
+pub struct AccountConfig {
+    /// Unique name for this account (used as reference in logs/metrics).
+    pub name: String,
+    /// Name of the environment variable holding the private key hex string.
+    #[serde(default = "default_private_key_env")]
+    pub private_key_env: String,
+    /// CLOB signature type: 0=EOA, 1=Proxy, 2=GnosisSafe.
+    #[serde(default)]
+    pub signature_type: u8,
+    /// Polymarket proxy wallet address. Leave empty to use the EOA address.
+    #[serde(default)]
+    pub proxy_wallet: String,
+    /// List of strategies this account runs (e.g., ["weather", "crypto", "liquidity_rewards"]).
+    /// Must match strategy names in `strategy.enabled` or "liquidity_rewards" for LR.
+    #[serde(default)]
+    pub strategies: Vec<String>,
+}
+
+fn default_private_key_env() -> String {
+    "POLYMARKET_PRIVATE_KEY".to_string()
+}
+
 /// Configuration for the Liquidity Rewards background task.
 ///
 /// Places GTC limit orders within the rewards spread band on both YES and NO sides
@@ -551,5 +583,92 @@ impl Settings {
             .build()?;
 
         Ok(settings.try_deserialize()?)
+    }
+
+    /// Resolve the effective list of accounts.
+    ///
+    /// Priority (highest to lowest):
+    /// 1. Environment variables `PA_ACCOUNT_<N>_*` (e.g. `PA_ACCOUNT_1_NAME=main`)
+    /// 2. TOML `[[accounts]]` sections
+    /// 3. Legacy fallback: single "default" account from `POLYMARKET_PRIVATE_KEY`
+    ///
+    /// Environment variable format:
+    /// ```text
+    /// PA_ACCOUNT_1_NAME=main
+    /// PA_ACCOUNT_1_PRIVATE_KEY_ENV=POLYMARKET_PRIVATE_KEY
+    /// PA_ACCOUNT_1_SIGNATURE_TYPE=2
+    /// PA_ACCOUNT_1_PROXY_WALLET=0x...
+    /// PA_ACCOUNT_1_STRATEGIES=weather,crypto
+    ///
+    /// PA_ACCOUNT_2_NAME=lr_bot
+    /// PA_ACCOUNT_2_PRIVATE_KEY_ENV=POLYMARKET_PRIVATE_KEY_2
+    /// PA_ACCOUNT_2_SIGNATURE_TYPE=2
+    /// PA_ACCOUNT_2_PROXY_WALLET=0x...
+    /// PA_ACCOUNT_2_STRATEGIES=liquidity_rewards
+    /// ```
+    pub fn resolved_accounts(&self) -> Vec<AccountConfig> {
+        // Priority 1: environment variables PA_ACCOUNT_<N>_*
+        let env_accounts = Self::parse_env_accounts();
+        if !env_accounts.is_empty() {
+            return env_accounts;
+        }
+
+        // Priority 2: TOML [[accounts]] sections
+        if !self.accounts.is_empty() {
+            return self.accounts.clone();
+        }
+
+        // Priority 3: legacy single-account fallback
+        let mut strategies = self.strategy.enabled.clone();
+        if self.liquidity_rewards.enabled {
+            strategies.push("liquidity_rewards".to_string());
+        }
+
+        vec![AccountConfig {
+            name: "default".to_string(),
+            private_key_env: "POLYMARKET_PRIVATE_KEY".to_string(),
+            signature_type: self.clob.signature_type,
+            proxy_wallet: self.clob.proxy_wallet.clone(),
+            strategies,
+        }]
+    }
+
+    /// Parse accounts from `PA_ACCOUNT_<N>_*` environment variables.
+    ///
+    /// Scans for sequential indices starting at 1. Stops at the first missing
+    /// `PA_ACCOUNT_<N>_NAME`. Only `NAME` is required; other fields have defaults.
+    fn parse_env_accounts() -> Vec<AccountConfig> {
+        let mut accounts = Vec::new();
+        for idx in 1..=100 {
+            let prefix = format!("PA_ACCOUNT_{idx}_");
+            let name = match std::env::var(format!("{prefix}NAME")) {
+                Ok(n) if !n.is_empty() => n,
+                _ => break,
+            };
+
+            let private_key_env = std::env::var(format!("{prefix}PRIVATE_KEY_ENV"))
+                .unwrap_or_else(|_| "POLYMARKET_PRIVATE_KEY".to_string());
+            let signature_type = std::env::var(format!("{prefix}SIGNATURE_TYPE"))
+                .ok()
+                .and_then(|s| s.parse::<u8>().ok())
+                .unwrap_or(0);
+            let proxy_wallet = std::env::var(format!("{prefix}PROXY_WALLET"))
+                .unwrap_or_default();
+            let strategies = std::env::var(format!("{prefix}STRATEGIES"))
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            accounts.push(AccountConfig {
+                name,
+                private_key_env,
+                signature_type,
+                proxy_wallet,
+                strategies,
+            });
+        }
+        accounts
     }
 }

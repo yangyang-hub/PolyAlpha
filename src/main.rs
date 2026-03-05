@@ -45,6 +45,22 @@ struct LrOrderMeta {
     last_synced_matched: Decimal,
 }
 
+/// Per-account runtime context bundling all account-specific resources.
+struct AccountContext {
+    name: String,
+    trading_enabled: bool,
+    executor: Arc<dyn pa_core::traits::Executor>,
+    risk_manager_impl: Arc<RiskManagerImpl>,
+    risk_manager: Arc<dyn pa_core::traits::RiskManager>,
+    usdc_balance: Arc<std::sync::RwLock<Decimal>>,
+    proxy_addr: alloy::primitives::Address,
+    private_key: String,
+    signature_type: u8,
+    chain_id: u64,
+    /// Strategies assigned to this account (e.g., ["weather", "crypto", "liquidity_rewards"]).
+    strategies: Vec<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load .env file if present
@@ -68,14 +84,13 @@ async fn main() -> Result<()> {
         "Configuration loaded"
     );
 
-    // --- Load signer from env ---
-    let private_key = std::env::var("POLYMARKET_PRIVATE_KEY")
-        .context("POLYMARKET_PRIVATE_KEY environment variable not set")?;
-    let signer = PrivateKeySigner::from_str(&private_key)
-        .context("Invalid private key")?
-        .with_chain_id(Some(settings.chain.chain_id));
-    let wallet_address = signer.address();
-    tracing::info!(address = %wallet_address, "Wallet loaded");
+    // --- Resolve trading accounts ---
+    let resolved_accounts = settings.resolved_accounts();
+    tracing::info!(
+        count = resolved_accounts.len(),
+        names = ?resolved_accounts.iter().map(|a| &a.name).collect::<Vec<_>>(),
+        "Trading accounts resolved"
+    );
 
     // --- Global cancellation token ---
     let cancel = CancellationToken::new();
@@ -195,33 +210,49 @@ async fn main() -> Result<()> {
         );
     }
 
-    // --- Compute proxy wallet address (used by position loader and Safe redeemer) ---
-    let proxy_addr = if settings.clob.proxy_wallet.is_empty() {
-        if settings.clob.signature_type != 0 {
-            tracing::warn!(
-                signature_type = settings.clob.signature_type,
-                eoa = %wallet_address,
-                "proxy_wallet not configured — querying Data API with EOA address. \
-                 If positions show 0 but you have holdings, set clob.proxy_wallet \
-                 to your Polymarket proxy wallet address."
-            );
-        }
-        wallet_address
-    } else {
-        settings.clob.proxy_wallet.parse::<alloy::primitives::Address>()
-            .context("Invalid proxy_wallet address")?
-    };
-
-    // --- Load held position token IDs (needed for WS subscription priority) ---
+    // --- Load held position token IDs from all accounts (needed for WS subscription priority) ---
     let held_position_token_ids: Vec<alloy::primitives::U256> = {
-        let loader = PositionLoader::new(proxy_addr)?;
-        match loader.load_positions().await {
-            Ok(positions) => positions.iter().map(|p| p.token_id).collect(),
-            Err(e) => {
-                tracing::warn!(error = %e, "Could not pre-load position tokens for WS priority");
-                Vec::new()
+        let mut all_tokens: Vec<alloy::primitives::U256> = Vec::new();
+        for acct in &resolved_accounts {
+            let proxy = if acct.proxy_wallet.is_empty() {
+                // Load signer to get EOA address
+                let pk = match std::env::var(&acct.private_key_env) {
+                    Ok(k) => k,
+                    Err(_) => continue,
+                };
+                let s = match PrivateKeySigner::from_str(&pk) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                s.address()
+            } else {
+                match acct.proxy_wallet.parse::<alloy::primitives::Address>() {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                }
+            };
+            let loader = match PositionLoader::new(proxy) {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            match loader.load_positions().await {
+                Ok(positions) => {
+                    for p in &positions {
+                        if !all_tokens.contains(&p.token_id) {
+                            all_tokens.push(p.token_id);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        account = %acct.name,
+                        error = %e,
+                        "Could not pre-load position tokens for WS priority"
+                    );
+                }
             }
         }
+        all_tokens
     };
 
     // --- Subscribe to WebSocket order book updates ---
@@ -244,8 +275,6 @@ async fn main() -> Result<()> {
         pa_monitor::metrics::ACTIVE_SUBSCRIPTIONS.set(token_ids.len() as f64);
     }
 
-    // Get broadcast receiver for strategy engine
-    let update_rx = market_data.ws_feed().await.subscribe_updates();
 
     // --- Market spread observer (observation mode) ---
     // Every 60s, scans all binary markets and logs spread distribution.
@@ -470,749 +499,621 @@ async fn main() -> Result<()> {
         }
     });
 
-    // --- Initialize execution layer ---
-    tracing::info!("Authenticating with CLOB API...");
-    let clob = match ClobExecutor::connect(&settings.clob.host, signer, settings.clob.signature_type).await {
-        Ok(c) => {
-            tracing::info!("CLOB authenticated");
-            Some(c)
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "CLOB authentication failed — running in OBSERVE-ONLY mode. \
-                 Ensure your wallet has logged into polymarket.com at least once."
-            );
-            None
-        }
-    };
+    // --- Build per-account contexts ---
+    let mut account_contexts: Vec<AccountContext> = Vec::new();
 
-    let provider = alloy::providers::ProviderBuilder::new()
-        .connect(&settings.chain.rpc_url)
-        .await
-        .context("Failed to connect to RPC")?;
-    let ctf = CtfExecutor::with_neg_risk(provider, settings.chain.chain_id)
-        .context("Failed to create CTF executor")?;
-    tracing::info!("CTF executor initialized");
-
-    // Build executor: real orchestrator if CLOB available, dry-run otherwise
-    let trading_enabled = clob.is_some();
-    let executor: Arc<dyn pa_core::traits::Executor> = if let Some(clob) = clob {
-        Arc::new(HybridOrchestrator::new(clob, ctf))
-    } else {
-        Arc::new(DryRunExecutor)
-    };
-
-    // --- Query USDC balance from CLOB API (proxy wallet balance) ---
-    let usdc_balance: Arc<std::sync::RwLock<Decimal>> =
-        Arc::new(std::sync::RwLock::new(Decimal::ZERO));
-
-    match executor.get_balance().await {
-        Ok(bal) => {
-            *usdc_balance.write().unwrap() = bal;
-            if let Some(f) = bal.to_f64() {
-                pa_monitor::metrics::USDC_BALANCE.set(f);
+    for acct_config in &resolved_accounts {
+        let private_key = match std::env::var(&acct_config.private_key_env) {
+            Ok(k) => k,
+            Err(_) => {
+                tracing::error!(
+                    account = %acct_config.name,
+                    env_var = %acct_config.private_key_env,
+                    "Private key env var not set — skipping account"
+                );
+                continue;
             }
-            tracing::info!(balance_usdc = %bal, "CLOB collateral balance loaded");
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to query CLOB balance — position sizing may be limited");
-        }
-    }
+        };
+        let signer = match PrivateKeySigner::from_str(&private_key) {
+            Ok(s) => s.with_chain_id(Some(settings.chain.chain_id)),
+            Err(e) => {
+                tracing::error!(account = %acct_config.name, error = %e, "Invalid private key — skipping account");
+                continue;
+            }
+        };
+        let wallet_address = signer.address();
 
-    // Periodic balance refresh (every 30s) via CLOB API
-    let bal_state = Arc::clone(&usdc_balance);
-    let bal_executor = Arc::clone(&executor);
-    let bal_cancel = cancel.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
-        loop {
-            tokio::select! {
-                _ = bal_cancel.cancelled() => break,
-                _ = interval.tick() => {
-                    match bal_executor.get_balance().await {
-                        Ok(bal) => {
-                            let prev = *bal_state.read().unwrap();
-                            if bal != prev {
-                                tracing::info!(balance_usdc = %bal, prev = %prev, "USDC balance updated");
-                            }
-                            *bal_state.write().unwrap() = bal;
-                            if let Some(f) = bal.to_f64() {
-                                pa_monitor::metrics::USDC_BALANCE.set(f);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::debug!(error = %e, "Balance refresh failed");
+        let proxy_addr = if acct_config.proxy_wallet.is_empty() {
+            if acct_config.signature_type != 0 {
+                tracing::warn!(
+                    account = %acct_config.name,
+                    signature_type = acct_config.signature_type,
+                    eoa = %wallet_address,
+                    "proxy_wallet not configured — using EOA address"
+                );
+            }
+            wallet_address
+        } else {
+            acct_config.proxy_wallet.parse::<alloy::primitives::Address>()
+                .context(format!("Invalid proxy_wallet for account {}", acct_config.name))?
+        };
+
+        tracing::info!(
+            account = %acct_config.name,
+            address = %wallet_address,
+            proxy = %proxy_addr,
+            strategies = ?acct_config.strategies,
+            "Account loaded"
+        );
+
+        // Authenticate with CLOB
+        let clob = match ClobExecutor::connect(
+            &settings.clob.host, signer, acct_config.signature_type,
+        ).await {
+            Ok(c) => {
+                tracing::info!(account = %acct_config.name, "CLOB authenticated");
+                Some(c)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    account = %acct_config.name,
+                    error = %e,
+                    "CLOB authentication failed — account in OBSERVE-ONLY mode"
+                );
+                None
+            }
+        };
+
+        let trading_enabled = clob.is_some();
+        let executor: Arc<dyn pa_core::traits::Executor> = if let Some(clob) = clob {
+            let provider = alloy::providers::ProviderBuilder::new()
+                .connect(&settings.chain.rpc_url)
+                .await
+                .context(format!("Failed to connect RPC for account {}", acct_config.name))?;
+            let ctf = CtfExecutor::with_neg_risk(provider, settings.chain.chain_id)
+                .context(format!("Failed to create CTF executor for account {}", acct_config.name))?;
+            Arc::new(HybridOrchestrator::new(clob, ctf))
+        } else {
+            Arc::new(DryRunExecutor)
+        };
+
+        // Query initial USDC balance
+        let usdc_balance: Arc<std::sync::RwLock<Decimal>> =
+            Arc::new(std::sync::RwLock::new(Decimal::ZERO));
+        match executor.get_balance().await {
+            Ok(bal) => {
+                *usdc_balance.write().unwrap() = bal;
+                tracing::info!(
+                    account = %acct_config.name,
+                    balance_usdc = %bal,
+                    "CLOB collateral balance loaded"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    account = %acct_config.name,
+                    error = %e,
+                    "Failed to query CLOB balance"
+                );
+            }
+        }
+
+        // Init risk manager
+        let risk_manager_impl = Arc::new(RiskManagerImpl::new(settings.risk.clone()));
+
+        // Load positions from Data API
+        let position_loader = PositionLoader::new(proxy_addr)?;
+        let api_positions = match position_loader.load_positions().await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    account = %acct_config.name,
+                    error = %e,
+                    "Failed to load positions — starting with empty positions"
+                );
+                Vec::new()
+            }
+        };
+
+        // Ensure held position markets are in the shared markets list
+        if !api_positions.is_empty() {
+            let markets_snapshot = shared_markets.read().await;
+            let known_condition_ids: HashSet<_> = markets_snapshot
+                .iter()
+                .map(|m| m.condition_id)
+                .collect();
+            let missing_condition_ids: Vec<_> = api_positions
+                .iter()
+                .map(|p| p.condition_id)
+                .filter(|cid| !known_condition_ids.contains(cid))
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            drop(markets_snapshot);
+
+            if !missing_condition_ids.is_empty() {
+                tracing::info!(
+                    account = %acct_config.name,
+                    missing = missing_condition_ids.len(),
+                    "Fetching market data for held positions not in discovery"
+                );
+                let position_markets = market_data
+                    .fetch_position_markets(&missing_condition_ids)
+                    .await;
+                if !position_markets.is_empty() {
+                    let seed_cache = market_data.cache();
+                    let mut seeded = 0;
+                    for m in &position_markets {
+                        if seed_market_cache(seed_cache, m) {
+                            seeded += 1;
                         }
                     }
+                    let mut markets_write = shared_markets.write().await;
+                    markets_write.extend(position_markets);
+                    tracing::info!(
+                        account = %acct_config.name,
+                        seeded,
+                        total_markets = markets_write.len(),
+                        "Position markets injected"
+                    );
                 }
             }
         }
-    });
 
-    // --- Initialize risk manager ---
-    let risk_manager_impl = Arc::new(RiskManagerImpl::new(settings.risk.clone()));
-
-    // --- Load positions from Data API ---
-    let position_loader = PositionLoader::new(proxy_addr)?;
-    let api_positions = position_loader.load_positions().await
-        .context("Failed to load positions from Data API")?;
-
-    // Ensure held position markets are in the shared markets list,
-    // even if they're expired/closed (needed for exit scanning).
-    if !api_positions.is_empty() {
+        // Load positions into risk manager
         let markets_snapshot = shared_markets.read().await;
-        let known_condition_ids: HashSet<_> = markets_snapshot
+        let initial_positions: Vec<_> = api_positions
             .iter()
-            .map(|m| m.condition_id)
-            .collect();
-        let missing_condition_ids: Vec<_> = api_positions
-            .iter()
-            .map(|p| p.condition_id)
-            .filter(|cid| !known_condition_ids.contains(cid))
-            .collect::<HashSet<_>>()
-            .into_iter()
+            .map(|p| {
+                let strategy_type = infer_strategy_type(p.token_id, &markets_snapshot, &neg_risk_events);
+                if strategy_type.is_some() {
+                    tracing::debug!(
+                        account = %acct_config.name,
+                        token_id = %p.token_id,
+                        strategy = ?strategy_type,
+                        size = %p.size,
+                        "Position tagged"
+                    );
+                } else {
+                    let question = markets_snapshot.iter()
+                        .find(|m| m.tokens.iter().any(|t| t.token_id == p.token_id))
+                        .map(|m| m.question.as_str())
+                        .unwrap_or("<market not found>");
+                    tracing::warn!(
+                        account = %acct_config.name,
+                        token_id = %p.token_id,
+                        size = %p.size,
+                        question = %question,
+                        "UNTAGGED position — strategy inference failed"
+                    );
+                }
+                (p.token_id, p.size, p.avg_price, strategy_type, Some(p.condition_id))
+            })
             .collect();
         drop(markets_snapshot);
-
-        if !missing_condition_ids.is_empty() {
+        let loaded_count = initial_positions.len();
+        let tagged_count = initial_positions.iter().filter(|p| p.3.is_some()).count();
+        risk_manager_impl.load_initial_positions(initial_positions);
+        if loaded_count > 0 {
             tracing::info!(
-                missing = missing_condition_ids.len(),
-                "Fetching market data for held positions not in discovery (expired/closed)"
+                account = %acct_config.name,
+                loaded = loaded_count,
+                tagged = tagged_count,
+                untagged = loaded_count - tagged_count,
+                exposure = %risk_manager_impl.total_exposure(),
+                "Positions loaded"
             );
-            let position_markets = market_data
-                .fetch_position_markets(&missing_condition_ids)
-                .await;
-            if !position_markets.is_empty() {
-                // Seed the order book cache with gamma prices for these markets
-                let seed_cache = market_data.cache();
-                let mut seeded = 0;
-                for m in &position_markets {
-                    if seed_market_cache(seed_cache, m) {
-                        seeded += 1;
+        }
+
+        let risk_manager: Arc<dyn pa_core::traits::RiskManager> =
+            Arc::clone(&risk_manager_impl) as Arc<dyn pa_core::traits::RiskManager>;
+
+        account_contexts.push(AccountContext {
+            name: acct_config.name.clone(),
+            trading_enabled,
+            executor,
+            risk_manager_impl,
+            risk_manager,
+            usdc_balance,
+            proxy_addr,
+            private_key,
+            signature_type: acct_config.signature_type,
+            chain_id: settings.chain.chain_id,
+            strategies: acct_config.strategies.clone(),
+        });
+    }
+
+    if account_contexts.is_empty() {
+        tracing::error!("No valid accounts configured — exiting");
+        return Ok(());
+    }
+
+    tracing::info!(
+        active_accounts = account_contexts.len(),
+        "All accounts initialized"
+    );
+
+    // --- Spawn per-account tasks ---
+    let mut engine_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
+    for ctx in &account_contexts {
+        let acct_name = ctx.name.clone();
+        let acct_strategies = ctx.strategies.clone();
+
+        // --- Balance refresh (every 30s) ---
+        {
+            let bal_state = Arc::clone(&ctx.usdc_balance);
+            let bal_executor = Arc::clone(&ctx.executor);
+            let bal_cancel = cancel.clone();
+            let name = acct_name.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    tokio::select! {
+                        _ = bal_cancel.cancelled() => break,
+                        _ = interval.tick() => {
+                            match bal_executor.get_balance().await {
+                                Ok(bal) => {
+                                    let prev = *bal_state.read().unwrap();
+                                    if bal != prev {
+                                        tracing::info!(
+                                            account = %name,
+                                            balance_usdc = %bal,
+                                            prev = %prev,
+                                            "USDC balance updated"
+                                        );
+                                    }
+                                    *bal_state.write().unwrap() = bal;
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        account = %name,
+                                        error = %e,
+                                        "Balance refresh failed"
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
-                tracing::info!(
-                    fetched = position_markets.len(),
-                    seeded,
-                    "Position markets seeded into order book cache"
+            });
+        }
+
+        // --- Strategy engine ---
+        // Determine which strategies this account should run
+        let enabled_strategies: Vec<String> = settings.strategy.enabled.iter()
+            .filter(|s| acct_strategies.contains(s))
+            .cloned()
+            .collect();
+
+        if !enabled_strategies.is_empty() {
+            let cache = market_data.cache().clone();
+
+            let make_capital_fn = |bal: Arc<std::sync::RwLock<Decimal>>|
+             -> Box<dyn Fn() -> Decimal + Send + Sync> {
+                Box::new(move || {
+                    let balance = *bal.read().unwrap();
+                    balance.max(Decimal::ZERO)
+                })
+            };
+
+            let make_balance_fn = |bal: Arc<std::sync::RwLock<Decimal>>|
+             -> Box<dyn Fn() -> Decimal + Send + Sync> {
+                Box::new(move || *bal.read().unwrap())
+            };
+
+            let mut strategies: Vec<Box<dyn pa_core::traits::Strategy>> = Vec::new();
+
+            if enabled_strategies.contains(&"yes_no".to_string()) {
+                let yes_no_strategy = YesNoArbitrage::new(
+                    settings.strategy.min_spread_bps,
+                    settings.strategy.max_trade_size_usdc,
+                    settings.strategy.min_profit_usdc,
+                    dec!(0.01),
+                    Box::new({
+                        let c = cache.clone();
+                        move |token_id| c.get(&token_id)
+                    }),
+                    make_capital_fn(Arc::clone(&ctx.usdc_balance)),
                 );
-                // Add to shared markets
-                let mut markets_write = shared_markets.write().await;
-                markets_write.extend(position_markets);
+                strategies.push(Box::new(yes_no_strategy));
+            }
+
+            if enabled_strategies.contains(&"neg_risk".to_string()) && !neg_risk_events.is_empty() {
+                let neg_risk_strategy = NegRiskArbitrage::new(
+                    settings.strategy.min_spread_bps,
+                    settings.strategy.max_trade_size_usdc,
+                    settings.strategy.min_profit_usdc,
+                    dec!(0.01),
+                    neg_risk_events.clone(),
+                    Box::new({
+                        let c = cache.clone();
+                        move |token_id| c.get(&token_id)
+                    }),
+                    make_capital_fn(Arc::clone(&ctx.usdc_balance)),
+                );
+                strategies.push(Box::new(neg_risk_strategy));
+            }
+
+            if enabled_strategies.contains(&"cross_market".to_string()) && !cross_market_pairs.is_empty() {
+                let cross_market_strategy = CrossMarketArbitrage::new(
+                    settings.strategy.min_spread_bps,
+                    settings.strategy.max_trade_size_usdc,
+                    settings.strategy.min_profit_usdc,
+                    dec!(0.02),
+                    cross_market_pairs.clone(),
+                    Box::new({
+                        let c = cache.clone();
+                        move |token_id| c.get(&token_id)
+                    }),
+                    make_capital_fn(Arc::clone(&ctx.usdc_balance)),
+                );
+                strategies.push(Box::new(cross_market_strategy));
+            }
+
+            if enabled_strategies.contains(&"weather".to_string()) {
+                let weather_cache = market_data.cache().clone();
+                let rm_pos = Arc::clone(&ctx.risk_manager_impl);
+                let rm_held = Arc::clone(&ctx.risk_manager_impl);
+                let weather_strategy = pa_strategy::weather::WeatherAlphaStrategy::new(
+                    settings.weather.clone(),
+                    dec!(0.00),
+                    Box::new(move |token_id| weather_cache.get(&token_id)),
+                    make_capital_fn(Arc::clone(&ctx.usdc_balance)),
+                    Box::new(move |tid: alloy::primitives::U256| rm_pos.get_position_size(&tid)),
+                    neg_risk_events.clone(),
+                    Box::new(move || rm_held.positions_by_strategy(pa_core::types::StrategyType::Weather)),
+                    make_balance_fn(Arc::clone(&ctx.usdc_balance)),
+                );
+                strategies.push(Box::new(weather_strategy));
+            }
+
+            if enabled_strategies.contains(&"convergence".to_string()) {
+                let conv_cache = market_data.cache().clone();
+                let rm_pos_conv = Arc::clone(&ctx.risk_manager_impl);
+                let rm_held_conv = Arc::clone(&ctx.risk_manager_impl);
+                let convergence = pa_strategy::convergence::ResolutionConvergenceStrategy::new(
+                    settings.convergence.clone(),
+                    dec!(0.00),
+                    Box::new(move |token_id| conv_cache.get(&token_id)),
+                    make_capital_fn(Arc::clone(&ctx.usdc_balance)),
+                    Box::new(move |tid: alloy::primitives::U256| rm_pos_conv.get_position_size(&tid)),
+                    Box::new(move || rm_held_conv.positions_by_strategy(pa_core::types::StrategyType::ResolutionConvergence)),
+                    make_balance_fn(Arc::clone(&ctx.usdc_balance)),
+                );
+                strategies.push(Box::new(convergence));
+            }
+
+            if enabled_strategies.contains(&"crypto".to_string()) {
+                let crypto_cache = market_data.cache().clone();
+                let rm_pos_crypto = Arc::clone(&ctx.risk_manager_impl);
+                let rm_held_crypto = Arc::clone(&ctx.risk_manager_impl);
+                let crypto = pa_strategy::crypto_alpha::CryptoAlphaStrategy::new(
+                    settings.crypto_alpha.clone(),
+                    dec!(0.00),
+                    Box::new(move |token_id| crypto_cache.get(&token_id)),
+                    make_capital_fn(Arc::clone(&ctx.usdc_balance)),
+                    Box::new(move |tid: alloy::primitives::U256| rm_pos_crypto.get_position_size(&tid)),
+                    neg_risk_events.clone(),
+                    binary_event_groups.clone(),
+                    Box::new(move || rm_held_crypto.positions_by_strategy(pa_core::types::StrategyType::CryptoAlpha)),
+                    make_balance_fn(Arc::clone(&ctx.usdc_balance)),
+                );
+                strategies.push(Box::new(crypto));
+            }
+
+            if !strategies.is_empty() {
+                // Event calendar (shared config, per-account instance)
+                let event_calendar = if settings.event_calendar.enabled {
+                    let ec = Arc::new(EventCalendarService::new(settings.event_calendar.clone()));
+                    ec.refresh().await;
+                    Some(ec)
+                } else {
+                    None
+                };
+
+                let engine_cache = market_data.cache().clone();
+                let engine_rm_all = Arc::clone(&ctx.risk_manager_impl);
+                let engine = StrategyEngine::new(
+                    strategies,
+                    ctx.executor.clone(),
+                    ctx.risk_manager.clone(),
+                    settings.strategy.scan_interval_ms,
+                    event_calendar,
+                    Box::new(move |token_id| engine_cache.get(&token_id)),
+                    make_capital_fn(Arc::clone(&ctx.usdc_balance)),
+                    Box::new(move || {
+                        engine_rm_all.snapshot_positions()
+                            .into_iter()
+                            .map(|(token_id, entry)| pa_strategy::engine::StopLossPosition {
+                                token_id,
+                                size: entry.size,
+                                avg_cost: entry.avg_cost,
+                                strategy_type: entry.strategy_type,
+                                condition_id: entry.condition_id,
+                            })
+                            .collect()
+                    }),
+                    settings.risk.min_order_usdc,
+                    settings.strategy.max_market_end_days,
+                );
+
+                let engine_shared = Arc::clone(&shared_markets);
+                let engine_cancel = cancel.clone();
+                let update_rx = market_data.ws_feed().await.subscribe_updates();
+                let name = acct_name.clone();
+                let handle = tokio::spawn(async move {
+                    tracing::info!(
+                        account = %name,
+                        "Strategy engine started"
+                    );
+                    engine.run(engine_shared, update_rx, engine_cancel).await;
+                });
+                engine_handles.push(handle);
+
                 tracing::info!(
-                    total_markets = markets_write.len(),
-                    "Position markets injected into shared market list"
+                    account = %acct_name,
+                    strategies = ?enabled_strategies,
+                    trading = ctx.trading_enabled,
+                    "Strategy engine initialized"
                 );
             }
         }
-    }
 
-    let markets_snapshot = shared_markets.read().await;
-    let initial_positions: Vec<_> = api_positions
-        .iter()
-        .map(|p| {
-            // Infer strategy_type from market data so exit logic works after restart
-            let strategy_type = infer_strategy_type(p.token_id, &markets_snapshot, &neg_risk_events);
-            if strategy_type.is_some() {
-                tracing::debug!(
-                    token_id = %p.token_id,
-                    strategy = ?strategy_type,
-                    size = %p.size,
-                    "Position tagged with inferred strategy"
+        // --- Liquidity Rewards background task ---
+        if acct_strategies.contains(&"liquidity_rewards".to_string())
+            && settings.liquidity_rewards.enabled
+            && ctx.trading_enabled
+        {
+            let lr_config = settings.liquidity_rewards.clone();
+            let lr_cache = market_data.cache().clone();
+            let lr_cancel = cancel.clone();
+            let lr_rm = Arc::clone(&ctx.risk_manager_impl);
+            let lr_shared = Arc::clone(&shared_markets);
+            let lr_private_key = ctx.private_key.clone();
+            let lr_clob_host = settings.clob.host.clone();
+            let lr_sig_type = ctx.signature_type;
+            let lr_chain_id = ctx.chain_id;
+            let lr_name = acct_name.clone();
+            let lr_update_rx = market_data.ws_feed().await.subscribe_updates();
+
+            tokio::spawn(async move {
+                let lr_signer = match PrivateKeySigner::from_str(&lr_private_key) {
+                    Ok(s) => s.with_chain_id(Some(lr_chain_id)),
+                    Err(e) => {
+                        tracing::error!(account = %lr_name, error = %e, "LR: failed to parse signer");
+                        return;
+                    }
+                };
+                let lr_clob = match ClobExecutor::connect(&lr_clob_host, lr_signer, lr_sig_type).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!(account = %lr_name, error = %e, "LR: CLOB auth failed");
+                        return;
+                    }
+                };
+                tracing::info!(account = %lr_name, "LR: CLOB authenticated, starting liquidity rewards");
+
+                let mut outstanding_orders: std::collections::HashMap<
+                    alloy::primitives::B256,
+                    std::collections::HashMap<String, LrOrderMeta>,
+                > = std::collections::HashMap::new();
+
+                let mut last_quoted_mid: std::collections::HashMap<alloy::primitives::U256, Decimal> = std::collections::HashMap::new();
+                let mut token_to_condition: std::collections::HashMap<alloy::primitives::U256, alloy::primitives::B256> = std::collections::HashMap::new();
+                let mut last_quote_time: std::collections::HashMap<alloy::primitives::B256, std::time::Instant> = std::collections::HashMap::new();
+
+                let markets_init = lr_shared.read().await;
+                let mut active_candidates = pa_strategy::liquidity_rewards::select_reward_markets(
+                    &markets_init, &lr_config,
                 );
-            } else {
-                // Find the market question for diagnostics
-                let question = markets_snapshot.iter()
-                    .find(|m| m.tokens.iter().any(|t| t.token_id == p.token_id))
-                    .map(|m| m.question.as_str())
-                    .unwrap_or("<market not found in discovery>");
-                tracing::warn!(
-                    token_id = %p.token_id,
-                    size = %p.size,
-                    avg_cost = %p.avg_price,
-                    question = %question,
-                    "UNTAGGED position — strategy inference failed, strategy exits won't work (stop-loss safety net active)"
-                );
-            }
-            (p.token_id, p.size, p.avg_price, strategy_type, Some(p.condition_id))
-        })
-        .collect();
-    drop(markets_snapshot);
-    let loaded_count = initial_positions.len();
-    let tagged_count = initial_positions.iter().filter(|p| p.3.is_some()).count();
-    risk_manager_impl.load_initial_positions(initial_positions);
-    if loaded_count > 0 {
-        tracing::info!(
-            loaded = loaded_count,
-            tagged = tagged_count,
-            untagged = loaded_count - tagged_count,
-            "Positions loaded from Data API (exit logic active for tagged positions)"
-        );
-    }
-    tracing::info!(
-        loaded = loaded_count,
-        exposure = %risk_manager_impl.total_exposure(),
-        "Positions loaded from Data API"
-    );
+                drop(markets_init);
+                let mut cid_to_candidate_idx: std::collections::HashMap<alloy::primitives::B256, usize> = std::collections::HashMap::new();
 
-    let risk_manager: Arc<dyn pa_core::traits::RiskManager> =
-        Arc::clone(&risk_manager_impl) as Arc<dyn pa_core::traits::RiskManager>;
-    tracing::info!("Risk manager initialized");
+                let mut lr_update_rx = lr_update_rx;
 
-    // --- Initialize strategy engine ---
-    let cache = market_data.cache().clone();
+                let mut fallback_interval = tokio::time::interval(Duration::from_secs(lr_config.quote_refresh_secs));
+                let mut market_interval = tokio::time::interval(Duration::from_secs(lr_config.market_refresh_secs));
+                let requote_cooldown = Duration::from_secs(lr_config.requote_cooldown_secs);
+                let fill_check_enabled = lr_config.fill_check_secs > 0;
+                let mut fill_check_interval = tokio::time::interval(Duration::from_secs(
+                    if fill_check_enabled { lr_config.fill_check_secs } else { 86400 },
+                ));
 
-    // Shared available capital closure: returns current USDC balance.
-    // The balance already reflects money spent on existing positions —
-    // subtracting exposure would double-count (the cash is already gone).
-    // Per-strategy and per-market limits are enforced by RiskManager::check_pre_trade().
-    let make_capital_fn = |bal: Arc<std::sync::RwLock<Decimal>>|
-     -> Box<dyn Fn() -> Decimal + Send + Sync> {
-        Box::new(move || {
-            let balance = *bal.read().unwrap();
-            balance.max(Decimal::ZERO)
-        })
-    };
-
-    // Shared balance closure: returns current wallet USDC balance.
-    // Used by strategies for dynamic position sizing (max_position_pct * balance).
-    let make_balance_fn = |bal: Arc<std::sync::RwLock<Decimal>>|
-     -> Box<dyn Fn() -> Decimal + Send + Sync> {
-        Box::new(move || *bal.read().unwrap())
-    };
-
-    let mut strategies: Vec<Box<dyn pa_core::traits::Strategy>> = Vec::new();
-
-    // Add YesNo arbitrage strategy if enabled
-    if settings.strategy.enabled.contains(&"yes_no".to_string()) {
-        let yes_no_strategy = YesNoArbitrage::new(
-            settings.strategy.min_spread_bps,
-            settings.strategy.max_trade_size_usdc,
-            settings.strategy.min_profit_usdc,
-            dec!(0.01), // gas cost estimate in USD
-            Box::new({
-                let c = cache.clone();
-                move |token_id| c.get(&token_id)
-            }),
-            make_capital_fn(Arc::clone(&usdc_balance)),
-        );
-        strategies.push(Box::new(yes_no_strategy));
-        tracing::info!("YesNo arbitrage strategy enabled");
-    }
-
-    // Add NegRisk strategy if enabled and events were found
-    if settings.strategy.enabled.contains(&"neg_risk".to_string()) && !neg_risk_events.is_empty() {
-        let neg_risk_strategy = NegRiskArbitrage::new(
-            settings.strategy.min_spread_bps,
-            settings.strategy.max_trade_size_usdc,
-            settings.strategy.min_profit_usdc,
-            dec!(0.01), // gas cost estimate in USD
-            neg_risk_events.clone(),
-            Box::new({
-                let c = cache.clone();
-                move |token_id| c.get(&token_id)
-            }),
-            make_capital_fn(Arc::clone(&usdc_balance)),
-        );
-        strategies.push(Box::new(neg_risk_strategy));
-        tracing::info!("NegRisk arbitrage strategy enabled");
-    }
-
-    // Add cross-market strategy if enabled and pairs were found
-    if settings.strategy.enabled.contains(&"cross_market".to_string()) && !cross_market_pairs.is_empty() {
-        let cross_market_strategy = CrossMarketArbitrage::new(
-            settings.strategy.min_spread_bps,
-            settings.strategy.max_trade_size_usdc,
-            settings.strategy.min_profit_usdc,
-            dec!(0.02), // 2x gas for two on-chain txs
-            cross_market_pairs,
-            Box::new({
-                let c = cache.clone();
-                move |token_id| c.get(&token_id)
-            }),
-            make_capital_fn(Arc::clone(&usdc_balance)),
-        );
-        strategies.push(Box::new(cross_market_strategy));
-        tracing::info!("CrossMarket arbitrage strategy enabled");
-    }
-
-    // Add weather alpha strategy if enabled
-    if settings.strategy.enabled.contains(&"weather".to_string()) {
-        let weather_cache = market_data.cache().clone();
-        let rm_pos = Arc::clone(&risk_manager_impl);
-        let rm_held = Arc::clone(&risk_manager_impl);
-        let weather_strategy = pa_strategy::weather::WeatherAlphaStrategy::new(
-            settings.weather.clone(),
-            dec!(0.00), // no gas for CLOB-only
-            Box::new(move |token_id| weather_cache.get(&token_id)),
-            make_capital_fn(Arc::clone(&usdc_balance)),
-            Box::new(move |tid: alloy::primitives::U256| rm_pos.get_position_size(&tid)),
-            neg_risk_events.clone(),
-            Box::new(move || rm_held.positions_by_strategy(pa_core::types::StrategyType::Weather)),
-            make_balance_fn(Arc::clone(&usdc_balance)),
-        );
-        strategies.push(Box::new(weather_strategy));
-        tracing::info!("Weather alpha strategy enabled (binary + NegRisk)");
-    }
-
-    // Add resolution convergence strategy if enabled
-    if settings.strategy.enabled.contains(&"convergence".to_string()) {
-        let conv_cache = market_data.cache().clone();
-        let rm_pos_conv = Arc::clone(&risk_manager_impl);
-        let rm_held_conv = Arc::clone(&risk_manager_impl);
-        let convergence = pa_strategy::convergence::ResolutionConvergenceStrategy::new(
-            settings.convergence.clone(),
-            dec!(0.00), // no gas for CLOB-only
-            Box::new(move |token_id| conv_cache.get(&token_id)),
-            make_capital_fn(Arc::clone(&usdc_balance)),
-            Box::new(move |tid: alloy::primitives::U256| rm_pos_conv.get_position_size(&tid)),
-            Box::new(move || rm_held_conv.positions_by_strategy(pa_core::types::StrategyType::ResolutionConvergence)),
-            make_balance_fn(Arc::clone(&usdc_balance)),
-        );
-        strategies.push(Box::new(convergence));
-        tracing::info!("Resolution convergence strategy enabled");
-    }
-
-    // Add crypto alpha strategy if enabled
-    if settings.strategy.enabled.contains(&"crypto".to_string()) {
-        let crypto_cache = market_data.cache().clone();
-        let rm_pos_crypto = Arc::clone(&risk_manager_impl);
-        let rm_held_crypto = Arc::clone(&risk_manager_impl);
-        let crypto = pa_strategy::crypto_alpha::CryptoAlphaStrategy::new(
-            settings.crypto_alpha.clone(),
-            dec!(0.00), // no gas for CLOB-only
-            Box::new(move |token_id| crypto_cache.get(&token_id)),
-            make_capital_fn(Arc::clone(&usdc_balance)),
-            Box::new(move |tid: alloy::primitives::U256| rm_pos_crypto.get_position_size(&tid)),
-            neg_risk_events.clone(),
-            binary_event_groups.clone(),
-            Box::new(move || rm_held_crypto.positions_by_strategy(pa_core::types::StrategyType::CryptoAlpha)),
-            make_balance_fn(Arc::clone(&usdc_balance)),
-        );
-        strategies.push(Box::new(crypto));
-        tracing::info!("Crypto alpha strategy enabled");
-    }
-
-    // --- Initialize event calendar filter ---
-    let event_calendar = if settings.event_calendar.enabled {
-        let ec = Arc::new(EventCalendarService::new(settings.event_calendar.clone()));
-        ec.refresh().await;
-        tracing::info!(events = ec.event_count().await, "Event calendar initialized");
-        Some(ec)
-    } else {
-        None
-    };
-
-    let engine_cache = market_data.cache().clone();
-    let engine_rm_all = Arc::clone(&risk_manager_impl);
-    let engine = StrategyEngine::new(
-        strategies,
-        executor.clone(),
-        risk_manager.clone(),
-        settings.strategy.scan_interval_ms,
-        event_calendar,
-        Box::new(move |token_id| engine_cache.get(&token_id)),
-        make_capital_fn(Arc::clone(&usdc_balance)),
-        Box::new(move || {
-            engine_rm_all.snapshot_positions()
-                .into_iter()
-                .map(|(token_id, entry)| pa_strategy::engine::StopLossPosition {
-                    token_id,
-                    size: entry.size,
-                    avg_cost: entry.avg_cost,
-                    strategy_type: entry.strategy_type,
-                    condition_id: entry.condition_id,
-                })
-                .collect()
-        }),
-        settings.risk.min_order_usdc,
-        settings.strategy.max_market_end_days,
-    );
-
-    tracing::info!(
-        trading = trading_enabled,
-        "PolyAlpha initialized — entering trading loop"
-    );
-
-    // --- Run trading loop with graceful shutdown ---
-    let engine_shared = Arc::clone(&shared_markets);
-    let engine_cancel = cancel.clone();
-    let engine_handle = tokio::spawn(async move {
-        engine.run(engine_shared, update_rx, engine_cancel).await;
-    });
-
-    // --- Liquidity Rewards background task ---
-    if settings.liquidity_rewards.enabled && trading_enabled {
-        let lr_config = settings.liquidity_rewards.clone();
-        let lr_cache = market_data.cache().clone();
-        let lr_cancel = cancel.clone();
-        let lr_rm = Arc::clone(&risk_manager_impl);
-        let lr_shared = Arc::clone(&shared_markets);
-        let lr_private_key = private_key.clone();
-        let lr_clob_host = settings.clob.host.clone();
-        let lr_sig_type = settings.clob.signature_type;
-        let lr_chain_id = settings.chain.chain_id;
-        // Subscribe to WS order book updates for re-quote trigger (before spawn)
-        let lr_update_rx = market_data.ws_feed().await.subscribe_updates();
-
-        tokio::spawn(async move {
-            let lr_signer = match PrivateKeySigner::from_str(&lr_private_key) {
-                Ok(s) => s.with_chain_id(Some(lr_chain_id)),
-                Err(e) => {
-                    tracing::error!(error = %e, "LR: failed to parse signer");
-                    return;
-                }
-            };
-            let lr_clob = match ClobExecutor::connect(&lr_clob_host, lr_signer, lr_sig_type).await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!(error = %e, "LR: CLOB authentication failed, liquidity rewards disabled");
-                    return;
-                }
-            };
-            tracing::info!("LR: CLOB authenticated, starting liquidity rewards");
-
-            // Track all outstanding order IDs + metadata per market condition_id
-            let mut outstanding_orders: std::collections::HashMap<
-                alloy::primitives::B256,
-                std::collections::HashMap<String, LrOrderMeta>,
-            > = std::collections::HashMap::new();
-
-            // Drift tracking: last quoted midpoint per token + token→condition mapping
-            let mut last_quoted_mid: std::collections::HashMap<alloy::primitives::U256, Decimal> = std::collections::HashMap::new();
-            let mut token_to_condition: std::collections::HashMap<alloy::primitives::U256, alloy::primitives::B256> = std::collections::HashMap::new();
-
-            // WS re-quote: per-market cooldown to prevent rate limiting
-            let mut last_quote_time: std::collections::HashMap<alloy::primitives::B256, std::time::Instant> = std::collections::HashMap::new();
-            // Cached candidates + index for fast condition_id lookup
-            let markets_init = lr_shared.read().await;
-            let mut active_candidates = pa_strategy::liquidity_rewards::select_reward_markets(
-                &markets_init, &lr_config,
-            );
-            drop(markets_init);
-            let mut cid_to_candidate_idx: std::collections::HashMap<alloy::primitives::B256, usize> = std::collections::HashMap::new();
-
-            let mut lr_update_rx = lr_update_rx;
-
-            let mut fallback_interval = tokio::time::interval(Duration::from_secs(lr_config.quote_refresh_secs));
-            let mut market_interval = tokio::time::interval(Duration::from_secs(lr_config.market_refresh_secs));
-            let requote_cooldown = Duration::from_secs(lr_config.requote_cooldown_secs);
-            let fill_check_enabled = lr_config.fill_check_secs > 0;
-            let mut fill_check_interval = tokio::time::interval(Duration::from_secs(
-                if fill_check_enabled { lr_config.fill_check_secs } else { 86400 },
-            ));
-
-            // --- Initial mapping + quoting for pre-selected candidates ---
-            {
-                // Build token→condition and cid→candidate index
-                token_to_condition.clear();
-                cid_to_candidate_idx.clear();
-                for (idx, c) in active_candidates.iter().enumerate() {
-                    let cid = c.market.condition_id;
-                    cid_to_candidate_idx.insert(cid, idx);
-                    if c.market.tokens.len() >= 2 {
-                        token_to_condition.insert(c.market.tokens[0].token_id, cid);
-                        token_to_condition.insert(c.market.tokens[1].token_id, cid);
+                // Initial mapping + quoting
+                {
+                    token_to_condition.clear();
+                    cid_to_candidate_idx.clear();
+                    for (idx, c) in active_candidates.iter().enumerate() {
+                        let cid = c.market.condition_id;
+                        cid_to_candidate_idx.insert(cid, idx);
+                        if c.market.tokens.len() >= 2 {
+                            token_to_condition.insert(c.market.tokens[0].token_id, cid);
+                            token_to_condition.insert(c.market.tokens[1].token_id, cid);
+                        }
                     }
+
+                    pa_monitor::metrics::LR_ACTIVE_MARKETS.set(active_candidates.len() as f64);
+
+                    let mut total_exposure = Decimal::ZERO;
+                    for candidate in &active_candidates {
+                        let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
+                            &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
+                        ).await;
+                        total_exposure += exp;
+                        let cid = candidate.market.condition_id;
+                        if !metas.is_empty() {
+                            outstanding_orders.insert(cid, metas.into_iter().collect());
+                        }
+                        if candidate.market.tokens.len() >= 2 {
+                            if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
+                            if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
+                        }
+                        let now = std::time::Instant::now();
+                        last_quote_time.insert(cid, now);
+                    }
+
+                    tracing::info!(
+                        account = %lr_name,
+                        active_markets = outstanding_orders.len(),
+                        total_candidates = active_candidates.len(),
+                        "LR: initial market selection and quote complete"
+                    );
                 }
 
-                pa_monitor::metrics::LR_ACTIVE_MARKETS.set(active_candidates.len() as f64);
-
-                // Initial full quote
-                let mut total_exposure = Decimal::ZERO;
-                for candidate in &active_candidates {
-                    let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
-                        &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
-                    ).await;
-                    total_exposure += exp;
-                    let cid = candidate.market.condition_id;
-                    if !metas.is_empty() {
-                        outstanding_orders.insert(cid, metas.into_iter().collect());
-                    }
-                    // Track mids
-                    if candidate.market.tokens.len() >= 2 {
-                        if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
-                        if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
-                    }
-                    let now = std::time::Instant::now();
-                    last_quote_time.insert(cid, now);
-                }
-
-                tracing::info!(
-                    active_markets = outstanding_orders.len(),
-                    total_candidates = active_candidates.len(),
-                    "LR: initial market selection and quote complete"
-                );
-            }
-
-            loop {
-                tokio::select! {
-                    _ = lr_cancel.cancelled() => {
-                        // Shutdown: cancel all outstanding orders
-                        let all_ids: Vec<String> = outstanding_orders.values()
-                            .flat_map(|m| m.keys().cloned())
-                            .collect();
-                        if !all_ids.is_empty() {
-                            let refs: Vec<&str> = all_ids.iter().map(|s| s.as_str()).collect();
-                            if let Err(e) = lr_clob.cancel_orders(&refs).await {
-                                tracing::warn!(error = %e, "LR: failed to cancel orders on shutdown");
+                loop {
+                    tokio::select! {
+                        _ = lr_cancel.cancelled() => {
+                            let all_ids: Vec<String> = outstanding_orders.values()
+                                .flat_map(|m| m.keys().cloned())
+                                .collect();
+                            if !all_ids.is_empty() {
+                                let refs: Vec<&str> = all_ids.iter().map(|s| s.as_str()).collect();
+                                if let Err(e) = lr_clob.cancel_orders(&refs).await {
+                                    tracing::warn!(account = %lr_name, error = %e, "LR: cancel on shutdown failed");
+                                }
+                                pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(all_ids.len() as u64);
                             }
-                            pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(all_ids.len() as u64);
+                            tracing::info!(account = %lr_name, "LR: shutdown, cancelled {} orders", all_ids.len());
+                            break;
                         }
-                        tracing::info!("LR: shutdown, cancelled {} orders", all_ids.len());
-                        break;
-                    }
-                    // WS-driven re-quote: cancel + re-quote on significant drift
-                    result = lr_update_rx.recv() => {
-                        if let Ok(update) = result {
-                            let tid = update.token_id;
-                            let Some(&cid) = token_to_condition.get(&tid) else { continue };
-                            let Some(new_mid) = lr_cache.get(&tid).and_then(|b| b.midpoint()) else { continue };
-                            let Some(&old_mid) = last_quoted_mid.get(&tid) else { continue };
-                            if old_mid <= Decimal::ZERO { continue; }
+                        result = lr_update_rx.recv() => {
+                            if let Ok(update) = result {
+                                let tid = update.token_id;
+                                let Some(&cid) = token_to_condition.get(&tid) else { continue };
+                                let Some(new_mid) = lr_cache.get(&tid).and_then(|b| b.midpoint()) else { continue };
+                                let Some(&old_mid) = last_quoted_mid.get(&tid) else { continue };
+                                if old_mid <= Decimal::ZERO { continue; }
 
-                            let drift_bps = ((new_mid - old_mid).abs() / old_mid * dec!(10000)).to_u32().unwrap_or(0);
-                            if drift_bps < lr_config.requote_trigger_bps { continue; }
+                                let drift_bps = ((new_mid - old_mid).abs() / old_mid * dec!(10000)).to_u32().unwrap_or(0);
+                                if drift_bps < lr_config.requote_trigger_bps { continue; }
 
-                            // Check per-market cooldown
-                            let now = std::time::Instant::now();
-                            if let Some(&last_t) = last_quote_time.get(&cid) {
-                                if now.duration_since(last_t) < requote_cooldown { continue; }
-                            }
+                                let now = std::time::Instant::now();
+                                if let Some(&last_t) = last_quote_time.get(&cid) {
+                                    if now.duration_since(last_t) < requote_cooldown { continue; }
+                                }
 
-                            tracing::info!(
-                                token = %tid, market = %cid,
-                                old_mid = %old_mid, new_mid = %new_mid,
-                                drift_bps = drift_bps,
-                                "LR: WS re-quote triggered"
-                            );
+                                tracing::info!(
+                                    account = %lr_name,
+                                    token = %tid, market = %cid,
+                                    old_mid = %old_mid, new_mid = %new_mid,
+                                    drift_bps = drift_bps,
+                                    "LR: WS re-quote triggered"
+                                );
 
-                            // Cancel outstanding orders for this market
-                            if let Some(order_map) = outstanding_orders.remove(&cid) {
-                                if !order_map.is_empty() {
-                                    let id_strs: Vec<String> = order_map.into_keys().collect();
-                                    let refs: Vec<&str> = id_strs.iter().map(|s| s.as_str()).collect();
-                                    if let Err(e) = lr_clob.cancel_orders(&refs).await {
-                                        tracing::warn!(error = %e, "LR: WS re-quote cancel failed");
+                                if let Some(order_map) = outstanding_orders.remove(&cid) {
+                                    if !order_map.is_empty() {
+                                        let id_strs: Vec<String> = order_map.into_keys().collect();
+                                        let refs: Vec<&str> = id_strs.iter().map(|s| s.as_str()).collect();
+                                        if let Err(e) = lr_clob.cancel_orders(&refs).await {
+                                            tracing::warn!(error = %e, "LR: WS re-quote cancel failed");
+                                        }
+                                        pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(id_strs.len() as u64);
                                     }
-                                    pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(id_strs.len() as u64);
-                                }
-                            }
-
-                            // Clear tracked mids for this market's tokens
-                            last_quoted_mid.remove(&tid);
-
-                            // Re-quote this single market
-                            if let Some(&idx) = cid_to_candidate_idx.get(&cid) {
-                                if let Some(candidate) = active_candidates.get(idx) {
-                                    // Compute current total exposure (approximation: sum of outstanding)
-                                    let current_exposure = Decimal::ZERO; // conservative: allow full budget for re-quote
-                                    let (metas, _exp, yes_mid, no_mid) = lr_quote_one_market(
-                                        &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, current_exposure,
-                                    ).await;
-                                    if !metas.is_empty() {
-                                        outstanding_orders.insert(cid, metas.into_iter().collect());
-                                    }
-                                    // Update tracked mids
-                                    if candidate.market.tokens.len() >= 2 {
-                                        if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
-                                        if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
-                                    }
-                                    last_quote_time.insert(cid, now);
-                                }
-                            }
-                        }
-                    }
-                    // Fallback timer: full cancel + re-quote all candidates
-                    _ = fallback_interval.tick() => {
-                        // Cancel all previous orders
-                        let prev_ids: Vec<String> = outstanding_orders.drain()
-                            .flat_map(|(_, m)| m.into_keys())
-                            .collect();
-                        if !prev_ids.is_empty() {
-                            let refs: Vec<&str> = prev_ids.iter().map(|s| s.as_str()).collect();
-                            if let Err(e) = lr_clob.cancel_orders(&refs).await {
-                                tracing::warn!(error = %e, "LR: batch cancel failed");
-                            }
-                            pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(prev_ids.len() as u64);
-                        }
-
-                        // Clear drift tracking (will be rebuilt)
-                        last_quoted_mid.clear();
-
-                        if active_candidates.is_empty() {
-                            tracing::debug!("LR: no eligible reward markets");
-                            continue;
-                        }
-
-                        let mut total_exposure = Decimal::ZERO;
-
-                        for candidate in &active_candidates {
-                            let cid = candidate.market.condition_id;
-                            let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
-                                &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
-                            ).await;
-                            total_exposure += exp;
-                            if !metas.is_empty() {
-                                outstanding_orders.insert(cid, metas.into_iter().collect());
-                            }
-                            if candidate.market.tokens.len() >= 2 {
-                                if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
-                                if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
-                            }
-                            last_quote_time.insert(cid, std::time::Instant::now());
-                        }
-
-                        tracing::debug!(
-                            active_markets = outstanding_orders.len(),
-                            total_candidates = active_candidates.len(),
-                            "LR: fallback quote refresh complete"
-                        );
-                    }
-                    // Market re-selection timer: re-discover and re-rank reward markets
-                    _ = market_interval.tick() => {
-                        // Cancel all existing orders first
-                        let prev_ids: Vec<String> = outstanding_orders.drain()
-                            .flat_map(|(_, m)| m.into_keys())
-                            .collect();
-                        if !prev_ids.is_empty() {
-                            let refs: Vec<&str> = prev_ids.iter().map(|s| s.as_str()).collect();
-                            if let Err(e) = lr_clob.cancel_orders(&refs).await {
-                                tracing::warn!(error = %e, "LR: market refresh cancel failed");
-                            }
-                            pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(prev_ids.len() as u64);
-                        }
-
-                        // Re-select markets
-                        let markets_snapshot = lr_shared.read().await;
-                        active_candidates = pa_strategy::liquidity_rewards::select_reward_markets(
-                            &markets_snapshot, &lr_config,
-                        );
-                        drop(markets_snapshot);
-
-                        // Rebuild token→condition and cid→candidate index
-                        token_to_condition.clear();
-                        cid_to_candidate_idx.clear();
-                        last_quoted_mid.clear();
-                        last_quote_time.clear();
-                        for (idx, c) in active_candidates.iter().enumerate() {
-                            let cid = c.market.condition_id;
-                            cid_to_candidate_idx.insert(cid, idx);
-                            if c.market.tokens.len() >= 2 {
-                                token_to_condition.insert(c.market.tokens[0].token_id, cid);
-                                token_to_condition.insert(c.market.tokens[1].token_id, cid);
-                            }
-                        }
-
-                        pa_monitor::metrics::LR_ACTIVE_MARKETS.set(active_candidates.len() as f64);
-
-                        // Full re-quote
-                        let mut total_exposure = Decimal::ZERO;
-                        for candidate in &active_candidates {
-                            let cid = candidate.market.condition_id;
-                            let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
-                                &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
-                            ).await;
-                            total_exposure += exp;
-                            if !metas.is_empty() {
-                                outstanding_orders.insert(cid, metas.into_iter().collect());
-                            }
-                            if candidate.market.tokens.len() >= 2 {
-                                if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
-                                if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
-                            }
-                            last_quote_time.insert(cid, std::time::Instant::now());
-                        }
-
-                        tracing::info!(
-                            active_markets = outstanding_orders.len(),
-                            total_candidates = active_candidates.len(),
-                            "LR: market re-selection complete"
-                        );
-                    }
-                    // Fill detection: poll CLOB for order status, sync positions + re-quote on fills
-                    _ = fill_check_interval.tick(), if fill_check_enabled => {
-                        let cids: Vec<alloy::primitives::B256> = outstanding_orders.keys().cloned().collect();
-                        for cid in cids {
-                            let api_orders = match lr_clob.get_orders_by_market(cid).await {
-                                Ok(o) => o,
-                                Err(e) => {
-                                    tracing::debug!(error = %e, market = %cid, "LR: fill check query failed");
-                                    continue;
-                                }
-                            };
-
-                            let tracked = match outstanding_orders.get_mut(&cid) {
-                                Some(m) => m,
-                                None => continue,
-                            };
-
-                            // Detect fills: full match, partial match (new size_matched), or missing from API
-                            let mut any_full_fill = false;
-                            let mut fully_filled_ids: Vec<String> = Vec::new();
-
-                            for (oid, meta) in tracked.iter_mut() {
-                                let api_match = api_orders.iter().find(|o| o.order_id == *oid);
-
-                                let (is_fully_done, api_matched_size) = match api_match {
-                                    Some(o) => (o.is_matched, o.size_matched),
-                                    None => (true, meta.size), // missing = fully settled
-                                };
-
-                                let delta = api_matched_size - meta.last_synced_matched;
-                                if delta > Decimal::ZERO {
-                                    // New fill volume to sync
-                                    let current_pos = lr_rm.get_position_size(&meta.token_id);
-                                    let new_pos = if meta.is_buy {
-                                        current_pos + delta
-                                    } else {
-                                        (current_pos - delta).max(Decimal::ZERO)
-                                    };
-                                    lr_rm.sync_position(
-                                        meta.token_id,
-                                        new_pos,
-                                        meta.price,
-                                        Some(pa_core::types::StrategyType::LiquidityRewards),
-                                        Some(cid),
-                                    );
-                                    meta.last_synced_matched = api_matched_size;
-                                    pa_monitor::metrics::LR_FILLS_DETECTED.inc();
-                                    tracing::info!(
-                                        market = %cid, token = %meta.token_id,
-                                        side = if meta.is_buy { "buy" } else { "sell" },
-                                        delta = %delta, total_matched = %api_matched_size,
-                                        new_pos = %new_pos,
-                                        fully_done = is_fully_done,
-                                        "LR: fill detected, position synced"
-                                    );
                                 }
 
-                                if is_fully_done {
-                                    fully_filled_ids.push(oid.clone());
-                                    any_full_fill = true;
-                                }
-                            }
+                                last_quoted_mid.remove(&tid);
 
-                            // Remove fully filled orders from tracking
-                            for id in &fully_filled_ids {
-                                tracked.remove(id);
-                            }
-
-                            // If any order fully filled: cancel remaining + re-quote for fresh inventory
-                            if any_full_fill {
-                                // Cancel remaining live orders for this market
-                                let remaining_ids: Vec<String> = tracked.keys().cloned().collect();
-                                if !remaining_ids.is_empty() {
-                                    let refs: Vec<&str> = remaining_ids.iter().map(|s| s.as_str()).collect();
-                                    if let Err(e) = lr_clob.cancel_orders(&refs).await {
-                                        tracing::debug!(error = %e, "LR: fill re-quote cancel failed");
-                                    }
-                                    pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(remaining_ids.len() as u64);
-                                }
-                                outstanding_orders.remove(&cid);
-
-                                // Re-quote with updated inventory
                                 if let Some(&idx) = cid_to_candidate_idx.get(&cid) {
                                     if let Some(candidate) = active_candidates.get(idx) {
                                         let current_exposure = Decimal::ZERO;
@@ -1226,26 +1127,501 @@ async fn main() -> Result<()> {
                                             if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
                                             if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
                                         }
-                                        last_quote_time.insert(cid, std::time::Instant::now());
-                                        pa_monitor::metrics::LR_FILL_REQUOTES.inc();
+                                        last_quote_time.insert(cid, now);
+                                    }
+                                }
+                            }
+                        }
+                        _ = fallback_interval.tick() => {
+                            let prev_ids: Vec<String> = outstanding_orders.drain()
+                                .flat_map(|(_, m)| m.into_keys())
+                                .collect();
+                            if !prev_ids.is_empty() {
+                                let refs: Vec<&str> = prev_ids.iter().map(|s| s.as_str()).collect();
+                                if let Err(e) = lr_clob.cancel_orders(&refs).await {
+                                    tracing::warn!(error = %e, "LR: batch cancel failed");
+                                }
+                                pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(prev_ids.len() as u64);
+                            }
+
+                            last_quoted_mid.clear();
+
+                            if active_candidates.is_empty() {
+                                tracing::debug!(account = %lr_name, "LR: no eligible reward markets");
+                                continue;
+                            }
+
+                            let mut total_exposure = Decimal::ZERO;
+                            for candidate in &active_candidates {
+                                let cid = candidate.market.condition_id;
+                                let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
+                                    &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
+                                ).await;
+                                total_exposure += exp;
+                                if !metas.is_empty() {
+                                    outstanding_orders.insert(cid, metas.into_iter().collect());
+                                }
+                                if candidate.market.tokens.len() >= 2 {
+                                    if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
+                                    if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
+                                }
+                                last_quote_time.insert(cid, std::time::Instant::now());
+                            }
+
+                            tracing::debug!(
+                                account = %lr_name,
+                                active_markets = outstanding_orders.len(),
+                                "LR: fallback quote refresh complete"
+                            );
+                        }
+                        _ = market_interval.tick() => {
+                            let prev_ids: Vec<String> = outstanding_orders.drain()
+                                .flat_map(|(_, m)| m.into_keys())
+                                .collect();
+                            if !prev_ids.is_empty() {
+                                let refs: Vec<&str> = prev_ids.iter().map(|s| s.as_str()).collect();
+                                if let Err(e) = lr_clob.cancel_orders(&refs).await {
+                                    tracing::warn!(error = %e, "LR: market refresh cancel failed");
+                                }
+                                pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(prev_ids.len() as u64);
+                            }
+
+                            let markets_snapshot = lr_shared.read().await;
+                            active_candidates = pa_strategy::liquidity_rewards::select_reward_markets(
+                                &markets_snapshot, &lr_config,
+                            );
+                            drop(markets_snapshot);
+
+                            token_to_condition.clear();
+                            cid_to_candidate_idx.clear();
+                            last_quoted_mid.clear();
+                            last_quote_time.clear();
+                            for (idx, c) in active_candidates.iter().enumerate() {
+                                let cid = c.market.condition_id;
+                                cid_to_candidate_idx.insert(cid, idx);
+                                if c.market.tokens.len() >= 2 {
+                                    token_to_condition.insert(c.market.tokens[0].token_id, cid);
+                                    token_to_condition.insert(c.market.tokens[1].token_id, cid);
+                                }
+                            }
+
+                            pa_monitor::metrics::LR_ACTIVE_MARKETS.set(active_candidates.len() as f64);
+
+                            let mut total_exposure = Decimal::ZERO;
+                            for candidate in &active_candidates {
+                                let cid = candidate.market.condition_id;
+                                let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
+                                    &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
+                                ).await;
+                                total_exposure += exp;
+                                if !metas.is_empty() {
+                                    outstanding_orders.insert(cid, metas.into_iter().collect());
+                                }
+                                if candidate.market.tokens.len() >= 2 {
+                                    if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
+                                    if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
+                                }
+                                last_quote_time.insert(cid, std::time::Instant::now());
+                            }
+
+                            tracing::info!(
+                                account = %lr_name,
+                                active_markets = outstanding_orders.len(),
+                                "LR: market re-selection complete"
+                            );
+                        }
+                        _ = fill_check_interval.tick(), if fill_check_enabled => {
+                            let cids: Vec<alloy::primitives::B256> = outstanding_orders.keys().cloned().collect();
+                            for cid in cids {
+                                let api_orders = match lr_clob.get_orders_by_market(cid).await {
+                                    Ok(o) => o,
+                                    Err(e) => {
+                                        tracing::debug!(error = %e, market = %cid, "LR: fill check query failed");
+                                        continue;
+                                    }
+                                };
+
+                                let tracked = match outstanding_orders.get_mut(&cid) {
+                                    Some(m) => m,
+                                    None => continue,
+                                };
+
+                                let mut any_full_fill = false;
+                                let mut fully_filled_ids: Vec<String> = Vec::new();
+
+                                for (oid, meta) in tracked.iter_mut() {
+                                    let api_match = api_orders.iter().find(|o| o.order_id == *oid);
+
+                                    let (is_fully_done, api_matched_size) = match api_match {
+                                        Some(o) => (o.is_matched, o.size_matched),
+                                        None => (true, meta.size),
+                                    };
+
+                                    let delta = api_matched_size - meta.last_synced_matched;
+                                    if delta > Decimal::ZERO {
+                                        let current_pos = lr_rm.get_position_size(&meta.token_id);
+                                        let new_pos = if meta.is_buy {
+                                            current_pos + delta
+                                        } else {
+                                            (current_pos - delta).max(Decimal::ZERO)
+                                        };
+                                        lr_rm.sync_position(
+                                            meta.token_id,
+                                            new_pos,
+                                            meta.price,
+                                            Some(pa_core::types::StrategyType::LiquidityRewards),
+                                            Some(cid),
+                                        );
+                                        meta.last_synced_matched = api_matched_size;
+                                        pa_monitor::metrics::LR_FILLS_DETECTED.inc();
+                                        tracing::info!(
+                                            account = %lr_name,
+                                            market = %cid, token = %meta.token_id,
+                                            side = if meta.is_buy { "buy" } else { "sell" },
+                                            delta = %delta, total_matched = %api_matched_size,
+                                            new_pos = %new_pos,
+                                            fully_done = is_fully_done,
+                                            "LR: fill detected, position synced"
+                                        );
+                                    }
+
+                                    if is_fully_done {
+                                        fully_filled_ids.push(oid.clone());
+                                        any_full_fill = true;
+                                    }
+                                }
+
+                                for id in &fully_filled_ids {
+                                    tracked.remove(id);
+                                }
+
+                                if any_full_fill {
+                                    let remaining_ids: Vec<String> = tracked.keys().cloned().collect();
+                                    if !remaining_ids.is_empty() {
+                                        let refs: Vec<&str> = remaining_ids.iter().map(|s| s.as_str()).collect();
+                                        if let Err(e) = lr_clob.cancel_orders(&refs).await {
+                                            tracing::debug!(error = %e, "LR: fill re-quote cancel failed");
+                                        }
+                                        pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(remaining_ids.len() as u64);
+                                    }
+                                    outstanding_orders.remove(&cid);
+
+                                    if let Some(&idx) = cid_to_candidate_idx.get(&cid) {
+                                        if let Some(candidate) = active_candidates.get(idx) {
+                                            let current_exposure = Decimal::ZERO;
+                                            let (metas, _exp, yes_mid, no_mid) = lr_quote_one_market(
+                                                &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, current_exposure,
+                                            ).await;
+                                            if !metas.is_empty() {
+                                                outstanding_orders.insert(cid, metas.into_iter().collect());
+                                            }
+                                            if candidate.market.tokens.len() >= 2 {
+                                                if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
+                                                if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
+                                            }
+                                            last_quote_time.insert(cid, std::time::Instant::now());
+                                            pa_monitor::metrics::LR_FILL_REQUOTES.inc();
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
-            }
-        });
-        tracing::info!(
-            max_markets = settings.liquidity_rewards.max_markets,
-            quote_refresh_secs = settings.liquidity_rewards.quote_refresh_secs,
-            "Liquidity rewards task started"
-        );
-    } else if settings.liquidity_rewards.enabled && !trading_enabled {
-        tracing::warn!("Liquidity rewards enabled but CLOB auth failed — LR disabled");
-    }
+            });
+            tracing::info!(
+                account = %acct_name,
+                max_markets = settings.liquidity_rewards.max_markets,
+                "Liquidity rewards task started"
+            );
+        } else if acct_strategies.contains(&"liquidity_rewards".to_string())
+            && settings.liquidity_rewards.enabled
+            && !ctx.trading_enabled
+        {
+            tracing::warn!(
+                account = %acct_name,
+                "LR enabled but CLOB auth failed — LR disabled for this account"
+            );
+        }
 
-    // --- Periodic market refresh background task ---
+        // --- Auto-redeem resolved positions (every 5 minutes) ---
+        if ctx.trading_enabled {
+            let redeem_signer = PrivateKeySigner::from_str(&ctx.private_key)
+                .context(format!("Invalid private key for redeem signer (account {})", acct_name))?
+                .with_chain_id(Some(ctx.chain_id));
+            let redeem_provider = alloy::providers::ProviderBuilder::new()
+                .wallet(redeem_signer.clone())
+                .connect(&settings.chain.rpc_url)
+                .await
+                .context(format!("Failed to connect RPC for redeem (account {})", acct_name))?;
+            let safe_redeemer = SafeRedeemer::new(redeem_provider, redeem_signer, ctx.proxy_addr);
+
+            match safe_redeemer.verify_ownership().await {
+                Ok(true) => tracing::info!(account = %acct_name, safe = %ctx.proxy_addr, "SafeRedeemer: EOA is Safe owner"),
+                Ok(false) => tracing::error!(account = %acct_name, safe = %ctx.proxy_addr, "SafeRedeemer: EOA is NOT a Safe owner"),
+                Err(e) => tracing::warn!(account = %acct_name, error = %e, "SafeRedeemer: could not verify ownership"),
+            }
+
+            let redeem_proxy = ctx.proxy_addr;
+            let redeem_cancel = cancel.clone();
+            let redeem_name = acct_name.clone();
+            tokio::spawn(async move {
+                let redeem_loader = match PositionLoader::new(redeem_proxy) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::error!(account = %redeem_name, error = %e, "Failed to create redeem position loader");
+                        return;
+                    }
+                };
+                let mut interval = tokio::time::interval(Duration::from_secs(300));
+                loop {
+                    tokio::select! {
+                        _ = redeem_cancel.cancelled() => break,
+                        _ = interval.tick() => {
+                            match redeem_loader.find_redeemable().await {
+                                Ok(positions) if positions.is_empty() => {}
+                                Ok(positions) => {
+                                    tracing::info!(
+                                        account = %redeem_name,
+                                        count = positions.len(),
+                                        "Found redeemable positions, claiming..."
+                                    );
+                                    for pos in &positions {
+                                        tracing::info!(
+                                            account = %redeem_name,
+                                            condition_id = %pos.condition_id,
+                                            title = %pos.title,
+                                            size = %pos.size,
+                                            neg_risk = pos.neg_risk,
+                                            outcome_index = pos.outcome_index,
+                                            "Redeeming resolved position via GnosisSafe"
+                                        );
+                                        let result = if pos.neg_risk {
+                                            let amount_raw = pos.size * rust_decimal::Decimal::from(1_000_000u64);
+                                            let amount = alloy::primitives::U256::from(
+                                                amount_raw.to_u64().unwrap_or(0)
+                                            );
+                                            let amounts = if pos.outcome_index == 0 {
+                                                vec![amount, alloy::primitives::U256::ZERO]
+                                            } else {
+                                                vec![alloy::primitives::U256::ZERO, amount]
+                                            };
+                                            safe_redeemer.redeem_neg_risk(
+                                                pos.condition_id,
+                                                amounts,
+                                            ).await
+                                        } else {
+                                            safe_redeemer.redeem(pos.condition_id).await
+                                        };
+                                        match result {
+                                            Ok(tx) => {
+                                                tracing::info!(
+                                                    account = %redeem_name,
+                                                    condition_id = %pos.condition_id,
+                                                    tx_hash = %tx.tx_hash,
+                                                    "Redeem successful"
+                                                );
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    account = %redeem_name,
+                                                    condition_id = %pos.condition_id,
+                                                    error = %e,
+                                                    "Redeem failed"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!(account = %redeem_name, error = %e, "Redeemable check failed");
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            tracing::info!(account = %acct_name, "Auto-redeem task started");
+        }
+
+        // --- Periodic position sync (reconcile with Data API every 5 min) ---
+        {
+            let sync_rm = Arc::clone(&ctx.risk_manager_impl);
+            let sync_markets = Arc::clone(&shared_markets);
+            let sync_neg_risk = neg_risk_events.clone();
+            let sync_cancel = cancel.clone();
+            let sync_proxy = ctx.proxy_addr;
+            let sync_name = acct_name.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(300));
+                interval.tick().await; // skip immediate tick
+                loop {
+                    tokio::select! {
+                        _ = sync_cancel.cancelled() => break,
+                        _ = interval.tick() => {
+                            let loader = match PositionLoader::new(sync_proxy) {
+                                Ok(l) => l,
+                                Err(e) => {
+                                    tracing::warn!(account = %sync_name, error = %e, "Position sync: failed to create loader");
+                                    continue;
+                                }
+                            };
+                            let api_positions = match loader.load_positions().await {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    tracing::warn!(account = %sync_name, error = %e, "Position sync: Data API fetch failed");
+                                    continue;
+                                }
+                            };
+
+                            let current = sync_rm.snapshot_positions();
+                            let known: std::collections::HashMap<alloy::primitives::U256, Decimal> =
+                                current.iter().map(|(tid, e)| (*tid, e.size)).collect();
+
+                            let markets_snapshot = sync_markets.read().await;
+                            let mut added = 0u32;
+                            let mut updated = 0u32;
+                            let mut retagged = 0u32;
+                            for pos in &api_positions {
+                                let existing_size = known.get(&pos.token_id).copied().unwrap_or(Decimal::ZERO);
+
+                                if existing_size == pos.size && existing_size > Decimal::ZERO {
+                                    let needs_retag = current.iter().any(|(tid, entry)| {
+                                        *tid == pos.token_id && entry.strategy_type.is_none()
+                                    });
+                                    if needs_retag {
+                                        let strategy_type = infer_strategy_type(
+                                            pos.token_id, &markets_snapshot, &sync_neg_risk,
+                                        );
+                                        if strategy_type.is_some() {
+                                            sync_rm.sync_position(
+                                                pos.token_id, pos.size, pos.avg_price,
+                                                strategy_type, Some(pos.condition_id),
+                                            );
+                                            tracing::info!(
+                                                account = %sync_name,
+                                                token_id = %pos.token_id,
+                                                strategy = ?strategy_type,
+                                                "Position sync: re-tagged"
+                                            );
+                                            retagged += 1;
+                                        }
+                                    }
+                                    continue;
+                                }
+                                if existing_size == Decimal::ZERO && pos.size > Decimal::ZERO {
+                                    let strategy_type = infer_strategy_type(
+                                        pos.token_id, &markets_snapshot, &sync_neg_risk,
+                                    );
+                                    sync_rm.sync_position(
+                                        pos.token_id, pos.size, pos.avg_price,
+                                        strategy_type, Some(pos.condition_id),
+                                    );
+                                    tracing::info!(
+                                        account = %sync_name,
+                                        token_id = %pos.token_id,
+                                        size = %pos.size,
+                                        strategy = ?strategy_type,
+                                        "Position sync: discovered missing position"
+                                    );
+                                    added += 1;
+                                } else if pos.size > Decimal::ZERO && existing_size > Decimal::ZERO && pos.size != existing_size {
+                                    let strategy_type = infer_strategy_type(
+                                        pos.token_id, &markets_snapshot, &sync_neg_risk,
+                                    );
+                                    sync_rm.sync_position(
+                                        pos.token_id, pos.size, pos.avg_price,
+                                        strategy_type, Some(pos.condition_id),
+                                    );
+                                    tracing::info!(
+                                        account = %sync_name,
+                                        token_id = %pos.token_id,
+                                        prev_size = %existing_size,
+                                        new_size = %pos.size,
+                                        "Position sync: size changed"
+                                    );
+                                    updated += 1;
+                                } else if pos.size == Decimal::ZERO && existing_size > Decimal::ZERO {
+                                    sync_rm.sync_position(
+                                        pos.token_id, Decimal::ZERO, Decimal::ZERO,
+                                        None, Some(pos.condition_id),
+                                    );
+                                    tracing::info!(
+                                        account = %sync_name,
+                                        token_id = %pos.token_id,
+                                        prev_size = %existing_size,
+                                        "Position sync: cleared stale position"
+                                    );
+                                    updated += 1;
+                                }
+                            }
+                            let api_tokens: HashSet<alloy::primitives::U256> =
+                                api_positions.iter().map(|p| p.token_id).collect();
+                            for (tid, entry) in &current {
+                                if entry.size > Decimal::ZERO && !api_tokens.contains(tid) {
+                                    sync_rm.sync_position(
+                                        *tid, Decimal::ZERO, Decimal::ZERO,
+                                        None, entry.condition_id,
+                                    );
+                                    tracing::info!(
+                                        account = %sync_name,
+                                        token_id = %tid,
+                                        prev_size = %entry.size,
+                                        "Position sync: cleared — no longer in Data API"
+                                    );
+                                    updated += 1;
+                                }
+                            }
+                            drop(markets_snapshot);
+
+                            if added > 0 || updated > 0 || retagged > 0 {
+                                tracing::info!(
+                                    account = %sync_name,
+                                    added, updated, retagged,
+                                    total_api = api_positions.len(),
+                                    "Position sync complete"
+                                );
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // --- Daily circuit breaker reset at midnight UTC ---
+        {
+            let daily_rm = Arc::clone(&ctx.risk_manager) as Arc<dyn pa_core::traits::RiskManager>;
+            let daily_cancel = cancel.clone();
+            tokio::spawn(async move {
+                loop {
+                    let now = chrono::Utc::now();
+                    let today = now.date_naive();
+                    let next_midnight = (today + chrono::Duration::days(1))
+                        .and_hms_opt(0, 0, 0)
+                        .unwrap();
+                    let until_midnight = next_midnight
+                        .signed_duration_since(now.naive_utc())
+                        .to_std()
+                        .unwrap_or(Duration::from_secs(3600));
+
+                    tokio::select! {
+                        _ = daily_cancel.cancelled() => break,
+                        _ = tokio::time::sleep(until_midnight) => {
+                            daily_rm.reset_daily();
+                            tracing::info!("Daily risk counters reset at midnight UTC");
+                        }
+                    }
+                }
+            });
+        }
+
+        tracing::info!(
+            account = %acct_name,
+            "All tasks started for account"
+        );
+    } // end per-account loop
+
+    // --- Periodic market refresh background task (shared across accounts) ---
     let refresh_interval = settings.market_filter.market_refresh_interval_secs;
     if refresh_interval > 0 {
         let refresh_markets = Arc::clone(&shared_markets);
@@ -1254,11 +1630,14 @@ async fn main() -> Result<()> {
         let refresh_cancel = cancel.clone();
         let refresh_enabled_strategies = settings.strategy.enabled.clone();
         let refresh_ws_max = settings.market_filter.ws_max_instruments;
-        let refresh_risk_manager = Arc::clone(&risk_manager_impl);
+        // Collect all accounts' risk managers for held token aggregation
+        let refresh_risk_managers: Vec<Arc<RiskManagerImpl>> = account_contexts.iter()
+            .map(|ctx| Arc::clone(&ctx.risk_manager_impl))
+            .collect();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(refresh_interval));
-            interval.tick().await; // skip first immediate tick
+            interval.tick().await;
 
             loop {
                 tokio::select! {
@@ -1284,20 +1663,22 @@ async fn main() -> Result<()> {
                                     tracing::info!(added, total = current.len(), "New markets discovered");
                                     pa_monitor::metrics::MONITORED_MARKETS.set(current.len() as f64);
 
-                                    // Rebuild WS token list and resubscribe
-                                    // Include current held position tokens so exit scanning keeps working
-                                    let held_tokens: Vec<alloy::primitives::U256> = refresh_risk_manager
-                                        .snapshot_positions()
-                                        .iter()
-                                        .map(|(tid, _)| *tid)
-                                        .collect();
+                                    // Aggregate held tokens across all accounts
+                                    let mut held_tokens: Vec<alloy::primitives::U256> = Vec::new();
+                                    for rm in &refresh_risk_managers {
+                                        for (tid, _) in rm.snapshot_positions() {
+                                            if !held_tokens.contains(&tid) {
+                                                held_tokens.push(tid);
+                                            }
+                                        }
+                                    }
                                     let token_ids = build_ws_token_list(
                                         &current,
                                         &held_tokens,
                                         &refresh_enabled_strategies,
                                         refresh_ws_max,
                                     );
-                                    drop(current); // release write lock before WS call
+                                    drop(current);
                                     if let Err(e) = refresh_market_data.resubscribe(&token_ids).await {
                                         tracing::warn!(error = %e, "WS resubscribe failed after market refresh");
                                     } else {
@@ -1322,272 +1703,6 @@ async fn main() -> Result<()> {
         );
     }
 
-    // --- Auto-redeem resolved positions (every 5 minutes) ---
-    // SafeRedeemer routes CTF redeemPositions through GnosisSafe.execTransaction()
-    // because tokens live in the Safe proxy wallet, not the EOA.
-    let redeem_signer = PrivateKeySigner::from_str(&private_key)
-        .context("Invalid private key for redeem signer")?
-        .with_chain_id(Some(settings.chain.chain_id));
-    let redeem_provider = alloy::providers::ProviderBuilder::new()
-        .wallet(redeem_signer.clone())
-        .connect(&settings.chain.rpc_url)
-        .await
-        .context("Failed to connect to RPC for redeem executor")?;
-    let safe_redeemer = SafeRedeemer::new(redeem_provider, redeem_signer, proxy_addr);
-    // Verify EOA is an owner of the Safe (diagnostic for GS013 errors)
-    match safe_redeemer.verify_ownership().await {
-        Ok(true) => tracing::info!(safe = %proxy_addr, "SafeRedeemer initialized — EOA is Safe owner"),
-        Ok(false) => tracing::error!(safe = %proxy_addr, "SafeRedeemer: EOA is NOT a Safe owner — redeem will fail"),
-        Err(e) => tracing::warn!(safe = %proxy_addr, error = %e, "SafeRedeemer: could not verify ownership"),
-    }
-
-    if trading_enabled {
-        let redeem_loader = PositionLoader::new(proxy_addr)?;
-        let redeem_cancel = cancel.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(300));
-            // First tick fires immediately — no skip
-            loop {
-                tokio::select! {
-                    _ = redeem_cancel.cancelled() => break,
-                    _ = interval.tick() => {
-                        match redeem_loader.find_redeemable().await {
-                            Ok(positions) if positions.is_empty() => {}
-                            Ok(positions) => {
-                                tracing::info!(
-                                    count = positions.len(),
-                                    "Found redeemable positions, claiming..."
-                                );
-                                for pos in &positions {
-                                    tracing::info!(
-                                        condition_id = %pos.condition_id,
-                                        title = %pos.title,
-                                        size = %pos.size,
-                                        neg_risk = pos.neg_risk,
-                                        outcome_index = pos.outcome_index,
-                                        "Redeeming resolved position via GnosisSafe"
-                                    );
-                                    let result = if pos.neg_risk {
-                                        // NegRisk: convert size to CTF amount (6 decimals)
-                                        // Only redeem the outcome we actually hold (other is 0)
-                                        let amount_raw = pos.size * rust_decimal::Decimal::from(1_000_000u64);
-                                        let amount = alloy::primitives::U256::from(
-                                            amount_raw.to_u64().unwrap_or(0)
-                                        );
-                                        let amounts = if pos.outcome_index == 0 {
-                                            vec![amount, alloy::primitives::U256::ZERO]
-                                        } else {
-                                            vec![alloy::primitives::U256::ZERO, amount]
-                                        };
-                                        safe_redeemer.redeem_neg_risk(
-                                            pos.condition_id,
-                                            amounts,
-                                        ).await
-                                    } else {
-                                        safe_redeemer.redeem(pos.condition_id).await
-                                    };
-                                    match result {
-                                        Ok(tx) => {
-                                            tracing::info!(
-                                                condition_id = %pos.condition_id,
-                                                tx_hash = %tx.tx_hash,
-                                                "Redeem successful"
-                                            );
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                condition_id = %pos.condition_id,
-                                                error = %e,
-                                                "Redeem failed"
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::debug!(error = %e, "Redeemable check failed");
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        tracing::info!("Auto-redeem task started (checks every 5 min)");
-    }
-
-    // --- Periodic position sync (reconcile with Data API every 5 min) ---
-    // Safety net: catches positions missed due to Delayed status, crashes, etc.
-    {
-        let sync_rm = Arc::clone(&risk_manager_impl);
-        let sync_markets = Arc::clone(&shared_markets);
-        let sync_neg_risk = neg_risk_events.clone();
-        let sync_cancel = cancel.clone();
-        let sync_proxy = proxy_addr;
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(300));
-            interval.tick().await; // skip immediate tick
-            loop {
-                tokio::select! {
-                    _ = sync_cancel.cancelled() => break,
-                    _ = interval.tick() => {
-                        let loader = match PositionLoader::new(sync_proxy) {
-                            Ok(l) => l,
-                            Err(e) => {
-                                tracing::warn!(error = %e, "Position sync: failed to create loader");
-                                continue;
-                            }
-                        };
-                        let api_positions = match loader.load_positions().await {
-                            Ok(p) => p,
-                            Err(e) => {
-                                tracing::warn!(error = %e, "Position sync: Data API fetch failed");
-                                continue;
-                            }
-                        };
-
-                        // Build set of known positions
-                        let current = sync_rm.snapshot_positions();
-                        let known: std::collections::HashMap<alloy::primitives::U256, Decimal> =
-                            current.iter().map(|(tid, e)| (*tid, e.size)).collect();
-
-                        let markets_snapshot = sync_markets.read().await;
-                        let mut added = 0u32;
-                        let mut updated = 0u32;
-                        let mut retagged = 0u32;
-                        for pos in &api_positions {
-                            let existing_size = known.get(&pos.token_id).copied().unwrap_or(Decimal::ZERO);
-
-                            // Re-tag positions with missing strategy_type even if size is unchanged.
-                            // This fixes positions that failed inference at startup (e.g. market not yet discovered).
-                            if existing_size == pos.size && existing_size > Decimal::ZERO {
-                                // Check if strategy_type is None — try to re-infer
-                                let needs_retag = current.iter().any(|(tid, entry)| {
-                                    *tid == pos.token_id && entry.strategy_type.is_none()
-                                });
-                                if needs_retag {
-                                    let strategy_type = infer_strategy_type(
-                                        pos.token_id, &markets_snapshot, &sync_neg_risk,
-                                    );
-                                    if strategy_type.is_some() {
-                                        sync_rm.sync_position(
-                                            pos.token_id, pos.size, pos.avg_price,
-                                            strategy_type, Some(pos.condition_id),
-                                        );
-                                        tracing::info!(
-                                            token_id = %pos.token_id,
-                                            strategy = ?strategy_type,
-                                            "Position sync: re-tagged untagged position"
-                                        );
-                                        retagged += 1;
-                                    }
-                                }
-                                continue;
-                            }
-                            if existing_size == Decimal::ZERO && pos.size > Decimal::ZERO {
-                                // New position not tracked by RiskManager
-                                let strategy_type = infer_strategy_type(
-                                    pos.token_id, &markets_snapshot, &sync_neg_risk,
-                                );
-                                sync_rm.sync_position(
-                                    pos.token_id, pos.size, pos.avg_price,
-                                    strategy_type, Some(pos.condition_id),
-                                );
-                                tracing::info!(
-                                    token_id = %pos.token_id,
-                                    size = %pos.size,
-                                    strategy = ?strategy_type,
-                                    "Position sync: discovered missing position"
-                                );
-                                added += 1;
-                            } else if pos.size > Decimal::ZERO && existing_size > Decimal::ZERO && pos.size != existing_size {
-                                // Size changed (partial fill, external trade, etc.)
-                                let strategy_type = infer_strategy_type(
-                                    pos.token_id, &markets_snapshot, &sync_neg_risk,
-                                );
-                                sync_rm.sync_position(
-                                    pos.token_id, pos.size, pos.avg_price,
-                                    strategy_type, Some(pos.condition_id),
-                                );
-                                tracing::info!(
-                                    token_id = %pos.token_id,
-                                    prev_size = %existing_size,
-                                    new_size = %pos.size,
-                                    "Position sync: size changed"
-                                );
-                                updated += 1;
-                            } else if pos.size == Decimal::ZERO && existing_size > Decimal::ZERO {
-                                // Position closed externally (redeemed, etc.) — zero it out
-                                sync_rm.sync_position(
-                                    pos.token_id, Decimal::ZERO, Decimal::ZERO,
-                                    None, Some(pos.condition_id),
-                                );
-                                tracing::info!(
-                                    token_id = %pos.token_id,
-                                    prev_size = %existing_size,
-                                    "Position sync: cleared stale position"
-                                );
-                                updated += 1;
-                            }
-                        }
-                        // Also check for positions in RiskManager but gone from Data API (redeemed)
-                        let api_tokens: HashSet<alloy::primitives::U256> =
-                            api_positions.iter().map(|p| p.token_id).collect();
-                        for (tid, entry) in &current {
-                            if entry.size > Decimal::ZERO && !api_tokens.contains(tid) {
-                                sync_rm.sync_position(
-                                    *tid, Decimal::ZERO, Decimal::ZERO,
-                                    None, entry.condition_id,
-                                );
-                                tracing::info!(
-                                    token_id = %tid,
-                                    prev_size = %entry.size,
-                                    "Position sync: cleared position no longer in Data API"
-                                );
-                                updated += 1;
-                            }
-                        }
-                        drop(markets_snapshot);
-
-                        if added > 0 || updated > 0 || retagged > 0 {
-                            tracing::info!(
-                                added, updated, retagged,
-                                total_api = api_positions.len(),
-                                "Position sync complete — reconciled with Data API"
-                            );
-                        }
-                    }
-                }
-            }
-        });
-        tracing::info!("Position sync task started (reconciles every 5 min)");
-    }
-
-    // --- Daily circuit breaker reset at midnight UTC ---
-    let daily_rm = Arc::clone(&risk_manager);
-    let daily_cancel = cancel.clone();
-    tokio::spawn(async move {
-        loop {
-            // Calculate seconds until next midnight UTC
-            let now = chrono::Utc::now();
-            let today = now.date_naive();
-            let next_midnight = (today + chrono::Duration::days(1))
-                .and_hms_opt(0, 0, 0)
-                .unwrap();
-            let until_midnight = next_midnight
-                .signed_duration_since(now.naive_utc())
-                .to_std()
-                .unwrap_or(Duration::from_secs(3600));
-
-            tokio::select! {
-                _ = daily_cancel.cancelled() => break,
-                _ = tokio::time::sleep(until_midnight) => {
-                    daily_rm.reset_daily();
-                    tracing::info!("Daily risk counters reset at midnight UTC");
-                }
-            }
-        }
-    });
-
     // Wait for Ctrl+C
     tokio::signal::ctrl_c().await?;
     tracing::info!("Shutdown signal received");
@@ -1595,14 +1710,18 @@ async fn main() -> Result<()> {
     // Cancel all tasks
     cancel.cancel();
 
-    // Cancel outstanding orders before exit
+    // Cancel outstanding orders for all accounts
     tracing::info!("Cancelling outstanding orders...");
-    if let Err(e) = executor.cancel_all().await {
-        tracing::error!(error = %e, "Failed to cancel orders on shutdown");
+    for ctx in &account_contexts {
+        if let Err(e) = ctx.executor.cancel_all().await {
+            tracing::error!(account = %ctx.name, error = %e, "Failed to cancel orders on shutdown");
+        }
     }
 
-    // Wait for engine to finish
-    let _ = engine_handle.await;
+    // Wait for engines to finish
+    for handle in engine_handles {
+        let _ = handle.await;
+    }
 
     tracing::info!("PolyAlpha shutdown complete");
     Ok(())
