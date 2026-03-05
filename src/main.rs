@@ -69,13 +69,13 @@ async fn fetch_clob_rewards(
     clob: &ClobExecutor,
 ) -> anyhow::Result<Vec<pa_strategy::liquidity_rewards::ClobRewardData>> {
     let mut all_rewards = Vec::new();
-    let mut next_cursor: Option<String> = Some("0".to_string());  // API expects "0" for first page
-    
+    let mut next_cursor: Option<String> = None;  // API expects None for first page
+
     tracing::debug!("Fetching CLOB rewards with next_cursor={:?}", next_cursor);
-    
+
     // Fetch all pages of rewards
     loop {
-        let page = match clob.current_rewards(next_cursor.as_ref().map(|s| s.to_string())).await {
+        let page = match clob.current_rewards(next_cursor.clone()).await {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(
@@ -102,8 +102,8 @@ async fn fetch_clob_rewards(
             });
         }
         
-        // Check if there's a next page
-        if page.next_cursor.is_empty() || page.next_cursor == "0" {
+        // Check if there's a next page (LTE= is the termination marker from API)
+        if page.next_cursor.is_empty() || page.next_cursor == "LTE=" {
             break;
         }
         next_cursor = Some(page.next_cursor.clone());
