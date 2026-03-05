@@ -117,27 +117,6 @@ pub static EVENT_FILTER_APPLIED: LazyLock<IntCounter> = LazyLock::new(|| {
     counter
 });
 
-/// Number of markets actively being market-made.
-pub static MM_ACTIVE_MARKETS: LazyLock<Gauge> = LazyLock::new(|| {
-    let gauge = Gauge::new("mm_active_markets", "Number of markets being market-made").unwrap();
-    REGISTRY.register(Box::new(gauge.clone())).unwrap();
-    gauge
-});
-
-/// Total market making orders placed.
-pub static MM_ORDERS_PLACED: LazyLock<IntCounter> = LazyLock::new(|| {
-    let counter = IntCounter::new("mm_orders_placed_total", "Market making orders placed").unwrap();
-    REGISTRY.register(Box::new(counter.clone())).unwrap();
-    counter
-});
-
-/// Total market making orders cancelled.
-pub static MM_ORDERS_CANCELLED: LazyLock<IntCounter> = LazyLock::new(|| {
-    let counter = IntCounter::new("mm_orders_cancelled_total", "Market making orders cancelled").unwrap();
-    REGISTRY.register(Box::new(counter.clone())).unwrap();
-    counter
-});
-
 /// Total exit trades executed (model reversal / capital efficiency).
 pub static EXIT_TRADES: LazyLock<IntCounter> = LazyLock::new(|| {
     let counter = IntCounter::new("exit_trades_total", "Exit trades executed").unwrap();
@@ -168,6 +147,61 @@ pub static DEPTH_VALIDATION_REJECTED: LazyLock<IntCounter> = LazyLock::new(|| {
     let counter = IntCounter::new(
         "depth_validation_rejected_total",
         "Opportunities rejected due to zero depth",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
+/// Total liquidity rewards orders placed (bid + ask on YES/NO).
+pub static LR_ORDERS_PLACED: LazyLock<IntCounter> = LazyLock::new(|| {
+    let counter = IntCounter::new(
+        "lr_orders_placed_total",
+        "Liquidity rewards orders placed",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
+/// Total liquidity rewards orders cancelled.
+pub static LR_ORDERS_CANCELLED: LazyLock<IntCounter> = LazyLock::new(|| {
+    let counter = IntCounter::new(
+        "lr_orders_cancelled_total",
+        "Liquidity rewards orders cancelled",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
+/// Number of markets actively being quoted for liquidity rewards.
+pub static LR_ACTIVE_MARKETS: LazyLock<Gauge> = LazyLock::new(|| {
+    let gauge = Gauge::new(
+        "lr_active_markets",
+        "Number of markets being quoted for liquidity rewards",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});
+
+/// Number of LR order fills detected via CLOB polling.
+pub static LR_FILLS_DETECTED: LazyLock<IntCounter> = LazyLock::new(|| {
+    let counter = IntCounter::new(
+        "lr_fills_detected_total",
+        "LR order fills detected via CLOB polling",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
+/// Number of LR re-quotes triggered by fill detection.
+pub static LR_FILL_REQUOTES: LazyLock<IntCounter> = LazyLock::new(|| {
+    let counter = IntCounter::new(
+        "lr_fill_requotes_total",
+        "LR re-quotes triggered by fill detection",
     )
     .unwrap();
     REGISTRY.register(Box::new(counter.clone())).unwrap();

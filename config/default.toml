@@ -94,6 +94,7 @@ refresh_interval_secs = 300
 coingecko_api_key = ""
 exit_buffer_bps = 50
 capital_efficiency_threshold = 0.98
+drift_decay = 0.0
 
 [event_calendar]
 enabled = false
@@ -106,10 +107,20 @@ high_impact_multiplier = 0.25
 medium_impact_multiplier = 0.50
 low_impact_multiplier = 0.75
 
-[market_making]
+[liquidity_rewards]
 enabled = false
-target_spread_bps = 300
-max_position_per_market = 50.0
-max_markets = 5
-quote_refresh_secs = 30
+max_markets = 10
+max_position_per_market = 100.0
+max_total_exposure = 500.0
+market_refresh_secs = 1800
+quote_refresh_secs = 60
+spread_fraction = 0.80
+min_order_size = 5.0
 inventory_skew_factor = 0.50
+min_daily_rate = 1.0
+requote_trigger_bps = 30
+requote_cooldown_secs = 3
+verify_scoring = false
+quote_yes = true
+quote_no = true
+fill_check_secs = 10

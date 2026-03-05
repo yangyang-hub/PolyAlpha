@@ -7,3 +7,4 @@ pub mod profitability;
 pub mod weather;
 pub mod convergence;
 pub mod crypto_alpha;
+pub mod liquidity_rewards;

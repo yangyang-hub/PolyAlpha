@@ -22,7 +22,7 @@ pub struct Settings {
     #[serde(default)]
     pub event_calendar: EventCalendarConfig,
     #[serde(default)]
-    pub market_making: MarketMakingConfig,
+    pub liquidity_rewards: LiquidityRewardsConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -329,8 +329,14 @@ pub struct CryptoAlphaConfig {
     /// Sell when best_bid >= this threshold (capital efficiency exit).
     #[serde(default = "default_capital_efficiency_threshold")]
     pub capital_efficiency_threshold: Decimal,
+    /// Drift decay factor (0.0 = risk-neutral, 1.0 = full historical drift).
+    /// Historical 30-day μ is unreliable for long-horizon predictions.
+    /// Default 0.0 aligns with Black-Scholes risk-neutral pricing.
+    #[serde(default = "default_drift_decay")]
+    pub drift_decay: f64,
 }
 
+fn default_drift_decay() -> f64 { 0.0 }
 fn default_crypto_min_edge() -> u32 { 500 }
 fn default_crypto_max_position_pct() -> Decimal { Decimal::new(50, 2) } // 0.50
 fn default_crypto_kelly() -> Decimal { Decimal::new(25, 2) }
@@ -346,6 +352,7 @@ impl Default for CryptoAlphaConfig {
             coingecko_api_key: String::new(),
             exit_buffer_bps: default_exit_buffer_bps(),
             capital_efficiency_threshold: default_capital_efficiency_threshold(),
+            drift_decay: default_drift_decay(),
         }
     }
 }
@@ -426,47 +433,98 @@ pub struct StaticEventConfig {
     pub keywords: Vec<String>,
 }
 
-/// Configuration for the Market Making background task.
+/// Configuration for the Liquidity Rewards background task.
 ///
-/// Places GTC limit orders on both sides of the book to earn the bid-ask spread.
-/// Runs as a background task separate from the strategy engine.
+/// Places GTC limit orders within the rewards spread band on both YES and NO sides
+/// to earn Polymarket CLOB liquidity rewards. Automatically discovers markets with
+/// active rewards and ranks them by reward density.
 #[derive(Debug, Deserialize, Clone)]
-pub struct MarketMakingConfig {
-    /// Whether market making is enabled.
+pub struct LiquidityRewardsConfig {
+    /// Whether liquidity rewards quoting is enabled.
     #[serde(default)]
     pub enabled: bool,
-    /// Target half-spread in basis points. Orders placed at midpoint +/- half_spread.
-    #[serde(default = "default_mm_target_spread")]
-    pub target_spread_bps: u32,
-    /// Maximum position per market in USDC.
-    #[serde(default = "default_mm_max_position")]
-    pub max_position_per_market: Decimal,
-    /// Maximum number of markets to make simultaneously.
-    #[serde(default = "default_mm_max_markets")]
+    /// Maximum number of markets to quote simultaneously.
+    #[serde(default = "default_lr_max_markets")]
     pub max_markets: usize,
-    /// How often to refresh quotes (seconds).
-    #[serde(default = "default_mm_refresh")]
+    /// Maximum position per market in USDC.
+    #[serde(default = "default_lr_max_position")]
+    pub max_position_per_market: Decimal,
+    /// Maximum total exposure across all reward markets in USDC.
+    #[serde(default = "default_lr_max_total_exposure")]
+    pub max_total_exposure: Decimal,
+    /// How often to re-select and re-rank reward markets (seconds).
+    #[serde(default = "default_lr_market_refresh")]
+    pub market_refresh_secs: u64,
+    /// How often to cancel-then-replace quotes (seconds).
+    #[serde(default = "default_lr_quote_refresh")]
     pub quote_refresh_secs: u64,
+    /// Fraction of rewards_max_spread to use (0.0-1.0).
+    #[serde(default = "default_lr_spread_fraction")]
+    pub spread_fraction: Decimal,
+    /// Minimum order size in USDC.
+    #[serde(default = "default_lr_min_order_size")]
+    pub min_order_size: Decimal,
     /// Inventory skew factor (0.0-1.0). Widens spread on heavy side.
-    #[serde(default = "default_mm_skew")]
+    #[serde(default = "default_lr_skew")]
     pub inventory_skew_factor: Decimal,
+    /// Minimum daily reward rate (USDC) to consider a market.
+    #[serde(default = "default_lr_min_daily_rate")]
+    pub min_daily_rate: Decimal,
+    /// Mid-price drift threshold in bps to trigger WS-driven re-quote.
+    /// When the midpoint moves more than this from the last quoted mid,
+    /// orders for that market are cancelled and immediately re-quoted.
+    #[serde(default = "default_lr_requote_trigger")]
+    pub requote_trigger_bps: u32,
+    /// Per-market cooldown between WS-driven re-quotes (seconds).
+    /// Prevents excessive re-quoting from rapid orderbook updates.
+    #[serde(default = "default_lr_requote_cooldown")]
+    pub requote_cooldown_secs: u64,
+    /// Whether to verify order scoring via the CLOB API.
+    #[serde(default)]
+    pub verify_scoring: bool,
+    /// Whether to quote on the YES side.
+    #[serde(default = "default_true")]
+    pub quote_yes: bool,
+    /// Whether to quote on the NO side.
+    #[serde(default = "default_true")]
+    pub quote_no: bool,
+    /// How often to check for filled orders (seconds). 0 = disabled.
+    #[serde(default = "default_lr_fill_check")]
+    pub fill_check_secs: u64,
 }
 
-fn default_mm_target_spread() -> u32 { 300 }
-fn default_mm_max_position() -> Decimal { Decimal::from(50) }
-fn default_mm_max_markets() -> usize { 5 }
-fn default_mm_refresh() -> u64 { 30 }
-fn default_mm_skew() -> Decimal { Decimal::new(50, 2) } // 0.50
+fn default_lr_max_markets() -> usize { 10 }
+fn default_lr_max_position() -> Decimal { Decimal::from(100) }
+fn default_lr_max_total_exposure() -> Decimal { Decimal::from(500) }
+fn default_lr_market_refresh() -> u64 { 1800 }
+fn default_lr_quote_refresh() -> u64 { 60 }
+fn default_lr_requote_trigger() -> u32 { 30 }
+fn default_lr_requote_cooldown() -> u64 { 3 }
+fn default_lr_spread_fraction() -> Decimal { Decimal::new(80, 2) } // 0.80
+fn default_lr_min_order_size() -> Decimal { Decimal::from(5) }
+fn default_lr_skew() -> Decimal { Decimal::new(50, 2) } // 0.50
+fn default_lr_min_daily_rate() -> Decimal { Decimal::ONE }
+fn default_lr_fill_check() -> u64 { 10 }
 
-impl Default for MarketMakingConfig {
+impl Default for LiquidityRewardsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            target_spread_bps: default_mm_target_spread(),
-            max_position_per_market: default_mm_max_position(),
-            max_markets: default_mm_max_markets(),
-            quote_refresh_secs: default_mm_refresh(),
-            inventory_skew_factor: default_mm_skew(),
+            max_markets: default_lr_max_markets(),
+            max_position_per_market: default_lr_max_position(),
+            max_total_exposure: default_lr_max_total_exposure(),
+            market_refresh_secs: default_lr_market_refresh(),
+            quote_refresh_secs: default_lr_quote_refresh(),
+            spread_fraction: default_lr_spread_fraction(),
+            min_order_size: default_lr_min_order_size(),
+            inventory_skew_factor: default_lr_skew(),
+            min_daily_rate: default_lr_min_daily_rate(),
+            requote_trigger_bps: default_lr_requote_trigger(),
+            requote_cooldown_secs: default_lr_requote_cooldown(),
+            verify_scoring: false,
+            quote_yes: true,
+            quote_no: true,
+            fill_check_secs: default_lr_fill_check(),
         }
     }
 }

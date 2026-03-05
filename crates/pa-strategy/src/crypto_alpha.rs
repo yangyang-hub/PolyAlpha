@@ -26,6 +26,8 @@ pub struct CryptoAsset {
     pub keywords: &'static [&'static str],
     pub binance_symbol: &'static str,
     pub coingecko_id: &'static str,
+    /// Deribit currency code for DVOL implied volatility (BTC/ETH only).
+    pub deribit_currency: Option<&'static str>,
 }
 
 pub static CRYPTO_ASSETS: &[CryptoAsset] = &[
@@ -34,60 +36,70 @@ pub static CRYPTO_ASSETS: &[CryptoAsset] = &[
         keywords: &["bitcoin", "btc"],
         binance_symbol: "BTCUSDT",
         coingecko_id: "bitcoin",
+        deribit_currency: Some("BTC"),
     },
     CryptoAsset {
         name: "Ethereum",
         keywords: &["ethereum", "eth"],
         binance_symbol: "ETHUSDT",
         coingecko_id: "ethereum",
+        deribit_currency: Some("ETH"),
     },
     CryptoAsset {
         name: "Solana",
         keywords: &["solana", "sol"],
         binance_symbol: "SOLUSDT",
         coingecko_id: "solana",
+        deribit_currency: None,
     },
     CryptoAsset {
         name: "BNB",
         keywords: &["bnb", "binance coin"],
         binance_symbol: "BNBUSDT",
         coingecko_id: "binancecoin",
+        deribit_currency: None,
     },
     CryptoAsset {
         name: "XRP",
         keywords: &["xrp", "ripple"],
         binance_symbol: "XRPUSDT",
         coingecko_id: "ripple",
+        deribit_currency: None,
     },
     CryptoAsset {
         name: "Dogecoin",
         keywords: &["dogecoin", "doge"],
         binance_symbol: "DOGEUSDT",
         coingecko_id: "dogecoin",
+        deribit_currency: None,
     },
     CryptoAsset {
         name: "Cardano",
         keywords: &["cardano"],
         binance_symbol: "ADAUSDT",
         coingecko_id: "cardano",
+        deribit_currency: None,
     },
     CryptoAsset {
         name: "Avalanche",
         keywords: &["avax"],
         binance_symbol: "AVAXUSDT",
         coingecko_id: "avalanche-2",
+        deribit_currency: None,
     },
     CryptoAsset {
         name: "Polkadot",
         keywords: &["polkadot"],
         binance_symbol: "DOTUSDT",
         coingecko_id: "polkadot",
+        deribit_currency: None,
     },
     CryptoAsset {
         name: "Polygon",
         keywords: &["polygon", "matic"],
         binance_symbol: "POLUSDT",
         coingecko_id: "polygon-ecosystem-token",
+        deribit_currency: None,
     },
 ];
 
@@ -318,6 +330,7 @@ pub fn parse_crypto_outcome_range(question: &str) -> Option<CryptoPriceRange> {
     if lower.contains("or below")
         || lower.contains("or less")
         || lower.contains("or lower")
+        || lower.contains("and below")
         || lower.contains("under ")
     {
         let price = prices.first()?;
@@ -325,6 +338,7 @@ pub fn parse_crypto_outcome_range(question: &str) -> Option<CryptoPriceRange> {
     } else if lower.contains("or above")
         || lower.contains("or more")
         || lower.contains("or higher")
+        || lower.contains("and above")
         || lower.contains('+')
     {
         let price = prices.first()?;
@@ -373,6 +387,8 @@ pub struct CryptoPriceData {
     pub current_price: f64,
     /// 30 daily close prices, oldest first.
     pub daily_closes: Vec<f64>,
+    /// Annualized implied volatility from Deribit DVOL (BTC/ETH only).
+    pub implied_vol: Option<f64>,
 }
 
 pub struct CryptoPriceClient {
@@ -393,31 +409,46 @@ impl CryptoPriceClient {
     }
 
     /// Fetch current price + 30-day daily closes from Binance. Falls back to CoinGecko.
+    /// If the asset has a Deribit currency, also fetches DVOL implied volatility.
     pub async fn get_price_data(
         &self,
         asset: &CryptoAsset,
     ) -> anyhow::Result<CryptoPriceData> {
         // Try Binance first
-        match self.fetch_binance(asset.binance_symbol).await {
-            Ok(data) => return Ok(data),
+        let mut data = match self.fetch_binance(asset.binance_symbol).await {
+            Ok(d) => d,
             Err(e) => {
                 tracing::warn!(
                     asset = asset.name,
                     error = %e,
                     "Binance fetch failed, trying CoinGecko fallback"
                 );
+                // Fallback to CoinGecko
+                if self.coingecko_api_key.as_ref().is_some_and(|k| !k.is_empty()) {
+                    self.fetch_coingecko(asset.coingecko_id).await?
+                } else {
+                    anyhow::bail!(
+                        "Binance failed and CoinGecko API key not configured for {}",
+                        asset.name
+                    )
+                }
+            }
+        };
+
+        // Fetch Deribit DVOL for BTC/ETH
+        if let Some(currency) = asset.deribit_currency {
+            match self.fetch_deribit_dvol(currency).await {
+                Ok(iv) => {
+                    tracing::debug!(asset = asset.name, iv, "Fetched Deribit DVOL");
+                    data.implied_vol = Some(iv);
+                }
+                Err(e) => {
+                    tracing::warn!(asset = asset.name, error = %e, "Deribit DVOL fetch failed, using historical vol only");
+                }
             }
         }
 
-        // Fallback to CoinGecko
-        if self.coingecko_api_key.as_ref().is_some_and(|k| !k.is_empty()) {
-            self.fetch_coingecko(asset.coingecko_id).await
-        } else {
-            anyhow::bail!(
-                "Binance failed and CoinGecko API key not configured for {}",
-                asset.name
-            )
-        }
+        Ok(data)
     }
 
     async fn fetch_binance(&self, symbol: &str) -> anyhow::Result<CryptoPriceData> {
@@ -478,6 +509,7 @@ impl CryptoPriceClient {
         Ok(CryptoPriceData {
             current_price,
             daily_closes,
+            implied_vol: None,
         })
     }
 
@@ -554,7 +586,50 @@ impl CryptoPriceClient {
         Ok(CryptoPriceData {
             current_price,
             daily_closes,
+            implied_vol: None,
         })
+    }
+
+    /// Fetch the latest Deribit DVOL (30-day implied volatility index) for BTC or ETH.
+    /// Returns annualized IV as a decimal (e.g. 0.65 = 65%).
+    async fn fetch_deribit_dvol(&self, currency: &str) -> anyhow::Result<f64> {
+        let now_ms = Utc::now().timestamp_millis();
+        // Request last 2 hours of 1-hour resolution data to get the latest point
+        let start_ms = now_ms - 2 * 3600 * 1000;
+        let url = format!(
+            "https://www.deribit.com/api/v2/public/get_volatility_index_data?currency={}&resolution=3600&start_timestamp={}&end_timestamp={}",
+            currency, start_ms, now_ms
+        );
+        let http = self.http.clone();
+        let url_clone = url.clone();
+        let iv: f64 = with_retry(1, || {
+            let http = http.clone();
+            let url = url_clone.clone();
+            async move {
+                let resp: serde_json::Value = http
+                    .get(&url)
+                    .timeout(std::time::Duration::from_secs(5))
+                    .send()
+                    .await?
+                    .json()
+                    .await?;
+                // Response: { "result": { "data": [[timestamp, open, high, low, close], ...] } }
+                let data = resp["result"]["data"]
+                    .as_array()
+                    .ok_or_else(|| anyhow::anyhow!("Missing DVOL data array"))?;
+                let last = data
+                    .last()
+                    .ok_or_else(|| anyhow::anyhow!("Empty DVOL data"))?;
+                // Index [4] is close
+                let close = last[4]
+                    .as_f64()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid DVOL close value"))?;
+                // DVOL is in percentage points (e.g. 65.0 = 65%), convert to decimal
+                Ok(close / 100.0)
+            }
+        })
+        .await?;
+        Ok(iv)
     }
 }
 
@@ -598,6 +673,15 @@ pub fn calculate_volatility(daily_closes: &[f64]) -> Option<(f64, f64)> {
     Some((mu, sigma))
 }
 
+/// Blend historical volatility with Deribit implied volatility when available.
+/// Uses 70% IV + 30% historical for BTC/ETH; falls back to pure historical for others.
+pub fn effective_volatility(historical_sigma: f64, implied_vol: Option<f64>) -> f64 {
+    match implied_vol {
+        Some(iv) if iv > 0.0 => 0.7 * iv + 0.3 * historical_sigma,
+        _ => historical_sigma,
+    }
+}
+
 /// Probability that price exceeds threshold under GBM.
 /// P(S_T > K) = Φ(d) where d = (ln(S/K) + (μ - σ²/2) * t) / (σ * √t)
 pub fn gbm_probability(current_price: f64, threshold: f64, mu: f64, sigma: f64, days: f64) -> f64 {
@@ -614,9 +698,14 @@ pub fn gbm_probability(current_price: f64, threshold: f64, mu: f64, sigma: f64, 
 
 // ──── Cached Price ────
 
+/// Baseline annualized crypto volatility (~60%) for dynamic TTL scaling.
+const BASELINE_CRYPTO_SIGMA: f64 = 0.60;
+
 struct CachedPrice {
     data: CryptoPriceData,
     fetched_at: chrono::DateTime<Utc>,
+    /// Last computed annualized volatility, used to shorten cache TTL during high-vol periods.
+    last_sigma: Option<f64>,
 }
 
 // ──── Strategy ────
@@ -676,18 +765,26 @@ impl CryptoAlphaStrategy {
     }
 
     /// Get price data, using cache if fresh enough.
+    /// TTL is dynamically shortened when recent volatility exceeds the baseline.
     async fn get_price_data(&self, asset: &CryptoAsset) -> anyhow::Result<CryptoPriceData> {
         let cache_key = asset.binance_symbol.to_string();
         let refresh_secs = self.config.refresh_interval_secs;
 
-        // Check cache
+        // Check cache with dynamic TTL
         {
             let cache = self.price_cache.lock().unwrap();
             if let Some(cached) = cache.get(&cache_key) {
                 let age = Utc::now()
                     .signed_duration_since(cached.fetched_at)
                     .num_seconds();
-                if age < refresh_secs as i64 {
+                let effective_ttl = match cached.last_sigma {
+                    Some(sigma) if sigma > 0.0 => {
+                        let scale = (sigma / BASELINE_CRYPTO_SIGMA).max(1.0);
+                        refresh_secs as f64 / scale
+                    }
+                    _ => refresh_secs as f64,
+                };
+                if age < effective_ttl as i64 {
                     return Ok(cached.data.clone());
                 }
             }
@@ -696,19 +793,30 @@ impl CryptoAlphaStrategy {
         // Fetch fresh data
         let data = self.price_client.get_price_data(asset).await?;
 
-        // Update cache
+        // Update cache (preserve last_sigma from previous entry if available)
         {
             let mut cache = self.price_cache.lock().unwrap();
+            let prev_sigma = cache.get(&cache_key).and_then(|c| c.last_sigma);
             cache.insert(
                 cache_key,
                 CachedPrice {
                     data: data.clone(),
                     fetched_at: Utc::now(),
+                    last_sigma: prev_sigma,
                 },
             );
         }
 
         Ok(data)
+    }
+
+    /// Update the cached volatility for dynamic TTL calculation.
+    fn update_cache_sigma(&self, binance_symbol: &str, sigma: f64) {
+        if let Ok(mut cache) = self.price_cache.lock() {
+            if let Some(entry) = cache.get_mut(binance_symbol) {
+                entry.last_sigma = Some(sigma);
+            }
+        }
     }
 
     /// Detect a crypto alpha opportunity on a single market.
@@ -741,6 +849,9 @@ impl CryptoAlphaStrategy {
 
         // Calculate volatility
         let (mu, sigma) = calculate_volatility(&price_data.daily_closes)?;
+        let mu = mu * self.config.drift_decay;
+        let sigma = effective_volatility(sigma, price_data.implied_vol);
+        self.update_cache_sigma(question.asset.binance_symbol, sigma);
 
         // GBM probability P(S_T > K)
         let prob_above = gbm_probability(
@@ -819,9 +930,9 @@ impl CryptoAlphaStrategy {
         let kelly_size = kelly_raw * self.config.kelly_fraction * effective_max;
         let available = (self.get_available_capital)();
 
-        // Position-aware sizing
-        let existing = (self.get_position)(token_id);
-        let remaining = (effective_max - existing).max(Decimal::ZERO);
+        // Position-aware sizing (convert shares to USDC cost for correct unit comparison)
+        let existing_cost = (self.get_position)(token_id) * ask_price;
+        let remaining = (effective_max - existing_cost).max(Decimal::ZERO);
         let size = kelly_size.min(remaining).min(available);
 
         // Ensure size meets CLOB minimum cost ($1.00).
@@ -911,6 +1022,9 @@ impl CryptoAlphaStrategy {
         };
 
         let (mu, sigma) = calculate_volatility(&price_data.daily_closes)?;
+        let mu = mu * self.config.drift_decay;
+        let sigma = effective_volatility(sigma, price_data.implied_vol);
+        self.update_cache_sigma(asset.binance_symbol, sigma);
 
         // Evaluate each outcome market
         let mut best_edge = Decimal::ZERO;
@@ -1005,9 +1119,9 @@ impl CryptoAlphaStrategy {
         let kelly_size = kelly_raw * self.config.kelly_fraction * effective_max;
         let available = (self.get_available_capital)();
 
-        // Position-aware sizing
-        let existing = (self.get_position)(token_id);
-        let remaining = (effective_max - existing).max(Decimal::ZERO);
+        // Position-aware sizing (convert shares to USDC cost for correct unit comparison)
+        let existing_cost = (self.get_position)(token_id) * ask_price;
+        let remaining = (effective_max - existing_cost).max(Decimal::ZERO);
         let size = kelly_size.min(remaining).min(available);
 
         // Ensure size meets CLOB minimum cost ($1.00).
@@ -1104,6 +1218,9 @@ impl CryptoAlphaStrategy {
         };
 
         let (mu, sigma) = calculate_volatility(&price_data.daily_closes)?;
+        let mu = mu * self.config.drift_decay;
+        let sigma = effective_volatility(sigma, price_data.implied_vol);
+        self.update_cache_sigma(asset.binance_symbol, sigma);
 
         // Evaluate each market in the group, track the best edge
         let mut best_edge = Decimal::ZERO;
@@ -1236,9 +1353,9 @@ impl CryptoAlphaStrategy {
         let kelly_size = kelly_raw * self.config.kelly_fraction * effective_max;
         let available = (self.get_available_capital)();
 
-        // Position-aware sizing
-        let existing = (self.get_position)(token_id);
-        let remaining = (effective_max - existing).max(Decimal::ZERO);
+        // Position-aware sizing (convert shares to USDC cost for correct unit comparison)
+        let existing_cost = (self.get_position)(token_id) * ask_price;
+        let remaining = (effective_max - existing_cost).max(Decimal::ZERO);
         let size = kelly_size.min(remaining).min(available);
 
         // Ensure size meets CLOB minimum cost ($1.00).
@@ -1367,47 +1484,95 @@ impl CryptoAlphaStrategy {
                 }
             };
 
-            let parsed = match parse_crypto_question(&market.question) {
-                Some(p) => p,
-                None => {
-                    tracing::debug!(token_id = %token_id, question = %market.question, "[CryptoAlpha EXIT] parse_crypto_question failed — not a crypto market?");
-                    continue;
-                }
-            };
+            // Try binary market parsing first, then fall back to NegRisk range parsing
+            let held_side_prob = if let Some(parsed) = parse_crypto_question(&market.question) {
+                // Binary market: standard GBM probability
+                let price_data = match self.get_price_data(parsed.asset).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::debug!(token_id = %token_id, asset = ?parsed.asset, error = %e, "[CryptoAlpha EXIT] price data fetch failed");
+                        continue;
+                    }
+                };
 
-            let price_data = match self.get_price_data(parsed.asset).await {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::debug!(token_id = %token_id, asset = ?parsed.asset, error = %e, "[CryptoAlpha EXIT] price data fetch failed");
+                let (mu, sigma) = match calculate_volatility(&price_data.daily_closes) {
+                    Some(v) => v,
+                    None => {
+                        tracing::debug!(token_id = %token_id, "[CryptoAlpha EXIT] volatility calculation failed");
+                        continue;
+                    }
+                };
+                let mu = mu * self.config.drift_decay;
+                let sigma = effective_volatility(sigma, price_data.implied_vol);
+                self.update_cache_sigma(parsed.asset.binance_symbol, sigma);
+                if sigma <= 0.0 {
                     continue;
                 }
-            };
 
-            let (mu, sigma) = match calculate_volatility(&price_data.daily_closes) {
-                Some(v) => v,
-                None => {
-                    tracing::debug!(token_id = %token_id, "[CryptoAlpha EXIT] volatility calculation failed");
+                let target_date = parsed.target_date.unwrap_or_else(|| {
+                    (Utc::now() + chrono::Duration::days(30)).date_naive()
+                });
+                let days_to_target = (target_date - Utc::now().date_naive()).num_days().max(1) as f64;
+
+                let model_prob = gbm_probability(price_data.current_price, parsed.threshold, mu, sigma, days_to_target);
+                let effective_prob = match parsed.direction {
+                    PriceDirection::Above => model_prob,
+                    PriceDirection::Below => 1.0 - model_prob,
+                };
+
+                let is_yes = market.tokens.first().map(|t| t.token_id == *token_id).unwrap_or(false);
+                if is_yes { effective_prob } else { 1.0 - effective_prob }
+            } else if let Some(range) = parse_crypto_outcome_range(&market.question) {
+                // NegRisk outcome: find asset from parent event title
+                let neg_risk_asset = self.neg_risk_events.iter()
+                    .find(|ev| ev.markets.iter().any(|m| m.tokens.iter().any(|t| t.token_id == *token_id)))
+                    .and_then(|ev| parse_crypto_event_title(&ev.title))
+                    .map(|(asset, target_date)| (asset, target_date));
+
+                let (asset, target_date) = match neg_risk_asset {
+                    Some(v) => v,
+                    None => {
+                        tracing::debug!(token_id = %token_id, question = %market.question, "[CryptoAlpha EXIT] NegRisk range but no matching event");
+                        continue;
+                    }
+                };
+
+                let price_data = match self.get_price_data(asset).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::debug!(token_id = %token_id, asset = asset.name, error = %e, "[CryptoAlpha EXIT] NegRisk price data fetch failed");
+                        continue;
+                    }
+                };
+
+                let (mu, sigma) = match calculate_volatility(&price_data.daily_closes) {
+                    Some(v) => v,
+                    None => {
+                        tracing::debug!(token_id = %token_id, "[CryptoAlpha EXIT] NegRisk volatility calculation failed");
+                        continue;
+                    }
+                };
+                let mu = mu * self.config.drift_decay;
+                let sigma = effective_volatility(sigma, price_data.implied_vol);
+                self.update_cache_sigma(asset.binance_symbol, sigma);
+                if sigma <= 0.0 {
                     continue;
                 }
-            };
-            if sigma <= 0.0 {
+
+                let target_date = target_date.unwrap_or_else(|| {
+                    (Utc::now() + chrono::Duration::days(30)).date_naive()
+                });
+                let days_to_target = (target_date - Utc::now().date_naive()).num_days().max(1) as f64;
+
+                let range_prob = gbm_range_probability(price_data.current_price, &range, mu, sigma, days_to_target);
+
+                // NegRisk: YES token = tokens[0], NO token = tokens[1]
+                let is_yes = market.tokens.first().map(|t| t.token_id == *token_id).unwrap_or(false);
+                if is_yes { range_prob } else { 1.0 - range_prob }
+            } else {
+                tracing::debug!(token_id = %token_id, question = %market.question, "[CryptoAlpha EXIT] could not parse question or outcome range");
                 continue;
-            }
-
-            let target_date = parsed.target_date.unwrap_or_else(|| {
-                (Utc::now() + chrono::Duration::days(30)).date_naive()
-            });
-            let days_to_target = (target_date - Utc::now().date_naive()).num_days().max(1) as f64;
-
-            let model_prob = gbm_probability(price_data.current_price, parsed.threshold, mu, sigma, days_to_target);
-            let effective_prob = match parsed.direction {
-                PriceDirection::Above => model_prob,
-                PriceDirection::Below => 1.0 - model_prob,
             };
-
-            // Determine which side we hold: YES = tokens[0], NO = tokens[1]
-            let is_yes = market.tokens.first().map(|t| t.token_id == *token_id).unwrap_or(false);
-            let held_side_prob = if is_yes { effective_prob } else { 1.0 - effective_prob };
             let model_prob_dec = match Decimal::from_f64_retain(held_side_prob) {
                 Some(d) => d,
                 None => continue,
@@ -1494,7 +1659,6 @@ impl Strategy for CryptoAlphaStrategy {
         let mut binary_group_crypto = 0u32;
         let mut neg_risk_matched = 0u32;
         let mut neg_risk_expired = 0u32;
-        let mut neg_risk_no_date = 0u32;
 
         // Build a set of condition_ids that belong to binary event groups,
         // so we skip them in the individual market loop (avoid double-processing).
@@ -1548,13 +1712,9 @@ impl Strategy for CryptoAlphaStrategy {
                 let now_date = Utc::now().date_naive();
                 let days = target_date
                     .map(|d| (d - now_date).num_days())
-                    .unwrap_or(0);
+                    .unwrap_or(30); // Default 30 days for events without explicit date
                 if days <= 0 {
-                    if target_date.is_some() {
-                        neg_risk_expired += 1;
-                    } else {
-                        neg_risk_no_date += 1;
-                    }
+                    neg_risk_expired += 1;
                     continue;
                 }
                 neg_risk_matched += 1;
@@ -1575,7 +1735,6 @@ impl Strategy for CryptoAlphaStrategy {
                 neg_risk_events = self.neg_risk_events.len(),
                 neg_risk_matched,
                 neg_risk_expired,
-                neg_risk_no_date,
                 opportunities = opportunities.len(),
                 best_near_miss_bps = best_near_miss,
                 min_edge_bps = self.config.min_edge_bps,
@@ -1959,6 +2118,11 @@ mod tests {
             outcome_prices: None,
             gamma_best_bid: None,
             gamma_best_ask: None,
+            rewards_min_size: None,
+            rewards_max_spread: None,
+            rewards_daily_rate: None,
+            holding_rewards_enabled: false,
+            fees_enabled: false,
         };
         let market2 = MarketInfo {
             question: "Will Bitcoin reach $150,000?".into(),
@@ -2009,6 +2173,11 @@ mod tests {
             outcome_prices: None,
             gamma_best_bid: None,
             gamma_best_ask: None,
+            rewards_min_size: None,
+            rewards_max_spread: None,
+            rewards_daily_rate: None,
+            holding_rewards_enabled: false,
+            fees_enabled: false,
         }
     }
 
@@ -2033,6 +2202,7 @@ mod tests {
             coingecko_api_key: String::new(),
             exit_buffer_bps: 50,
             capital_efficiency_threshold: dec!(0.98),
+            drift_decay: 0.0,
         };
         let books = Arc::new(books);
         CryptoAlphaStrategy::new(
@@ -2101,13 +2271,119 @@ mod tests {
                 data: CryptoPriceData {
                     current_price: 95000.0,
                     daily_closes: (0..30).map(|i| 94000.0 + (i as f64) * 100.0).collect(),
+                    implied_vol: None,
                 },
                 fetched_at: Utc::now(),
+                last_sigma: None,
             });
         }
 
         let exits = strategy.scan_exits(&[market]).await;
         assert_eq!(exits.len(), 1, "Should detect model reversal exit");
         assert!(exits[0].question.starts_with("[EXIT]"));
+    }
+
+    // ──── Drift Decay Tests ────
+
+    #[test]
+    fn test_drift_decay_reduces_mu() {
+        // Verify drift_decay multiplicatively reduces mu,
+        // and that reduced mu lowers the probability of exceeding a threshold.
+        let mu = 0.50; // 50% annualized drift
+        let sigma = 0.60; // 60% annualized vol (typical crypto)
+        let current = 100.0;
+        let threshold = 120.0; // 20% OTM
+        let days = 90.0;
+
+        // drift_decay = 1.0 → full historical drift
+        let prob_full = gbm_probability(current, threshold, mu * 1.0, sigma, days);
+        // drift_decay = 0.5 → halved drift
+        let prob_half = gbm_probability(current, threshold, mu * 0.5, sigma, days);
+        // drift_decay = 0.0 → risk-neutral (mu=0)
+        let prob_zero = gbm_probability(current, threshold, mu * 0.0, sigma, days);
+
+        // Higher drift → higher probability of exceeding threshold
+        assert!(
+            prob_full > prob_half,
+            "full drift should give higher prob than half: {} > {}",
+            prob_full,
+            prob_half
+        );
+        assert!(
+            prob_half > prob_zero,
+            "half drift should give higher prob than zero: {} > {}",
+            prob_half,
+            prob_zero
+        );
+        // Risk-neutral should be noticeably below full drift
+        assert!(
+            prob_full - prob_zero > 0.01,
+            "drift should meaningfully affect probability: diff={}",
+            prob_full - prob_zero
+        );
+    }
+
+    // ──── Effective Volatility Tests ────
+
+    #[test]
+    fn test_effective_volatility_blends_iv() {
+        // When IV is available, blend 70% IV + 30% historical
+        let hist = 0.80;
+        let iv = Some(0.60);
+        let blended = effective_volatility(hist, iv);
+        let expected = 0.7 * 0.60 + 0.3 * 0.80; // 0.42 + 0.24 = 0.66
+        assert!(
+            (blended - expected).abs() < 1e-10,
+            "Expected {}, got {}",
+            expected,
+            blended
+        );
+    }
+
+    #[test]
+    fn test_effective_volatility_fallback() {
+        // When IV is None, use pure historical
+        let hist = 0.80;
+        assert_eq!(effective_volatility(hist, None), hist);
+        // When IV is zero, also fallback
+        assert_eq!(effective_volatility(hist, Some(0.0)), hist);
+        // When IV is negative (invalid), also fallback
+        assert_eq!(effective_volatility(hist, Some(-0.1)), hist);
+    }
+
+    // ──── Dynamic Cache TTL Tests ────
+
+    #[test]
+    fn test_dynamic_cache_ttl() {
+        // High sigma (1.2) should halve the TTL compared to baseline (0.6)
+        let refresh_secs: u64 = 300;
+        let high_sigma = 1.2_f64;
+        let scale = (high_sigma / BASELINE_CRYPTO_SIGMA).max(1.0);
+        let effective_ttl = refresh_secs as f64 / scale;
+        assert!(
+            (effective_ttl - 150.0).abs() < 0.01,
+            "sigma=1.2 should halve TTL to 150s, got {}",
+            effective_ttl
+        );
+
+        // Normal sigma (0.6 = baseline) should keep TTL unchanged
+        let normal_sigma = 0.6_f64;
+        let scale = (normal_sigma / BASELINE_CRYPTO_SIGMA).max(1.0);
+        let effective_ttl = refresh_secs as f64 / scale;
+        assert!(
+            (effective_ttl - 300.0).abs() < 0.01,
+            "sigma=0.6 (baseline) should keep TTL at 300s, got {}",
+            effective_ttl
+        );
+
+        // Low sigma (0.3) should not exceed baseline TTL (clamped by max(1.0))
+        let low_sigma = 0.3_f64;
+        let scale = (low_sigma / BASELINE_CRYPTO_SIGMA).max(1.0);
+        let effective_ttl = refresh_secs as f64 / scale;
+        assert!(
+            (effective_ttl - 300.0).abs() < 0.01,
+            "sigma=0.3 (below baseline) should keep TTL at 300s, got {}",
+            effective_ttl
+        );
     }
 }

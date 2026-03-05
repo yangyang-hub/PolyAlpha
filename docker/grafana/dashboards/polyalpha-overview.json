@@ -186,7 +186,7 @@
       },
       "options": { "graphMode": "none", "colorMode": "value", "textMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"] } },
       "targets": [
-        { "expr": "mm_active_markets", "legendFormat": "", "refId": "A" }
+        { "expr": "lr_active_markets", "legendFormat": "", "refId": "A" }
       ]
     },
     {
@@ -512,8 +512,10 @@
         ]
       },
       "targets": [
-        { "expr": "rate(mm_orders_placed_total[5m]) * 300", "legendFormat": "下单", "refId": "A" },
-        { "expr": "rate(mm_orders_cancelled_total[5m]) * 300", "legendFormat": "撤单", "refId": "B" }
+        { "expr": "rate(lr_orders_placed_total[5m]) * 300", "legendFormat": "下单", "refId": "A" },
+        { "expr": "rate(lr_orders_cancelled_total[5m]) * 300", "legendFormat": "撤单", "refId": "B" },
+        { "expr": "rate(lr_fills_detected_total[5m]) * 300", "legendFormat": "成交", "refId": "C" },
+        { "expr": "rate(lr_fill_requotes_total[5m]) * 300", "legendFormat": "补单", "refId": "D" }
       ]
     }
   ],

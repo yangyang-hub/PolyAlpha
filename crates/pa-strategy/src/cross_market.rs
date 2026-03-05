@@ -465,6 +465,11 @@ mod tests {
             outcome_prices: None,
             gamma_best_bid: None,
             gamma_best_ask: None,
+            rewards_min_size: None,
+            rewards_max_spread: None,
+            rewards_daily_rate: None,
+            holding_rewards_enabled: false,
+            fees_enabled: false,
         }
     }
 

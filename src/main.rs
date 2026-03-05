@@ -33,6 +33,18 @@ use pa_strategy::engine::StrategyEngine;
 use pa_strategy::neg_risk::NegRiskArbitrage;
 use pa_strategy::yes_no::YesNoArbitrage;
 
+/// Metadata for a tracked LR order, used by fill detection to sync positions.
+#[derive(Clone, Debug)]
+struct LrOrderMeta {
+    token_id: alloy::primitives::U256,
+    is_buy: bool,
+    price: Decimal,
+    size: Decimal,
+    /// Cumulative size_matched already synced to RiskManager.
+    /// Used to compute delta on partial fills: new_fill = api.size_matched - last_synced.
+    last_synced_matched: Decimal,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load .env file if present
@@ -824,222 +836,413 @@ async fn main() -> Result<()> {
     );
 
     // --- Run trading loop with graceful shutdown ---
-    let all_markets_for_mm = shared_markets.read().await.clone(); // snapshot for MM
     let engine_shared = Arc::clone(&shared_markets);
     let engine_cancel = cancel.clone();
     let engine_handle = tokio::spawn(async move {
         engine.run(engine_shared, update_rx, engine_cancel).await;
     });
 
-    // --- Market Making background task ---
-    if settings.market_making.enabled && trading_enabled {
-        let mm_config = settings.market_making.clone();
-        let mm_cache = market_data.cache().clone();
-        let mm_cancel = cancel.clone();
-        let mm_rm = Arc::clone(&risk_manager_impl);
-        let mm_markets = all_markets_for_mm;
-        let mm_private_key = private_key.clone();
+    // --- Liquidity Rewards background task ---
+    if settings.liquidity_rewards.enabled && trading_enabled {
+        let lr_config = settings.liquidity_rewards.clone();
+        let lr_cache = market_data.cache().clone();
+        let lr_cancel = cancel.clone();
+        let lr_rm = Arc::clone(&risk_manager_impl);
+        let lr_shared = Arc::clone(&shared_markets);
+        let lr_private_key = private_key.clone();
+        let lr_clob_host = settings.clob.host.clone();
+        let lr_sig_type = settings.clob.signature_type;
+        let lr_chain_id = settings.chain.chain_id;
+        // Subscribe to WS order book updates for re-quote trigger (before spawn)
+        let lr_update_rx = market_data.ws_feed().await.subscribe_updates();
 
-        // Create a second CLOB executor for MM to avoid request contention
-        let mm_clob_host = settings.clob.host.clone();
-        let mm_sig_type = settings.clob.signature_type;
-        let mm_chain_id = settings.chain.chain_id;
         tokio::spawn(async move {
-            // Authenticate a separate CLOB client for market making
-            let mm_signer = match PrivateKeySigner::from_str(&mm_private_key) {
-                Ok(s) => s.with_chain_id(Some(mm_chain_id)),
+            let lr_signer = match PrivateKeySigner::from_str(&lr_private_key) {
+                Ok(s) => s.with_chain_id(Some(lr_chain_id)),
                 Err(e) => {
-                    tracing::error!(error = %e, "MM: failed to parse signer");
+                    tracing::error!(error = %e, "LR: failed to parse signer");
                     return;
                 }
             };
-            let mm_clob = match ClobExecutor::connect(&mm_clob_host, mm_signer, mm_sig_type).await {
+            let lr_clob = match ClobExecutor::connect(&lr_clob_host, lr_signer, lr_sig_type).await {
                 Ok(c) => c,
                 Err(e) => {
-                    tracing::error!(error = %e, "MM: CLOB authentication failed, market making disabled");
+                    tracing::error!(error = %e, "LR: CLOB authentication failed, liquidity rewards disabled");
                     return;
                 }
             };
-            tracing::info!("MM: CLOB authenticated, starting market making");
+            tracing::info!("LR: CLOB authenticated, starting liquidity rewards");
 
-            // Select top N mid-range, non-NegRisk markets by outcome price proximity to 0.50
-            let mut candidates: Vec<&pa_core::types::MarketInfo> = mm_markets
-                .iter()
-                .filter(|m| {
-                    !m.neg_risk
-                        && m.active
-                        && m.tokens.len() == 2
-                        && m.outcome_prices
-                            .as_ref()
-                            .and_then(|p| p.first())
-                            .and_then(|p| p.to_f64())
-                            .map(|yp| yp >= 0.20 && yp <= 0.80)
-                            .unwrap_or(false)
-                })
-                .collect();
-            candidates.sort_by(|a, b| {
-                let ya = a.outcome_prices.as_ref().and_then(|p| p.first()).and_then(|p| p.to_f64()).unwrap_or(0.5);
-                let yb = b.outcome_prices.as_ref().and_then(|p| p.first()).and_then(|p| p.to_f64()).unwrap_or(0.5);
-                let da = (ya - 0.5_f64).abs();
-                let db = (yb - 0.5_f64).abs();
-                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-            });
-            candidates.truncate(mm_config.max_markets);
-
-            if candidates.is_empty() {
-                tracing::warn!("MM: no suitable markets found for market making");
-                return;
-            }
-
-            // Collect market data for the MM loop
-            let mm_market_infos: Vec<pa_core::types::MarketInfo> = candidates.into_iter().cloned().collect();
-            pa_monitor::metrics::MM_ACTIVE_MARKETS.set(mm_market_infos.len() as f64);
-
-            tracing::info!(
-                markets = mm_market_infos.len(),
-                questions = ?mm_market_infos.iter().map(|m| &m.question[..m.question.len().min(40)]).collect::<Vec<_>>(),
-                "MM: selected markets"
-            );
-
-            // Track outstanding order IDs per market: condition_id -> (bid_order_id, ask_order_id)
+            // Track all outstanding order IDs + metadata per market condition_id
             let mut outstanding_orders: std::collections::HashMap<
                 alloy::primitives::B256,
-                (Option<String>, Option<String>),
+                std::collections::HashMap<String, LrOrderMeta>,
             > = std::collections::HashMap::new();
 
-            let half_spread = Decimal::new(mm_config.target_spread_bps as i64, 4) / Decimal::TWO;
-            let mut interval = tokio::time::interval(Duration::from_secs(mm_config.quote_refresh_secs));
+            // Drift tracking: last quoted midpoint per token + token→condition mapping
+            let mut last_quoted_mid: std::collections::HashMap<alloy::primitives::U256, Decimal> = std::collections::HashMap::new();
+            let mut token_to_condition: std::collections::HashMap<alloy::primitives::U256, alloy::primitives::B256> = std::collections::HashMap::new();
+
+            // WS re-quote: per-market cooldown to prevent rate limiting
+            let mut last_quote_time: std::collections::HashMap<alloy::primitives::B256, std::time::Instant> = std::collections::HashMap::new();
+            // Cached candidates + index for fast condition_id lookup
+            let markets_init = lr_shared.read().await;
+            let mut active_candidates = pa_strategy::liquidity_rewards::select_reward_markets(
+                &markets_init, &lr_config,
+            );
+            drop(markets_init);
+            let mut cid_to_candidate_idx: std::collections::HashMap<alloy::primitives::B256, usize> = std::collections::HashMap::new();
+
+            let mut lr_update_rx = lr_update_rx;
+
+            let mut fallback_interval = tokio::time::interval(Duration::from_secs(lr_config.quote_refresh_secs));
+            let mut market_interval = tokio::time::interval(Duration::from_secs(lr_config.market_refresh_secs));
+            let requote_cooldown = Duration::from_secs(lr_config.requote_cooldown_secs);
+            let fill_check_enabled = lr_config.fill_check_secs > 0;
+            let mut fill_check_interval = tokio::time::interval(Duration::from_secs(
+                if fill_check_enabled { lr_config.fill_check_secs } else { 86400 },
+            ));
+
+            // --- Initial mapping + quoting for pre-selected candidates ---
+            {
+                // Build token→condition and cid→candidate index
+                token_to_condition.clear();
+                cid_to_candidate_idx.clear();
+                for (idx, c) in active_candidates.iter().enumerate() {
+                    let cid = c.market.condition_id;
+                    cid_to_candidate_idx.insert(cid, idx);
+                    if c.market.tokens.len() >= 2 {
+                        token_to_condition.insert(c.market.tokens[0].token_id, cid);
+                        token_to_condition.insert(c.market.tokens[1].token_id, cid);
+                    }
+                }
+
+                pa_monitor::metrics::LR_ACTIVE_MARKETS.set(active_candidates.len() as f64);
+
+                // Initial full quote
+                let mut total_exposure = Decimal::ZERO;
+                for candidate in &active_candidates {
+                    let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
+                        &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
+                    ).await;
+                    total_exposure += exp;
+                    let cid = candidate.market.condition_id;
+                    if !metas.is_empty() {
+                        outstanding_orders.insert(cid, metas.into_iter().collect());
+                    }
+                    // Track mids
+                    if candidate.market.tokens.len() >= 2 {
+                        if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
+                        if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
+                    }
+                    let now = std::time::Instant::now();
+                    last_quote_time.insert(cid, now);
+                }
+
+                tracing::info!(
+                    active_markets = outstanding_orders.len(),
+                    total_candidates = active_candidates.len(),
+                    "LR: initial market selection and quote complete"
+                );
+            }
 
             loop {
                 tokio::select! {
-                    _ = mm_cancel.cancelled() => {
-                        // Cancel all MM orders on shutdown
+                    _ = lr_cancel.cancelled() => {
+                        // Shutdown: cancel all outstanding orders
                         let all_ids: Vec<String> = outstanding_orders.values()
-                            .flat_map(|(bid, ask)| bid.iter().chain(ask.iter()).cloned())
+                            .flat_map(|m| m.keys().cloned())
                             .collect();
                         if !all_ids.is_empty() {
                             let refs: Vec<&str> = all_ids.iter().map(|s| s.as_str()).collect();
-                            if let Err(e) = mm_clob.cancel_orders(&refs).await {
-                                tracing::warn!(error = %e, "MM: failed to cancel orders on shutdown");
+                            if let Err(e) = lr_clob.cancel_orders(&refs).await {
+                                tracing::warn!(error = %e, "LR: failed to cancel orders on shutdown");
                             }
-                            pa_monitor::metrics::MM_ORDERS_CANCELLED.inc_by(all_ids.len() as u64);
+                            pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(all_ids.len() as u64);
                         }
-                        tracing::info!("MM: shutdown, cancelled {} orders", all_ids.len());
+                        tracing::info!("LR: shutdown, cancelled {} orders", all_ids.len());
                         break;
                     }
-                    _ = interval.tick() => {
-                        for market in &mm_market_infos {
-                            let cid = market.condition_id;
-                            let yes_tid = market.tokens[0].token_id;
-                            let _no_tid = market.tokens[1].token_id;
+                    // WS-driven re-quote: cancel + re-quote on significant drift
+                    result = lr_update_rx.recv() => {
+                        if let Ok(update) = result {
+                            let tid = update.token_id;
+                            let Some(&cid) = token_to_condition.get(&tid) else { continue };
+                            let Some(new_mid) = lr_cache.get(&tid).and_then(|b| b.midpoint()) else { continue };
+                            let Some(&old_mid) = last_quoted_mid.get(&tid) else { continue };
+                            if old_mid <= Decimal::ZERO { continue; }
 
-                            // Cancel previous orders for this market
-                            if let Some((bid_id, ask_id)) = outstanding_orders.remove(&cid) {
-                                let ids: Vec<String> = bid_id.into_iter().chain(ask_id).collect();
-                                if !ids.is_empty() {
-                                    let refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
-                                    let _ = mm_clob.cancel_orders(&refs).await;
-                                    pa_monitor::metrics::MM_ORDERS_CANCELLED.inc_by(ids.len() as u64);
+                            let drift_bps = ((new_mid - old_mid).abs() / old_mid * dec!(10000)).to_u32().unwrap_or(0);
+                            if drift_bps < lr_config.requote_trigger_bps { continue; }
+
+                            // Check per-market cooldown
+                            let now = std::time::Instant::now();
+                            if let Some(&last_t) = last_quote_time.get(&cid) {
+                                if now.duration_since(last_t) < requote_cooldown { continue; }
+                            }
+
+                            tracing::info!(
+                                token = %tid, market = %cid,
+                                old_mid = %old_mid, new_mid = %new_mid,
+                                drift_bps = drift_bps,
+                                "LR: WS re-quote triggered"
+                            );
+
+                            // Cancel outstanding orders for this market
+                            if let Some(order_map) = outstanding_orders.remove(&cid) {
+                                if !order_map.is_empty() {
+                                    let id_strs: Vec<String> = order_map.into_keys().collect();
+                                    let refs: Vec<&str> = id_strs.iter().map(|s| s.as_str()).collect();
+                                    if let Err(e) = lr_clob.cancel_orders(&refs).await {
+                                        tracing::warn!(error = %e, "LR: WS re-quote cancel failed");
+                                    }
+                                    pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(id_strs.len() as u64);
                                 }
                             }
 
-                            // Get midpoint from order book cache
-                            let midpoint = match mm_cache.get(&yes_tid) {
-                                Some(book) => match book.midpoint() {
-                                    Some(mid) => mid,
-                                    None => continue,
-                                },
+                            // Clear tracked mids for this market's tokens
+                            last_quoted_mid.remove(&tid);
+
+                            // Re-quote this single market
+                            if let Some(&idx) = cid_to_candidate_idx.get(&cid) {
+                                if let Some(candidate) = active_candidates.get(idx) {
+                                    // Compute current total exposure (approximation: sum of outstanding)
+                                    let current_exposure = Decimal::ZERO; // conservative: allow full budget for re-quote
+                                    let (metas, _exp, yes_mid, no_mid) = lr_quote_one_market(
+                                        &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, current_exposure,
+                                    ).await;
+                                    if !metas.is_empty() {
+                                        outstanding_orders.insert(cid, metas.into_iter().collect());
+                                    }
+                                    // Update tracked mids
+                                    if candidate.market.tokens.len() >= 2 {
+                                        if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
+                                        if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
+                                    }
+                                    last_quote_time.insert(cid, now);
+                                }
+                            }
+                        }
+                    }
+                    // Fallback timer: full cancel + re-quote all candidates
+                    _ = fallback_interval.tick() => {
+                        // Cancel all previous orders
+                        let prev_ids: Vec<String> = outstanding_orders.drain()
+                            .flat_map(|(_, m)| m.into_keys())
+                            .collect();
+                        if !prev_ids.is_empty() {
+                            let refs: Vec<&str> = prev_ids.iter().map(|s| s.as_str()).collect();
+                            if let Err(e) = lr_clob.cancel_orders(&refs).await {
+                                tracing::warn!(error = %e, "LR: batch cancel failed");
+                            }
+                            pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(prev_ids.len() as u64);
+                        }
+
+                        // Clear drift tracking (will be rebuilt)
+                        last_quoted_mid.clear();
+
+                        if active_candidates.is_empty() {
+                            tracing::debug!("LR: no eligible reward markets");
+                            continue;
+                        }
+
+                        let mut total_exposure = Decimal::ZERO;
+
+                        for candidate in &active_candidates {
+                            let cid = candidate.market.condition_id;
+                            let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
+                                &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
+                            ).await;
+                            total_exposure += exp;
+                            if !metas.is_empty() {
+                                outstanding_orders.insert(cid, metas.into_iter().collect());
+                            }
+                            if candidate.market.tokens.len() >= 2 {
+                                if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
+                                if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
+                            }
+                            last_quote_time.insert(cid, std::time::Instant::now());
+                        }
+
+                        tracing::debug!(
+                            active_markets = outstanding_orders.len(),
+                            total_candidates = active_candidates.len(),
+                            "LR: fallback quote refresh complete"
+                        );
+                    }
+                    // Market re-selection timer: re-discover and re-rank reward markets
+                    _ = market_interval.tick() => {
+                        // Cancel all existing orders first
+                        let prev_ids: Vec<String> = outstanding_orders.drain()
+                            .flat_map(|(_, m)| m.into_keys())
+                            .collect();
+                        if !prev_ids.is_empty() {
+                            let refs: Vec<&str> = prev_ids.iter().map(|s| s.as_str()).collect();
+                            if let Err(e) = lr_clob.cancel_orders(&refs).await {
+                                tracing::warn!(error = %e, "LR: market refresh cancel failed");
+                            }
+                            pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(prev_ids.len() as u64);
+                        }
+
+                        // Re-select markets
+                        let markets_snapshot = lr_shared.read().await;
+                        active_candidates = pa_strategy::liquidity_rewards::select_reward_markets(
+                            &markets_snapshot, &lr_config,
+                        );
+                        drop(markets_snapshot);
+
+                        // Rebuild token→condition and cid→candidate index
+                        token_to_condition.clear();
+                        cid_to_candidate_idx.clear();
+                        last_quoted_mid.clear();
+                        last_quote_time.clear();
+                        for (idx, c) in active_candidates.iter().enumerate() {
+                            let cid = c.market.condition_id;
+                            cid_to_candidate_idx.insert(cid, idx);
+                            if c.market.tokens.len() >= 2 {
+                                token_to_condition.insert(c.market.tokens[0].token_id, cid);
+                                token_to_condition.insert(c.market.tokens[1].token_id, cid);
+                            }
+                        }
+
+                        pa_monitor::metrics::LR_ACTIVE_MARKETS.set(active_candidates.len() as f64);
+
+                        // Full re-quote
+                        let mut total_exposure = Decimal::ZERO;
+                        for candidate in &active_candidates {
+                            let cid = candidate.market.condition_id;
+                            let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
+                                &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
+                            ).await;
+                            total_exposure += exp;
+                            if !metas.is_empty() {
+                                outstanding_orders.insert(cid, metas.into_iter().collect());
+                            }
+                            if candidate.market.tokens.len() >= 2 {
+                                if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
+                                if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
+                            }
+                            last_quote_time.insert(cid, std::time::Instant::now());
+                        }
+
+                        tracing::info!(
+                            active_markets = outstanding_orders.len(),
+                            total_candidates = active_candidates.len(),
+                            "LR: market re-selection complete"
+                        );
+                    }
+                    // Fill detection: poll CLOB for order status, sync positions + re-quote on fills
+                    _ = fill_check_interval.tick(), if fill_check_enabled => {
+                        let cids: Vec<alloy::primitives::B256> = outstanding_orders.keys().cloned().collect();
+                        for cid in cids {
+                            let api_orders = match lr_clob.get_orders_by_market(cid).await {
+                                Ok(o) => o,
+                                Err(e) => {
+                                    tracing::debug!(error = %e, market = %cid, "LR: fill check query failed");
+                                    continue;
+                                }
+                            };
+
+                            let tracked = match outstanding_orders.get_mut(&cid) {
+                                Some(m) => m,
                                 None => continue,
                             };
 
-                            // Compute inventory skew
-                            let position = mm_rm.get_position_size(&yes_tid);
-                            let skew = if mm_config.max_position_per_market > Decimal::ZERO {
-                                (position / mm_config.max_position_per_market) * mm_config.inventory_skew_factor
-                            } else {
-                                Decimal::ZERO
-                            };
+                            // Detect fills: full match, partial match (new size_matched), or missing from API
+                            let mut any_full_fill = false;
+                            let mut fully_filled_ids: Vec<String> = Vec::new();
 
-                            // Compute bid/ask prices with inventory skew
-                            // Positive position → widen bid (lower), tighten ask (higher)
-                            let bid_price = (midpoint - half_spread - skew * half_spread)
-                                .round_dp(2)
-                                .max(Decimal::new(1, 2)); // min 0.01
-                            let ask_price = (midpoint + half_spread - skew * half_spread)
-                                .round_dp(2)
-                                .min(Decimal::new(99, 2)); // max 0.99
+                            for (oid, meta) in tracked.iter_mut() {
+                                let api_match = api_orders.iter().find(|o| o.order_id == *oid);
 
-                            if bid_price >= ask_price {
-                                continue; // spread too tight after skew
-                            }
+                                let (is_fully_done, api_matched_size) = match api_match {
+                                    Some(o) => (o.is_matched, o.size_matched),
+                                    None => (true, meta.size), // missing = fully settled
+                                };
 
-                            // Check position limit
-                            let remaining = mm_config.max_position_per_market - position;
-                            if remaining <= Decimal::ZERO {
-                                // At max position, skip bid (buy) side
-                                continue;
-                            }
-                            let order_size = remaining.min(Decimal::from(10)).round_dp(2);
-                            if order_size < Decimal::ONE {
-                                continue;
-                            }
-
-                            // Place GTC bid (buy YES)
-                            let bid_result = mm_clob.buy_limit(yes_tid, bid_price, order_size).await;
-                            let bid_order_id = match bid_result {
-                                Ok(r) => {
-                                    pa_monitor::metrics::MM_ORDERS_PLACED.inc();
-                                    Some(r.order_id)
+                                let delta = api_matched_size - meta.last_synced_matched;
+                                if delta > Decimal::ZERO {
+                                    // New fill volume to sync
+                                    let current_pos = lr_rm.get_position_size(&meta.token_id);
+                                    let new_pos = if meta.is_buy {
+                                        current_pos + delta
+                                    } else {
+                                        (current_pos - delta).max(Decimal::ZERO)
+                                    };
+                                    lr_rm.sync_position(
+                                        meta.token_id,
+                                        new_pos,
+                                        meta.price,
+                                        Some(pa_core::types::StrategyType::LiquidityRewards),
+                                        Some(cid),
+                                    );
+                                    meta.last_synced_matched = api_matched_size;
+                                    pa_monitor::metrics::LR_FILLS_DETECTED.inc();
+                                    tracing::info!(
+                                        market = %cid, token = %meta.token_id,
+                                        side = if meta.is_buy { "buy" } else { "sell" },
+                                        delta = %delta, total_matched = %api_matched_size,
+                                        new_pos = %new_pos,
+                                        fully_done = is_fully_done,
+                                        "LR: fill detected, position synced"
+                                    );
                                 }
-                                Err(e) => {
-                                    tracing::debug!(error = %e, market = %cid, "MM: bid order failed");
-                                    None
-                                }
-                            };
 
-                            // Place GTC ask (sell YES) only if holding inventory
-                            let ask_order_id = if position > Decimal::ZERO {
-                                let sell_size = position.min(Decimal::from(10)).round_dp(2);
-                                if sell_size >= Decimal::ONE {
-                                    match mm_clob.sell_limit(yes_tid, ask_price, sell_size).await {
-                                        Ok(r) => {
-                                            pa_monitor::metrics::MM_ORDERS_PLACED.inc();
-                                            Some(r.order_id)
-                                        }
-                                        Err(e) => {
-                                            tracing::debug!(error = %e, market = %cid, "MM: ask order failed");
-                                            None
-                                        }
+                                if is_fully_done {
+                                    fully_filled_ids.push(oid.clone());
+                                    any_full_fill = true;
+                                }
+                            }
+
+                            // Remove fully filled orders from tracking
+                            for id in &fully_filled_ids {
+                                tracked.remove(id);
+                            }
+
+                            // If any order fully filled: cancel remaining + re-quote for fresh inventory
+                            if any_full_fill {
+                                // Cancel remaining live orders for this market
+                                let remaining_ids: Vec<String> = tracked.keys().cloned().collect();
+                                if !remaining_ids.is_empty() {
+                                    let refs: Vec<&str> = remaining_ids.iter().map(|s| s.as_str()).collect();
+                                    if let Err(e) = lr_clob.cancel_orders(&refs).await {
+                                        tracing::debug!(error = %e, "LR: fill re-quote cancel failed");
                                     }
-                                } else {
-                                    None
+                                    pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(remaining_ids.len() as u64);
                                 }
-                            } else {
-                                None
-                            };
+                                outstanding_orders.remove(&cid);
 
-                            outstanding_orders.insert(cid, (bid_order_id, ask_order_id));
+                                // Re-quote with updated inventory
+                                if let Some(&idx) = cid_to_candidate_idx.get(&cid) {
+                                    if let Some(candidate) = active_candidates.get(idx) {
+                                        let current_exposure = Decimal::ZERO;
+                                        let (metas, _exp, yes_mid, no_mid) = lr_quote_one_market(
+                                            &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, current_exposure,
+                                        ).await;
+                                        if !metas.is_empty() {
+                                            outstanding_orders.insert(cid, metas.into_iter().collect());
+                                        }
+                                        if candidate.market.tokens.len() >= 2 {
+                                            if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
+                                            if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
+                                        }
+                                        last_quote_time.insert(cid, std::time::Instant::now());
+                                        pa_monitor::metrics::LR_FILL_REQUOTES.inc();
+                                    }
+                                }
+                            }
                         }
-
-                        let active = outstanding_orders.values()
-                            .filter(|(b, a)| b.is_some() || a.is_some())
-                            .count();
-                        tracing::debug!(
-                            active_markets = active,
-                            "MM: quote refresh complete"
-                        );
                     }
                 }
             }
         });
         tracing::info!(
-            max_markets = settings.market_making.max_markets,
-            spread_bps = settings.market_making.target_spread_bps,
-            refresh_secs = settings.market_making.quote_refresh_secs,
-            "Market making task started"
+            max_markets = settings.liquidity_rewards.max_markets,
+            quote_refresh_secs = settings.liquidity_rewards.quote_refresh_secs,
+            "Liquidity rewards task started"
         );
-    } else if settings.market_making.enabled && !trading_enabled {
-        tracing::warn!("Market making enabled but CLOB auth failed — MM disabled");
+    } else if settings.liquidity_rewards.enabled && !trading_enabled {
+        tracing::warn!("Liquidity rewards enabled but CLOB auth failed — LR disabled");
     }
 
     // --- Periodic market refresh background task ---
@@ -1437,6 +1640,135 @@ impl pa_core::traits::Executor for DryRunExecutor {
     async fn cancel_all(&self) -> pa_core::Result<()> {
         Ok(())
     }
+}
+
+/// Quote a single market for LR. Returns (order_id+meta pairs, exposure_added, yes_mid, no_mid).
+async fn lr_quote_one_market(
+    market: &pa_core::types::MarketInfo,
+    config: &pa_core::config::LiquidityRewardsConfig,
+    cache: &pa_market_data::cache::OrderBookCache,
+    rm: &RiskManagerImpl,
+    clob: &ClobExecutor,
+    current_exposure: Decimal,
+) -> (Vec<(String, LrOrderMeta)>, Decimal, Option<Decimal>, Option<Decimal>) {
+    let cid = market.condition_id;
+    let yes_tid = market.tokens[0].token_id;
+    let no_tid = market.tokens[1].token_id;
+    let rewards_max_spread = market.rewards_max_spread.unwrap_or(Decimal::ZERO);
+    let rewards_min_size = market.rewards_min_size.unwrap_or(Decimal::ZERO);
+
+    let mut order_metas: Vec<(String, LrOrderMeta)> = Vec::new();
+    let mut exposure_added = Decimal::ZERO;
+    let mut yes_mid_out: Option<Decimal> = None;
+    let mut no_mid_out: Option<Decimal> = None;
+
+    // Quote YES side
+    if config.quote_yes {
+        let yes_position = rm.get_position_size(&yes_tid);
+        if let Some(yes_book) = cache.get(&yes_tid) {
+            if let Some(mid) = yes_book.midpoint() {
+                yes_mid_out = Some(mid);
+
+                if let Some(quote) = pa_strategy::liquidity_rewards::compute_quotes(
+                    mid, rewards_max_spread, yes_position,
+                    config, rewards_min_size, market.tick_size,
+                ) {
+                    let remaining_pos = (config.max_position_per_market - yes_position).max(Decimal::ZERO);
+                    let remaining_exp = (config.max_total_exposure - current_exposure - exposure_added).max(Decimal::ZERO);
+                    let bid_size = quote.size.min(remaining_pos).min(remaining_exp);
+
+                    if bid_size >= config.min_order_size {
+                        match clob.buy_limit_post_only(yes_tid, quote.bid_price, bid_size).await {
+                            Ok(r) if !r.order_id.is_empty() => {
+                                pa_monitor::metrics::LR_ORDERS_PLACED.inc();
+                                exposure_added += bid_size * quote.bid_price;
+                                order_metas.push((r.order_id, LrOrderMeta {
+                                    token_id: yes_tid, is_buy: true,
+                                    price: quote.bid_price, size: bid_size,
+                                    last_synced_matched: Decimal::ZERO,
+                                }));
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::debug!(error = %e, market = %cid, "LR: YES bid failed"),
+                        }
+                    }
+
+                    if yes_position > Decimal::ZERO {
+                        let sell_size = quote.size.min(yes_position);
+                        if sell_size >= config.min_order_size {
+                            match clob.sell_limit_post_only(yes_tid, quote.ask_price, sell_size).await {
+                                Ok(r) if !r.order_id.is_empty() => {
+                                    pa_monitor::metrics::LR_ORDERS_PLACED.inc();
+                                    order_metas.push((r.order_id, LrOrderMeta {
+                                        token_id: yes_tid, is_buy: false,
+                                        price: quote.ask_price, size: sell_size,
+                                        last_synced_matched: Decimal::ZERO,
+                                    }));
+                                }
+                                Ok(_) => {}
+                                Err(e) => tracing::debug!(error = %e, market = %cid, "LR: YES ask failed"),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Quote NO side
+    if config.quote_no {
+        let no_position = rm.get_position_size(&no_tid);
+        if let Some(no_book) = cache.get(&no_tid) {
+            if let Some(mid) = no_book.midpoint() {
+                no_mid_out = Some(mid);
+
+                if let Some(quote) = pa_strategy::liquidity_rewards::compute_quotes(
+                    mid, rewards_max_spread, no_position,
+                    config, rewards_min_size, market.tick_size,
+                ) {
+                    let remaining_pos = (config.max_position_per_market - no_position).max(Decimal::ZERO);
+                    let remaining_exp = (config.max_total_exposure - current_exposure - exposure_added).max(Decimal::ZERO);
+                    let bid_size = quote.size.min(remaining_pos).min(remaining_exp);
+
+                    if bid_size >= config.min_order_size {
+                        match clob.buy_limit_post_only(no_tid, quote.bid_price, bid_size).await {
+                            Ok(r) if !r.order_id.is_empty() => {
+                                pa_monitor::metrics::LR_ORDERS_PLACED.inc();
+                                exposure_added += bid_size * quote.bid_price;
+                                order_metas.push((r.order_id, LrOrderMeta {
+                                    token_id: no_tid, is_buy: true,
+                                    price: quote.bid_price, size: bid_size,
+                                    last_synced_matched: Decimal::ZERO,
+                                }));
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::debug!(error = %e, market = %cid, "LR: NO bid failed"),
+                        }
+                    }
+
+                    if no_position > Decimal::ZERO {
+                        let sell_size = quote.size.min(no_position);
+                        if sell_size >= config.min_order_size {
+                            match clob.sell_limit_post_only(no_tid, quote.ask_price, sell_size).await {
+                                Ok(r) if !r.order_id.is_empty() => {
+                                    pa_monitor::metrics::LR_ORDERS_PLACED.inc();
+                                    order_metas.push((r.order_id, LrOrderMeta {
+                                        token_id: no_tid, is_buy: false,
+                                        price: quote.ask_price, size: sell_size,
+                                        last_synced_matched: Decimal::ZERO,
+                                    }));
+                                }
+                                Ok(_) => {}
+                                Err(e) => tracing::debug!(error = %e, market = %cid, "LR: NO ask failed"),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (order_metas, exposure_added, yes_mid_out, no_mid_out)
 }
 
 /// Seed the OrderBookCache for a single market using its gamma prices.

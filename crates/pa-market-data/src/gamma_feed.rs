@@ -551,6 +551,20 @@ impl GammaFeed {
             }
         }
 
+        // Extract CLOB liquidity rewards fields
+        let rewards_min_size = market.rewards_min_size;
+        let rewards_max_spread = market.rewards_max_spread;
+        let today = chrono::Utc::now().date_naive();
+        let rewards_daily_rate = market.clob_rewards.as_ref().and_then(|rewards| {
+            let rate: Decimal = rewards.iter()
+                .filter(|r| r.end_date.map_or(true, |ed| ed >= today))
+                .filter_map(|r| r.rewards_daily_rate)
+                .sum();
+            if rate > Decimal::ZERO { Some(rate) } else { None }
+        });
+        let holding_rewards_enabled = market.holding_rewards_enabled.unwrap_or(false);
+        let fees_enabled = market.fees_enabled.unwrap_or(false);
+
         Some(MarketInfo {
             condition_id,
             question_id,
@@ -579,6 +593,11 @@ impl GammaFeed {
             outcome_prices: market.outcome_prices.clone(),
             gamma_best_bid: market.best_bid,
             gamma_best_ask: market.best_ask,
+            rewards_min_size,
+            rewards_max_spread,
+            rewards_daily_rate,
+            holding_rewards_enabled,
+            fees_enabled,
         })
     }
 
@@ -804,6 +823,11 @@ impl GammaFeed {
             outcome_prices: market.outcome_prices.clone(),
             gamma_best_bid: market.best_bid,
             gamma_best_ask: market.best_ask,
+            rewards_min_size: None,
+            rewards_max_spread: None,
+            rewards_daily_rate: None,
+            holding_rewards_enabled: false,
+            fees_enabled: false,
         })
     }
 
@@ -850,6 +874,11 @@ mod tests {
             outcome_prices: None,
             gamma_best_bid: None,
             gamma_best_ask: None,
+            rewards_min_size: None,
+            rewards_max_spread: None,
+            rewards_daily_rate: None,
+            holding_rewards_enabled: false,
+            fees_enabled: false,
         }
     }
 

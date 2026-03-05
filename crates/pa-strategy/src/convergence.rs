@@ -136,9 +136,9 @@ impl ResolutionConvergenceStrategy {
         let kelly_size = kelly_raw * self.config.kelly_fraction * effective_max;
         let available = (self.get_available_capital)();
 
-        // Position-aware sizing: subtract existing position from max
-        let existing = (self.get_position)(token_id);
-        let remaining = (effective_max - existing).max(Decimal::ZERO);
+        // Position-aware sizing (convert shares to USDC cost for correct unit comparison)
+        let existing_cost = (self.get_position)(token_id) * ask_price;
+        let remaining = (effective_max - existing_cost).max(Decimal::ZERO);
         let size = kelly_size.min(remaining).min(available);
 
         // Ensure size meets CLOB minimum cost ($1.00).
@@ -535,6 +535,11 @@ mod tests {
             outcome_prices: None,
             gamma_best_bid: None,
             gamma_best_ask: None,
+            rewards_min_size: None,
+            rewards_max_spread: None,
+            rewards_daily_rate: None,
+            holding_rewards_enabled: false,
+            fees_enabled: false,
         }
     }
 

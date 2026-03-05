@@ -58,6 +58,21 @@ pub struct MarketInfo {
     /// Best ask price from Gamma API (CLOB top-of-book at discovery time, YES side).
     #[serde(default)]
     pub gamma_best_ask: Option<Decimal>,
+    /// Minimum order size required for CLOB liquidity rewards scoring.
+    #[serde(default)]
+    pub rewards_min_size: Option<Decimal>,
+    /// Maximum spread from midpoint for CLOB liquidity rewards scoring.
+    #[serde(default)]
+    pub rewards_max_spread: Option<Decimal>,
+    /// Aggregated daily reward rate (sum of active ClobReward.rewards_daily_rate).
+    #[serde(default)]
+    pub rewards_daily_rate: Option<Decimal>,
+    /// Whether holding rewards are enabled for this market.
+    #[serde(default)]
+    pub holding_rewards_enabled: bool,
+    /// Whether fees are enabled for this market.
+    #[serde(default)]
+    pub fees_enabled: bool,
 }
 
 /// A NegRisk event containing multiple outcome markets.
@@ -296,6 +311,8 @@ pub enum StrategyType {
     ResolutionConvergence,
     /// Crypto price-based directional alpha
     CryptoAlpha,
+    /// Liquidity rewards market making
+    LiquidityRewards,
 }
 
 /// Concrete execution plan for an arbitrage opportunity.

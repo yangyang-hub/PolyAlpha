@@ -1,4 +1,4 @@
-use alloy::primitives::U256;
+use alloy::primitives::{B256, U256};
 use alloy::signers::local::PrivateKeySigner;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
@@ -6,7 +6,7 @@ use rust_decimal::prelude::ToPrimitive;
 use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::Normal;
 use polymarket_client_sdk::clob::types::{OrderType, Side, SignatureType};
-use polymarket_client_sdk::clob::types::request::BalanceAllowanceRequest;
+use polymarket_client_sdk::clob::types::request::{BalanceAllowanceRequest, OrdersRequest};
 use polymarket_client_sdk::clob::types::response::PostOrderResponse;
 
 /// CLOB order executor using the Polymarket SDK.
@@ -280,9 +280,10 @@ impl ClobExecutor {
         Ok(Self::parse_response(response, price, size))
     }
 
-    /// Place a GTC (Good-Til-Cancelled) limit buy order.
-    /// Used for remaining inventory after partial arbitrage fills.
-    pub async fn buy_limit(
+    /// Place a GTC limit buy order with post-only flag.
+    /// The order will be rejected if it would immediately match (cross the spread).
+    /// Used by Liquidity Rewards to ensure orders always rest on the book.
+    pub async fn buy_limit_post_only(
         &self,
         token_id: U256,
         price: Decimal,
@@ -294,8 +295,6 @@ impl ClobExecutor {
         if size <= Decimal::ZERO {
             anyhow::bail!("Order size too small after rounding to lot size");
         }
-        // Bump to meet $1.00 minimum if precision adjustment reduced below it,
-        // but NEVER exceed the original requested size (risk control boundary).
         let original_size = size;
         if price * size < Decimal::ONE {
             let bumped = Self::min_cost_adjusted_size(price);
@@ -307,8 +306,7 @@ impl ClobExecutor {
         if cost < Decimal::ONE {
             tracing::debug!(
                 token_id = %token_id, price = %price, size = %size, cost = %cost,
-                original_size = %original_size,
-                "Order cost below $1.00 minimum after precision adjustment, skipping"
+                "Post-only buy order cost below $1.00 minimum, skipping"
             );
             return Ok(OrderResult {
                 order_id: String::new(),
@@ -323,7 +321,7 @@ impl ClobExecutor {
             token_id = %token_id,
             price = %price,
             size = %size,
-            "Placing GTC limit buy order"
+            "Placing GTC post-only limit buy order"
         );
 
         let signable = self
@@ -334,6 +332,7 @@ impl ClobExecutor {
             .price(price)
             .size(size)
             .order_type(OrderType::GTC)
+            .post_only(true)
             .build()
             .await?;
 
@@ -343,8 +342,10 @@ impl ClobExecutor {
         Ok(Self::parse_response(response, price, size))
     }
 
-    /// Place a GTC limit sell order.
-    pub async fn sell_limit(
+    /// Place a GTC limit sell order with post-only flag.
+    /// The order will be rejected if it would immediately match (cross the spread).
+    /// Used by Liquidity Rewards to ensure orders always rest on the book.
+    pub async fn sell_limit_post_only(
         &self,
         token_id: U256,
         price: Decimal,
@@ -356,13 +357,12 @@ impl ClobExecutor {
         if size <= Decimal::ZERO {
             anyhow::bail!("Order size too small after rounding to lot size");
         }
-        // No $1.00 minimum for sell orders — exiting positions should always be allowed.
 
         tracing::info!(
             token_id = %token_id,
             price = %price,
             size = %size,
-            "Placing GTC limit sell order"
+            "Placing GTC post-only limit sell order"
         );
 
         let signable = self
@@ -373,6 +373,7 @@ impl ClobExecutor {
             .price(price)
             .size(size)
             .order_type(OrderType::GTC)
+            .post_only(true)
             .build()
             .await?;
 
@@ -438,6 +439,54 @@ impl ClobExecutor {
             "CLOB balance_allowance response"
         );
         Ok(balance_usdc)
+    }
+
+    /// Check whether the given orders are currently scoring for liquidity rewards.
+    ///
+    /// Returns a map of order_id -> is_scoring. Uses the CLOB `are_orders_scoring` endpoint.
+    pub async fn are_orders_scoring(&self, order_ids: &[&str]) -> anyhow::Result<std::collections::HashMap<String, bool>> {
+        let result = self.client.are_orders_scoring(order_ids).await?;
+        Ok(result)
+    }
+
+    /// Query all orders for a given market condition_id, paginating to completion.
+    ///
+    /// Returns a summary of each order's status, useful for detecting fills on
+    /// resting GTC orders.
+    pub async fn get_orders_by_market(&self, condition_id: B256) -> anyhow::Result<Vec<OpenOrderInfo>> {
+        use polymarket_client_sdk::clob::types::OrderStatusType;
+
+        let req = OrdersRequest::builder()
+            .market(condition_id)
+            .build();
+
+        let mut all_orders = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let page = self.client.orders(&req, cursor).await?;
+
+            for o in &page.data {
+                let is_matched = matches!(o.status, OrderStatusType::Matched | OrderStatusType::Delayed);
+                let is_buy = matches!(o.side, Side::Buy);
+                all_orders.push(OpenOrderInfo {
+                    order_id: o.id.clone(),
+                    is_matched,
+                    is_buy,
+                    token_id: o.asset_id,
+                    price: o.price,
+                    original_size: o.original_size,
+                    size_matched: o.size_matched,
+                });
+            }
+
+            if page.next_cursor.is_empty() || page.next_cursor == "LTE=" {
+                break;
+            }
+            cursor = Some(page.next_cursor);
+        }
+
+        Ok(all_orders)
     }
 
     /// Parse the SDK's PostOrderResponse into our OrderResult.
@@ -506,6 +555,21 @@ pub enum OrderFillStatus {
     PartialFill,
     NoFill,
     Rejected,
+}
+
+/// Summary of an order's state from the CLOB API.
+#[derive(Debug, Clone)]
+pub struct OpenOrderInfo {
+    pub order_id: String,
+    /// Whether the order is fully matched (status == Matched or Delayed).
+    pub is_matched: bool,
+    /// Whether this is a buy order.
+    pub is_buy: bool,
+    /// The token (asset) this order is for.
+    pub token_id: U256,
+    pub price: Decimal,
+    pub original_size: Decimal,
+    pub size_matched: Decimal,
 }
 
 /// Greatest common divisor (Euclidean algorithm).
