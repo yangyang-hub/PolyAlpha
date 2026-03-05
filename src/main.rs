@@ -61,6 +61,57 @@ struct AccountContext {
     strategies: Vec<String>,
 }
 
+/// Fetch current liquidity rewards from the CLOB API.
+///
+/// Returns a list of markets with active rewards, including their reward parameters
+/// (max_spread, min_size, total_daily_rate).
+async fn fetch_clob_rewards(
+    clob: &ClobExecutor,
+) -> anyhow::Result<Vec<pa_strategy::liquidity_rewards::ClobRewardData>> {
+    let mut all_rewards = Vec::new();
+    let mut next_cursor = None;
+    
+    // Fetch all pages of rewards
+    loop {
+        let page = match clob.current_rewards(next_cursor).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "LR: Failed to fetch CLOB rewards, retrying later");
+                return Ok(all_rewards); // Return what we have so far
+            }
+        };
+        
+        for reward in page.data {
+            // Sum up daily rates from all reward configs
+            let total_daily_rate: Decimal = reward.rewards_config
+                .iter()
+                .map(|r| r.rate_per_day)
+                .sum();
+            
+            all_rewards.push(pa_strategy::liquidity_rewards::ClobRewardData {
+                condition_id: reward.condition_id,
+                rewards_max_spread: reward.rewards_max_spread,
+                rewards_min_size: reward.rewards_min_size,
+                total_daily_rate,
+            });
+        }
+        
+        // Check if there's a next page
+        if page.next_cursor.is_empty() || page.next_cursor == "0" {
+            break;
+        }
+        next_cursor = Some(page.next_cursor);
+    }
+    
+    tracing::debug!(
+        count = all_rewards.len(),
+        "LR: Fetched CLOB rewards markets"
+    );
+    
+    Ok(all_rewards)
+}
+
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load .env file if present
@@ -1003,9 +1054,18 @@ async fn main() -> Result<()> {
                 let mut token_to_condition: std::collections::HashMap<alloy::primitives::U256, alloy::primitives::B256> = std::collections::HashMap::new();
                 let mut last_quote_time: std::collections::HashMap<alloy::primitives::B256, std::time::Instant> = std::collections::HashMap::new();
 
+                // Fetch current rewards from CLOB API
+                let clob_rewards = match fetch_clob_rewards(&lr_clob).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "LR: Failed to fetch initial rewards");
+                        Vec::new()
+                    }
+                };
+                
                 let markets_init = lr_shared.read().await;
-                let mut active_candidates = pa_strategy::liquidity_rewards::select_reward_markets(
-                    &markets_init, &lr_config,
+                let mut active_candidates = pa_strategy::liquidity_rewards::select_reward_markets_with_clob_data(
+                    &markets_init, &clob_rewards, &lr_config,
                 );
                 drop(markets_init);
                 let mut cid_to_candidate_idx: std::collections::HashMap<alloy::primitives::B256, usize> = std::collections::HashMap::new();
@@ -1186,9 +1246,18 @@ async fn main() -> Result<()> {
                                 pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(prev_ids.len() as u64);
                             }
 
+                            // Refresh rewards from CLOB API
+                            let clob_rewards = match fetch_clob_rewards(&lr_clob).await {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "LR: Failed to refresh rewards");
+                                    Vec::new()
+                                }
+                            };
+                            
                             let markets_snapshot = lr_shared.read().await;
-                            active_candidates = pa_strategy::liquidity_rewards::select_reward_markets(
-                                &markets_snapshot, &lr_config,
+                            active_candidates = pa_strategy::liquidity_rewards::select_reward_markets_with_clob_data(
+                                &markets_snapshot, &clob_rewards, &lr_config,
                             );
                             drop(markets_snapshot);
 

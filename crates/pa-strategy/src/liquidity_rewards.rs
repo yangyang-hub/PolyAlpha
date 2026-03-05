@@ -46,7 +46,74 @@ pub fn select_reward_markets(
     candidates
 }
 
-// ──── Quote Computation ────
+
+
+/// Reward market data from the CLOB API.
+#[derive(Debug, Clone)]
+pub struct ClobRewardData {
+    pub condition_id: alloy::primitives::B256,
+    pub rewards_max_spread: Decimal,
+    pub rewards_min_size: Decimal,
+    pub total_daily_rate: Decimal,
+}
+
+/// Select and rank markets eligible for liquidity rewards using CLOB API data.
+///
+/// This function uses the CLOB API rewards endpoint data instead of relying on
+/// Gamma API fields which are no longer populated.
+///
+/// Filters: active, binary (2 tokens), not neg_risk, in clob_rewards list,
+/// daily rate >= min_daily_rate. Sorted by reward density descending.
+pub fn select_reward_markets_with_clob_data(
+    markets: &[MarketInfo],
+    clob_rewards: &[ClobRewardData],
+    config: &LiquidityRewardsConfig,
+) -> Vec<RewardMarketCandidate> {
+    use std::collections::HashSet;
+    
+    // Build a HashSet of condition IDs with active rewards for O(1) lookup
+    let reward_conditions: HashSet<alloy::primitives::B256> = clob_rewards
+        .iter()
+        .map(|r| r.condition_id)
+        .collect();
+    
+    // Build a HashMap for reward data lookup
+    let reward_map: std::collections::HashMap<alloy::primitives::B256, &ClobRewardData> = clob_rewards
+        .iter()
+        .map(|r| (r.condition_id, r))
+        .collect();
+
+    let mut candidates: Vec<RewardMarketCandidate> = markets
+        .iter()
+        .filter(|m| {
+            m.active
+                && m.tokens.len() == 2
+                && !m.neg_risk
+                && reward_conditions.contains(&m.condition_id)
+        })
+        .filter_map(|m| {
+            let reward_data = reward_map.get(&m.condition_id)?;
+            let daily_rate = reward_data.total_daily_rate;
+            
+            // Filter by min_daily_rate
+            if daily_rate < config.min_daily_rate {
+                return None;
+            }
+            
+            let density = daily_rate / (m.liquidity + Decimal::ONE);
+            Some(RewardMarketCandidate {
+                market: m.clone(),
+                density,
+            })
+        })
+        .collect();
+
+    candidates.sort_by(|a, b| b.density.partial_cmp(&a.density).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.truncate(config.max_markets);
+    candidates
+}
+
+// ──── Quote Computation ────// ──── Quote Computation ────
 
 /// Computed quotes for one side (YES or NO) of a market.
 #[derive(Debug, Clone)]

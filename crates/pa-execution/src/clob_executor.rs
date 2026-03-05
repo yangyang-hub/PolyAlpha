@@ -538,6 +538,17 @@ impl ClobExecutor {
             tx_hashes: response.transaction_hashes,
         }
     }
+    
+    /// Fetch current liquidity rewards from the CLOB API.
+    ///
+    /// Returns paginated results of markets with active rewards.
+    /// Use `next_cursor` from the previous response to fetch subsequent pages.
+    pub async fn current_rewards(
+        &self,
+        next_cursor: Option<String>,
+    ) -> anyhow::Result<polymarket_client_sdk::clob::types::response::Page<polymarket_client_sdk::clob::types::response::CurrentRewardResponse>> {
+        Ok(self.client.current_rewards(next_cursor).await?)
+    }
 }
 
 #[derive(Debug, Clone)]

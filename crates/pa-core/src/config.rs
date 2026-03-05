@@ -186,6 +186,27 @@ pub struct WeatherConfig {
     /// |new_forecast - previous_forecast| > threshold * sigma.
     #[serde(default = "default_forecast_change_threshold")]
     pub forecast_change_threshold: f64,
+    /// Enable "Sweep Mode" - aggressive scanning near settlement.
+    /// When enabled, markets within `sweep_hours_before` of settlement use
+    /// lower edge requirements and more aggressive position sizing.
+    #[serde(default)]
+    pub sweep_mode_enabled: bool,
+    /// Hours before settlement when sweep mode becomes active.
+    /// Default: 12 hours (markets entering this window get sweep treatment).
+    #[serde(default = "default_sweep_hours_before")]
+    pub sweep_hours_before: u64,
+    /// Edge threshold (in basis points) for sweep mode. Lower than normal min_edge_bps.
+    /// Default: 200 (2%) vs normal 500 (5%).
+    #[serde(default = "default_sweep_min_edge_bps")]
+    pub sweep_min_edge_bps: u32,
+    /// Position size multiplier for sweep mode. Can be higher since
+    /// outcome is more certain near settlement.
+    #[serde(default = "default_sweep_size_multiplier")]
+    pub sweep_size_multiplier: Decimal,
+    /// High-priority cities for trading (London, NYC, Seoul have 73% of volume).
+    /// Markets in these cities get priority in scanning and WS subscriptions.
+    #[serde(default)]
+    pub priority_cities: Vec<String>,
 }
 
 fn default_exit_buffer_bps() -> u32 { 50 }
@@ -199,6 +220,21 @@ fn default_ensemble_models() -> Vec<String> {
     ]
 }
 fn default_forecast_change_threshold() -> f64 { 0.5 }
+fn default_sweep_hours_before() -> u64 { 12 }
+fn default_sweep_min_edge_bps() -> u32 { 200 }
+fn default_sweep_size_multiplier() -> Decimal { Decimal::new(15, 2) } // 1.5x
+fn default_priority_cities() -> Vec<String> {
+    vec![
+        "London".to_string(),
+        "New York".to_string(),
+        "Seoul".to_string(),
+        "Paris".to_string(),
+        "Tokyo".to_string(),
+        "Singapore".to_string(),
+        "Dubai".to_string(),
+        "Sydney".to_string(),
+    ]
+}
 
 impl Default for WeatherConfig {
     fn default() -> Self {
@@ -215,6 +251,11 @@ impl Default for WeatherConfig {
             ensemble_models: default_ensemble_models(),
             forecast_change_detection: false,
             forecast_change_threshold: default_forecast_change_threshold(),
+            sweep_mode_enabled: false,
+            sweep_hours_before: default_sweep_hours_before(),
+            sweep_min_edge_bps: default_sweep_min_edge_bps(),
+            sweep_size_multiplier: default_sweep_size_multiplier(),
+            priority_cities: default_priority_cities(),
         }
     }
 }

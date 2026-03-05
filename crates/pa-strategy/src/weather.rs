@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use alloy::primitives::U256;
+use rust_decimal::prelude::ToPrimitive;
 use async_trait::async_trait;
 use chrono::{Datelike, Local, NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -1028,6 +1029,84 @@ impl OpenMeteoClient {
 
         Some(forecast)
     }
+
+    /// Fetch historical (observed) weather data for a specific past date.
+    ///
+    /// Uses the Open-Meteo Archive API which provides historical data from 1940 onwards.
+    /// Returns the actual observed value for the given date.
+    ///
+    /// `precipitation_unit` should be `"mm"` or `"inch"`.
+    pub async fn fetch_historical(
+        &self,
+        lat: f64,
+        lon: f64,
+        metric: WeatherMetric,
+        target_date: NaiveDate,
+        precipitation_unit: &str,
+    ) -> anyhow::Result<f64> {
+        let daily_param = match metric {
+            WeatherMetric::TemperatureMax => "temperature_2m_max",
+            WeatherMetric::TemperatureMin => "temperature_2m_min",
+            WeatherMetric::TemperatureAvg => "temperature_2m_mean",
+            WeatherMetric::Rainfall => "rain_sum",
+            WeatherMetric::Snowfall => "snowfall_sum",
+            WeatherMetric::WindSpeed => "wind_speed_10m_max",
+        };
+
+        let date_str = target_date.format("%Y-%m-%d").to_string();
+        
+        let mut params: Vec<(&str, String)> = vec![
+            ("latitude", lat.to_string()),
+            ("longitude", lon.to_string()),
+            ("daily", daily_param.to_string()),
+            ("start_date", date_str.clone()),
+            ("end_date", date_str.clone()),
+            ("temperature_unit", "fahrenheit".to_string()),
+        ];
+
+        if matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
+            params.push(("precipitation_unit", precipitation_unit.to_string()));
+        }
+        if matches!(metric, WeatherMetric::WindSpeed) {
+            params.push(("wind_speed_unit", "mph".to_string()));
+        }
+
+        let http = &self.http;
+        let params_clone = params.clone();
+        let resp: ForecastResponse = with_retry(2, || {
+            let p = params_clone.clone();
+            async move {
+                let r: ForecastResponse = http
+                    .get("https://archive-api.open-meteo.com/v1/archive")
+                    .query(&p)
+                    .send()
+                    .await?
+                    .json()
+                    .await?;
+                Ok(r)
+            }
+        })
+        .await?;
+
+        let daily = resp
+            .daily
+            .ok_or_else(|| anyhow::anyhow!("No daily data in historical response"))?;
+
+        let values = match metric {
+            WeatherMetric::TemperatureMax => daily.temperature_2m_max,
+            WeatherMetric::TemperatureMin => daily.temperature_2m_min,
+            WeatherMetric::TemperatureAvg => daily.temperature_2m_mean,
+            WeatherMetric::Rainfall => daily.rain_sum,
+            WeatherMetric::Snowfall => daily.snowfall_sum,
+            WeatherMetric::WindSpeed => daily.wind_speed_10m_max,
+        };
+
+        if values.is_empty() {
+            return Err(anyhow::anyhow!("Empty historical data for {}", date_str));
+        }
+
+        Ok(values[0])
+    }
 }
 
 // ──── HTTP Retry Helper ────
@@ -1355,6 +1434,437 @@ impl WeatherAlphaStrategy {
         hasher.finish()
     }
 
+    /// Check if a market is in "sweep mode" - near settlement with aggressive parameters.
+    ///
+    /// Sweep mode is enabled when:
+    /// 1. The config has sweep_mode_enabled = true
+    /// 2. The market's target_date is within sweep_hours_before of settlement
+    fn is_in_sweep_mode(&self, target_date: Option<NaiveDate>) -> bool {
+        if !self.config.sweep_mode_enabled {
+            return false;
+        }
+        let Some(date) = target_date else {
+            return false;
+        };
+        let today = Local::now().date_naive();
+        let days_until = date.signed_duration_since(today).num_days();
+        // Convert hours to days (ceiling to be conservative)
+        let sweep_days = (self.config.sweep_hours_before as f64 / 24.0).ceil() as i64;
+        days_until >= 0 && days_until <= sweep_days
+    }
+
+    /// Check if a location is in the priority cities list.
+    ///
+    /// Priority cities (London, NYC, Seoul, etc.) account for 73% of weather market volume
+    /// and get preferential treatment in scanning order.
+    fn is_priority_city(&self, location: &str) -> bool {
+        let loc_lower = location.to_lowercase();
+        self.config.priority_cities.iter().any(|city| {
+            // Check both full city name and common abbreviations
+            let city_lower = city.to_lowercase();
+            loc_lower.contains(&city_lower) || {
+                // Special case: NYC -> New York
+                if city_lower == "new york" {
+                    loc_lower.contains("nyc") || loc_lower.contains("new york")
+                } else if city_lower == "los angeles" {
+                    loc_lower.contains("la ") || loc_lower.contains("los angeles")
+                } else {
+                    false
+                }
+            }
+        })
+    }
+
+    /// Get the effective edge threshold for a market.
+    ///
+    /// Returns sweep_min_edge_bps if in sweep mode, otherwise min_edge_bps.
+    fn effective_edge_bps(&self, target_date: Option<NaiveDate>) -> u32 {
+        if self.is_in_sweep_mode(target_date) {
+            self.config.sweep_min_edge_bps
+        } else {
+            self.config.min_edge_bps
+        }
+    }
+
+    /// Get the effective size multiplier for a market.
+    ///
+    /// Returns sweep_size_multiplier if in sweep mode, otherwise 1.0.
+    fn effective_size_multiplier(&self, target_date: Option<NaiveDate>) -> Decimal {
+        if self.is_in_sweep_mode(target_date) {
+            self.config.sweep_size_multiplier
+        } else {
+            Decimal::ONE
+        }
+    }
+
+    // ──── Stale Liquidity Detection ────
+
+    /// Scan markets for stale liquidity opportunities.
+    ///
+    /// When the target date has passed and actual weather data confirms an outcome,
+    /// but order book prices haven't updated yet (the "8-hour lag" phenomenon),
+    /// we can aggressively buy the underpriced token.
+    async fn scan_stale_liquidity(&self, markets: &[MarketInfo]) -> Vec<ArbitrageOpportunity> {
+        let mut opportunities = Vec::new();
+        let today = Local::now().date_naive();
+
+        for market in markets {
+            if !market.active || market.neg_risk {
+                continue;
+            }
+
+            let parsed = match parse_weather_question(&market.question) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Only check markets where target date is today or in the past
+            let target_date = match parse_target_date(&market.question) {
+                Some(d) => d,
+                None => continue, // Skip markets without a clear date
+            };
+
+            // Skip if target date is in the future
+            if target_date > today {
+                continue;
+            }
+
+            // Skip if too old (more than 7 days past)
+            if (today - target_date).num_days() > 7 {
+                continue;
+            }
+
+            // Geocode the location
+            let coords = match self.meteo.geocode(&parsed.location).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!(location = %parsed.location, error = %e, "Stale check: geocode failed");
+                    continue;
+                }
+            };
+
+            // Detect precipitation unit
+            let precipitation_unit = if matches!(parsed.metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
+                detect_precipitation_unit(&market.question)
+            } else {
+                "inch"
+            };
+
+            // Fetch actual historical data
+            let actual_value = match self.meteo.fetch_historical(
+                coords.0,
+                coords.1,
+                parsed.metric,
+                target_date,
+                precipitation_unit,
+            ).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::debug!(
+                        location = %parsed.location,
+                        date = %target_date,
+                        error = %e,
+                        "Stale check: historical data unavailable"
+                    );
+                    continue;
+                }
+            };
+
+            // Determine if outcome is confirmed
+            let should_trigger_yes = match parsed.comparison {
+                Comparison::Above | Comparison::AtLeast => actual_value > parsed.threshold,
+                Comparison::Below | Comparison::AtMost => actual_value < parsed.threshold,
+            };
+
+            // For the opposite side, check if the threshold is definitively NOT met
+            let should_trigger_no = match parsed.comparison {
+                Comparison::Above | Comparison::AtLeast => actual_value <= parsed.threshold,
+                Comparison::Below | Comparison::AtMost => actual_value >= parsed.threshold,
+            };
+
+            // Get order books for both sides
+            if market.tokens.len() < 2 {
+                continue;
+            }
+
+            let yes_token = &market.tokens[0];
+            let no_token = &market.tokens[1];
+
+            let yes_book = match (self.get_orderbook)(yes_token.token_id) {
+                Some(b) => b,
+                None => continue,
+            };
+            let no_book = match (self.get_orderbook)(no_token.token_id) {
+                Some(b) => b,
+                None => continue,
+            };
+
+            // Check if prices are stale (YES price should be near 1.0 when confirmed, NO near 0.0)
+            let yes_ask = match yes_book.best_ask() {
+                Some(l) => l.price,
+                None => continue,
+            };
+            let no_ask = match no_book.best_ask() {
+                Some(l) => l.price,
+                None => continue,
+            };
+
+            // If YES is confirmed but price is still low (< 0.90), buy YES
+            if should_trigger_yes && yes_ask < dec!(0.90) {
+                let model_prob = Decimal::ONE; // Certain outcome
+                let edge = model_prob - yes_ask;
+                if edge > Decimal::ZERO {
+                    let effective_max = (self.get_balance)() * self.config.max_position_pct;
+                    let size = effective_max.min((self.get_available_capital)());
+                    
+                    if size > Decimal::ZERO {
+                        let est = self.profit_calc.directional_buy_profit(
+                            yes_ask,
+                            model_prob,
+                            size,
+                            market.fee_rate_bps,
+                        );
+                        if est.net_profit > Decimal::ZERO {
+                            opportunities.push(ArbitrageOpportunity {
+                                id: Uuid::now_v7(),
+                                strategy_type: StrategyType::Weather,
+                                condition_id: market.condition_id,
+                                question: format!("[STALE] {}", market.question),
+                                spread: edge,
+                                estimated_profit: est.net_profit,
+                                size,
+                                detected_at: Utc::now(),
+                                execution_plan: ExecutionPlan::DirectionalBuy {
+                                    token_id: yes_token.token_id,
+                                    side: TradeSide::Buy,
+                                    price: yes_ask,
+                                    size,
+                                    condition_id: market.condition_id,
+                                },
+                            });
+                        }
+                    }
+                }
+            }
+
+            // If NO is confirmed but price is still low (< 0.90), buy NO
+            if should_trigger_no && no_ask < dec!(0.90) {
+                let model_prob = Decimal::ONE; // Certain outcome
+                let edge = model_prob - no_ask;
+                if edge > Decimal::ZERO {
+                    let effective_max = (self.get_balance)() * self.config.max_position_pct;
+                    let size = effective_max.min((self.get_available_capital)());
+                    
+                    if size > Decimal::ZERO {
+                        let est = self.profit_calc.directional_buy_profit(
+                            no_ask,
+                            model_prob,
+                            size,
+                            market.fee_rate_bps,
+                        );
+                        if est.net_profit > Decimal::ZERO {
+                            opportunities.push(ArbitrageOpportunity {
+                                id: Uuid::now_v7(),
+                                strategy_type: StrategyType::Weather,
+                                condition_id: market.condition_id,
+                                question: format!("[STALE] {}", market.question),
+                                spread: edge,
+                                estimated_profit: est.net_profit,
+                                size,
+                                detected_at: Utc::now(),
+                                execution_plan: ExecutionPlan::DirectionalBuy {
+                                    token_id: no_token.token_id,
+                                    side: TradeSide::Buy,
+                                    price: no_ask,
+                                    size,
+                                    condition_id: market.condition_id,
+                                },
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        opportunities
+    }
+
+    // ──── NegRisk Surround Strategy ────
+
+    /// Detect NegRisk surround opportunities (Early Game strategy).
+    ///
+    /// When the forecast distribution has a clear peak, buys the peak bin
+    /// plus adjacent bins to "surround" the likely outcome. This hedges
+    /// against forecast uncertainty while capturing the high-probability region.
+    async fn detect_neg_risk_surround(
+        &self,
+        event: &NegRiskEvent,
+        metric: WeatherMetric,
+        location: &str,
+    ) -> Vec<ArbitrageOpportunity> {
+        let mut opportunities = Vec::new();
+
+        // Parse target date
+        let target_date = match parse_target_date(&event.title) {
+            Some(d) => d,
+            None => return opportunities, // Skip if no clear date
+        };
+
+        // Only use surround strategy when event is more than 24 hours away
+        let today = Local::now().date_naive();
+        if (target_date - today).num_days() < 1 {
+            return opportunities; // Too close to event, use regular detection
+        }
+
+        // Get forecast
+        let precipitation_unit = if matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
+            detect_precipitation_unit(&event.title)
+        } else {
+            "inch"
+        };
+
+        let forecast = match self.get_forecast_by_location(location, metric, Some(target_date), precipitation_unit).await {
+            Some((f, _)) => f,
+            None => return opportunities,
+        };
+
+        // Evaluate each outcome bin
+        let mut bin_evals: Vec<(OutcomeRange, Decimal, &MarketInfo)> = Vec::new();
+        for market in &event.markets {
+            if !market.active || market.tokens.len() < 2 {
+                continue;
+            }
+
+            let range = match parse_outcome_range(&market.question) {
+                Some(r) => r,
+                None => continue,
+            };
+
+            // Convert Celsius to Fahrenheit if needed
+            let range = if is_temperature_metric(metric) && is_celsius_market(&market.question) {
+                OutcomeRange {
+                    lower: range.lower.map(celsius_to_fahrenheit),
+                    upper: range.upper.map(celsius_to_fahrenheit),
+                }
+            } else {
+                range
+            };
+
+            let sigma = sigma_for_metric(&self.config.forecast_error, metric, Some((target_date - today).num_days()), self.config.dynamic_sigma);
+            let prob_f64 = model_range_probability(&forecast, &range, sigma, metric);
+            let model_prob = match Decimal::from_f64_retain(prob_f64) {
+                Some(d) => d,
+                None => continue,
+            };
+
+            bin_evals.push((range, model_prob, market));
+        }
+
+        if bin_evals.is_empty() {
+            return opportunities;
+        }
+
+        // Find peak probability bin
+        let peak_prob = bin_evals.iter()
+            .map(|(_, p, _)| *p)
+            .fold(Decimal::ZERO, |a, b| a.max(b));
+
+        if peak_prob < dec!(0.40) {
+            return opportunities; // No clear peak, skip surround
+        }
+
+        // Calculate surround size: 50% of max position per bin
+        let effective_max = (self.get_balance)() * self.config.max_position_pct;
+        let surround_size_per_bin = effective_max / Decimal::from(2); // Use half of max for surround
+        let min_prob = peak_prob * dec!(0.50); // Adjacent bins must have at least 50% of peak prob
+
+        let mut bought_bins = 0u8;
+
+        for (_range, model_prob, market) in &bin_evals {
+            // Skip if probability is too low
+            if *model_prob < min_prob {
+                continue;
+            }
+
+            // Check if we have meaningful edge
+            let yes_book = match (self.get_orderbook)(market.tokens[0].token_id) {
+                Some(b) => b,
+                None => continue,
+            };
+            let yes_ask = match yes_book.best_ask() {
+                Some(l) => l.price,
+                None => continue,
+            };
+
+            if *model_prob > yes_ask {
+                let edge = *model_prob - yes_ask;
+                let edge_bps = (edge * dec!(10000)).to_u32().unwrap_or(0);
+
+                if edge_bps < self.config.min_edge_bps {
+                    continue;
+                }
+
+                let size = surround_size_per_bin.min((self.get_available_capital)());
+                if size <= Decimal::ZERO {
+                    continue;
+                }
+
+                let existing_cost = (self.get_position)(market.tokens[0].token_id) * yes_ask;
+                let remaining = (surround_size_per_bin - existing_cost).max(Decimal::ZERO);
+                let final_size = size.min(remaining);
+
+                if final_size <= Decimal::ZERO {
+                    continue;
+                }
+
+                let est = self.profit_calc.directional_buy_profit(
+                    yes_ask,
+                    *model_prob,
+                    final_size,
+                    market.fee_rate_bps,
+                );
+
+                if est.net_profit <= Decimal::ZERO {
+                    continue;
+                }
+
+                opportunities.push(ArbitrageOpportunity {
+                    id: Uuid::now_v7(),
+                    strategy_type: StrategyType::Weather,
+                    condition_id: market.condition_id,
+                    question: format!("[SURROUND] {} → {}", event.title, market.question),
+                    spread: edge,
+                    estimated_profit: est.net_profit,
+                    size: final_size,
+                    detected_at: Utc::now(),
+                    execution_plan: ExecutionPlan::DirectionalBuy {
+                        token_id: market.tokens[0].token_id,
+                        side: TradeSide::Buy,
+                        price: yes_ask,
+                        size: final_size,
+                        condition_id: market.condition_id,
+                    },
+                });
+                bought_bins += 1;
+            }
+
+            // Limit surround to at most 3 bins (peak + 2 adjacent)
+            if bought_bins >= 3 {
+                break;
+            }
+        }
+
+        opportunities
+    }
+
+    // ──── Mid Game Dynamic Trimming ────
+    // Note: Dynamic trimming functionality is integrated into scan_exits for NegRisk positions.
+    // The exit logic already handles model reversal which effectively trims losing positions
+    // when the forecast moves against them.
+
+
+    /// Get cached forecast or fetch new one.    }
+
     /// Get cached forecast or fetch new one.
     /// Returns (forecast, is_fresh_signal) where is_fresh_signal indicates a significant change.
     async fn get_forecast(
@@ -1571,12 +2081,14 @@ impl WeatherAlphaStrategy {
             use rust_decimal::prelude::ToPrimitive;
             (edge * dec!(10000)).to_u32().unwrap_or(0)
         };
-        if edge_bps < self.config.min_edge_bps {
+        if edge_bps < self.effective_edge_bps(target_date) {
             return None;
         }
 
         // Dynamic position cap: fraction of current wallet balance
-        let effective_max = (self.get_balance)() * self.config.max_position_pct;
+        // Apply sweep size multiplier if near settlement
+        let sweep_multiplier = self.effective_size_multiplier(target_date);
+        let effective_max = (self.get_balance)() * self.config.max_position_pct * sweep_multiplier;
 
         // Position sizing via Kelly criterion: f* = edge / (1 - price)
         // Guard against extreme prices where denominator approaches zero
@@ -1905,12 +2417,14 @@ impl WeatherAlphaStrategy {
             use rust_decimal::prelude::ToPrimitive;
             (edge * dec!(10000)).to_u32().unwrap_or(0)
         };
-        if edge_bps < self.config.min_edge_bps {
+        if edge_bps < self.effective_edge_bps(target_date) {
             return None;
         }
 
         // Dynamic position cap: fraction of current wallet balance
-        let effective_max = (self.get_balance)() * self.config.max_position_pct;
+        // Apply sweep size multiplier if near settlement
+        let sweep_multiplier = self.effective_size_multiplier(target_date);
+        let effective_max = (self.get_balance)() * self.config.max_position_pct * sweep_multiplier;
 
         // Kelly criterion position sizing
         let kelly_raw = if ask_price > Decimal::ZERO && ask_price < dec!(0.99) {
@@ -2258,7 +2772,9 @@ impl Strategy for WeatherAlphaStrategy {
         let mut binary_weather = 0u32;
         let mut neg_risk_weather = 0u32;
 
-        // 1. Scan binary weather markets (existing logic)
+        // 1. Collect and sort binary weather markets by city priority
+        // Priority cities (London, NYC, Seoul, etc.) are scanned first
+        let mut binary_candidates: Vec<(usize, &MarketInfo, WeatherQuestion)> = Vec::new();
         for market in markets {
             if !market.active || market.neg_risk {
                 continue;
@@ -2270,7 +2786,16 @@ impl Strategy for WeatherAlphaStrategy {
             };
 
             binary_weather += 1;
+            // Priority score: 0 for non-priority cities, 1 for priority cities
+            let priority_score = if self.is_priority_city(&parsed.location) { 1 } else { 0 };
+            binary_candidates.push((priority_score, market, parsed));
+        }
 
+        // Sort by priority score (descending) so priority cities are scanned first
+        binary_candidates.sort_by(|a, b| b.0.cmp(&a.0));
+
+        // Scan sorted binary weather markets
+        for (_, market, parsed) in binary_candidates {
             if let Some(opp) = self.detect_weather_opportunity(market, &parsed).await {
                 opportunities.push(opp);
             }
@@ -2296,9 +2821,38 @@ impl Strategy for WeatherAlphaStrategy {
             );
         }
 
+        // 3. Stale liquidity detection: scan past-date markets with confirmed outcomes
+        let stale_opps = self.scan_stale_liquidity(markets).await;
+        if !stale_opps.is_empty() {
+            tracing::info!(
+                count = stale_opps.len(),
+                "[Weather] Stale liquidity opportunities detected"
+            );
+        }
+        opportunities.extend(stale_opps);
+
+        // 4. NegRisk surround strategy: buy peak + adjacent bins in early game
+        let mut surround_count = 0u32;
+        for event in &self.neg_risk_events {
+            if let Some((metric, location)) = parse_weather_event_title(&event.title) {
+                let opps = self.detect_neg_risk_surround(event, metric, &location).await;
+                if !opps.is_empty() {
+                    surround_count += opps.len() as u32;
+                    opportunities.extend(opps);
+                }
+            }
+        }
+        if log_diag && surround_count > 0 {
+            tracing::debug!(surround_count, "[Weather] NegRisk surround opportunities");
+        }
+
         // Exit scanning: check held positions for model reversal / capital efficiency
         let exit_opps = self.scan_exits(markets).await;
         opportunities.extend(exit_opps);
+
+        // Note: Dynamic trimming is handled through the scan_exits function
+        // which detects model reversals for NegRisk positions.
+
 
         Ok(opportunities)
     }
@@ -2474,6 +3028,11 @@ mod tests {
             ensemble_models: vec![],
             forecast_change_detection: false,
             forecast_change_threshold: 0.5,
+            sweep_mode_enabled: false,
+            sweep_hours_before: 12,
+            sweep_min_edge_bps: 200,
+            sweep_size_multiplier: dec!(1.5),
+            priority_cities: vec![],
         };
 
         let profit_calc = ProfitCalculator::new(Decimal::ZERO);
@@ -3293,7 +3852,7 @@ mod tests {
     // ──── Exit Tests ────
 
     use pa_core::types::{Outcome, PriceLevel, TokenInfo};
-    use alloy::primitives::B256;
+    use alloy::primitives::{B256, U256};
 
     fn make_weather_market(question: &str) -> MarketInfo {
         MarketInfo {
@@ -3346,7 +3905,7 @@ mod tests {
         held: Vec<(U256, Decimal, Decimal)>,
     ) -> WeatherAlphaStrategy {
         let config = WeatherConfig {
-            min_edge_bps: 500,
+            min_edge_bps: 500, // 5%
             max_position_pct: dec!(0.50),
             kelly_fraction: dec!(0.25),
             forecast_error: ForecastErrorConfig::default(),
@@ -3358,6 +3917,11 @@ mod tests {
             ensemble_models: vec![],
             forecast_change_detection: false,
             forecast_change_threshold: 0.5,
+            sweep_mode_enabled: false,
+            sweep_hours_before: 12,
+            sweep_min_edge_bps: 200,
+            sweep_size_multiplier: dec!(1.5),
+            priority_cities: vec![],
         };
         let books = Arc::new(books);
         WeatherAlphaStrategy::new(
@@ -3519,6 +4083,11 @@ mod tests {
             ensemble_models: vec![],
             forecast_change_detection: true,   // ENABLED
             forecast_change_threshold: 0.5,
+            sweep_mode_enabled: false,
+            sweep_hours_before: 12,
+            sweep_min_edge_bps: 200,
+            sweep_size_multiplier: dec!(1.5),
+            priority_cities: vec![],
         };
         let held = vec![(token_id, dec!(50), dec!(0.30))];
         let held_clone = held.clone();

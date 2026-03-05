@@ -69,6 +69,13 @@ ensemble_enabled = false
 ensemble_models = ["gfs_seamless", "ecmwf_ifs025", "icon_seamless"]
 forecast_change_detection = false
 forecast_change_threshold = 0.5
+# Sweep Mode: aggressive scanning near settlement
+sweep_mode_enabled = false
+sweep_hours_before = 12  # Enter sweep mode 12 hours before settlement
+sweep_min_edge_bps = 200  # Lower edge threshold in sweep mode (2% vs 3%)
+sweep_size_multiplier = 1.5  # 1.5x position size in sweep mode
+# Priority cities for trading (London, NYC, Seoul = 73% of volume)
+priority_cities = ["London", "New York", "Seoul", "Paris", "Tokyo", "Singapore", "Dubai", "Sydney"]
 
 [weather.forecast_error]
 temperature_sigma_f = 3.0
