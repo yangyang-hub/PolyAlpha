@@ -108,7 +108,7 @@ medium_impact_multiplier = 0.50
 low_impact_multiplier = 0.75
 
 [liquidity_rewards]
-enabled = false
+enabled = true
 max_markets = 10
 max_position_per_market = 100.0
 max_total_exposure = 500.0
