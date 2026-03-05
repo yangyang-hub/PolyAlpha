@@ -2046,6 +2046,36 @@ impl WeatherAlphaStrategy {
 
         let yes_ask = yes_book.best_ask()?.price;
         let no_ask = no_book.best_ask()?.price;
+        let yes_bid = yes_book.best_bid()?.price;
+        let no_bid = no_book.best_bid()?.price;
+
+        // Check bid-ask spread on both sides
+        let yes_spread = if yes_ask > Decimal::ZERO {
+            (yes_ask - yes_bid) / yes_ask
+        } else {
+            Decimal::ONE
+        };
+        let no_spread = if no_ask > Decimal::ZERO {
+            (no_ask - no_bid) / no_ask
+        } else {
+            Decimal::ONE
+        };
+        let max_spread = yes_spread.max(no_spread);
+        let spread_bps = {
+            use rust_decimal::prelude::ToPrimitive;
+            (max_spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
+        };
+
+        if spread_bps > self.config.max_spread_bps {
+            tracing::debug!(
+                question = %market.question,
+                yes_spread_bps = %((yes_spread * dec!(10000)).round()),
+                no_spread_bps = %((no_spread * dec!(10000)).round()),
+                max_allowed = self.config.max_spread_bps,
+                "[Weather] Rejecting: spread too wide"
+            );
+            return None;
+        }
 
         // Model says event is likely (buy YES) or unlikely (buy NO)
         let model_prob_dec = Decimal::from_f64_retain(model_prob)?;
@@ -2378,8 +2408,56 @@ impl WeatherAlphaStrategy {
             let yes_token = &market.tokens[0];
             let no_token = &market.tokens[1];
 
+            // Get order books for spread check
+            let yes_book = (self.get_orderbook)(yes_token.token_id);
+            let no_book = (self.get_orderbook)(no_token.token_id);
+
+            // Check bid-ask spread before evaluating edge
+            let mut skip_market = false;
+            if let Some(ref yb) = yes_book {
+                if let (Some(ask), Some(bid)) = (yb.best_ask(), yb.best_bid()) {
+                    let spread = if ask.price > Decimal::ZERO {
+                        (ask.price - bid.price) / ask.price
+                    } else {
+                        Decimal::ONE
+                    };
+                    let spread_bps = {
+                        use rust_decimal::prelude::ToPrimitive;
+                        (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
+                    };
+                    if spread_bps > self.config.max_spread_bps {
+                        skip_market = true;
+                    }
+                }
+            }
+            if let Some(ref nb) = no_book {
+                if let (Some(ask), Some(bid)) = (nb.best_ask(), nb.best_bid()) {
+                    let spread = if ask.price > Decimal::ZERO {
+                        (ask.price - bid.price) / ask.price
+                    } else {
+                        Decimal::ONE
+                    };
+                    let spread_bps = {
+                        use rust_decimal::prelude::ToPrimitive;
+                        (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
+                    };
+                    if spread_bps > self.config.max_spread_bps {
+                        skip_market = true;
+                    }
+                }
+            }
+
+            if skip_market {
+                tracing::debug!(
+                    outcome = %market.question,
+                    max_allowed = self.config.max_spread_bps,
+                    "[Weather NegRisk] Skipping: spread too wide"
+                );
+                continue;
+            }
+
             // YES side check
-            if let Some(yes_book) = (self.get_orderbook)(yes_token.token_id)
+            if let Some(yes_book) = yes_book
                 && let Some(yes_ask_level) = yes_book.best_ask()
             {
                 let yes_ask = yes_ask_level.price;
@@ -2395,7 +2473,7 @@ impl WeatherAlphaStrategy {
 
             // NO side check: P(NOT this range) = 1 - model_prob
             let no_model_prob = Decimal::ONE - model_prob;
-            if let Some(no_book) = (self.get_orderbook)(no_token.token_id)
+            if let Some(no_book) = no_book
                 && let Some(no_ask_level) = no_book.best_ask()
             {
                 let no_ask = no_ask_level.price;
@@ -3017,6 +3095,7 @@ mod tests {
         // This should produce a detectable edge
         let config = WeatherConfig {
             min_edge_bps: 500, // 5%
+            max_spread_bps: 1200, // 12%
             max_position_pct: dec!(0.50),
             kelly_fraction: dec!(0.25),
             forecast_error: ForecastErrorConfig::default(),
@@ -3906,6 +3985,7 @@ mod tests {
     ) -> WeatherAlphaStrategy {
         let config = WeatherConfig {
             min_edge_bps: 500, // 5%
+            max_spread_bps: 1200, // 12%
             max_position_pct: dec!(0.50),
             kelly_fraction: dec!(0.25),
             forecast_error: ForecastErrorConfig::default(),
@@ -4072,6 +4152,7 @@ mod tests {
         // Build strategy with forecast_change_detection=true
         let config = WeatherConfig {
             min_edge_bps: 500,
+            max_spread_bps: 1200,
             max_position_pct: dec!(0.50),
             kelly_fraction: dec!(0.25),
             forecast_error: ForecastErrorConfig::default(),
@@ -4204,6 +4285,114 @@ mod tests {
         assert_eq!(exits.len(), 1, "NegRisk range exit should fire when forecast is far from range");
         assert!(exits[0].question.starts_with("[EXIT]"));
     }
+
+    #[tokio::test]
+    async fn test_spread_filter_rejects_wide_spread() {
+        // Test that markets with bid-ask spread > max_spread_bps are rejected
+        let token_id = U256::from(1u64);
+
+        // Create order book with 20% spread (YES: bid=0.40, ask=0.50)
+        let mut yes_book = make_weather_book(token_id, dec!(0.50));
+        yes_book.bids.clear();
+        yes_book.bids.push(PriceLevel { price: dec!(0.40), size: dec!(100) });
+
+        let mut no_book = make_weather_book(U256::from(2u64), dec!(0.60));
+        no_book.bids.clear();
+        no_book.bids.push(PriceLevel { price: dec!(0.50), size: dec!(100) });
+
+        let mut books = HashMap::new();
+        books.insert(token_id, yes_book);
+        books.insert(U256::from(2u64), no_book);
+
+        let held = vec![];
+        let strategy = make_weather_strategy(books, held);
+
+        // Pre-populate cache with strong forecast (110°F for "exceed 100°F")
+        let cache_key = WeatherAlphaStrategy::location_hash("London", WeatherMetric::TemperatureMax, None);
+        {
+            let mut cache = strategy.forecast_cache.lock().unwrap();
+            cache.insert(cache_key, CachedForecast {
+                forecast: ForecastData {
+                    values: vec![110.0],
+                    dates: vec!["2026-03-05".into()],
+                    mean: 110.0,
+                    std_dev: 3.0,
+                    target_value: Some(110.0),
+                    model_spread: 0.0,
+                },
+                fetched_at: Instant::now(),
+                previous_mean: None,
+                is_fresh_signal: true,
+            });
+        }
+
+        let market = make_weather_market( "Will the temperature in London exceed 100°F on March 5?");
+        let parsed = WeatherQuestion {
+            metric: WeatherMetric::TemperatureMax,
+            location: "London".to_string(),
+            threshold: 100.0,
+            comparison: Comparison::Above,
+        };
+
+        // Spread = (0.50 - 0.40) / 0.50 = 0.20 = 2000 bps > 1200 bps
+        // Should be rejected despite strong edge
+        let result = strategy.detect_weather_opportunity(&market, &parsed).await;
+        assert!(result.is_none(), "Market with 20% spread should be rejected (max 12%)");
+    }
+
+    #[tokio::test]
+    async fn test_spread_filter_accepts_narrow_spread() {
+        // Test that markets with bid-ask spread <= max_spread_bps are accepted
+        let token_id = U256::from(1u64);
+
+        // Create order book with 8% spread (YES: bid=0.46, ask=0.50)
+        let mut yes_book = make_weather_book(token_id, dec!(0.50));
+        yes_book.bids.clear();
+        yes_book.bids.push(PriceLevel { price: dec!(0.46), size: dec!(100) });
+
+        let mut no_book = make_weather_book(U256::from(2u64), dec!(0.54));
+        no_book.bids.clear();
+        no_book.bids.push(PriceLevel { price: dec!(0.50), size: dec!(100) });
+
+        let mut books = HashMap::new();
+        books.insert(token_id, yes_book);
+        books.insert(U256::from(2u64), no_book);
+
+        let held = vec![];
+        let strategy = make_weather_strategy(books, held);
+
+        let cache_key = WeatherAlphaStrategy::location_hash("London", WeatherMetric::TemperatureMax, None);
+        {
+            let mut cache = strategy.forecast_cache.lock().unwrap();
+            cache.insert(cache_key, CachedForecast {
+                forecast: ForecastData {
+                    values: vec![110.0],
+                    dates: vec!["2026-03-05".into()],
+                    mean: 110.0,
+                    std_dev: 3.0,
+                    target_value: Some(110.0),
+                    model_spread: 0.0,
+                },
+                fetched_at: Instant::now(),
+                previous_mean: None,
+                is_fresh_signal: true,
+            });
+        }
+
+        let market = make_weather_market( "Will the temperature in London exceed 100°F on March 5?");
+        let parsed = WeatherQuestion {
+            metric: WeatherMetric::TemperatureMax,
+            location: "London".to_string(),
+            threshold: 100.0,
+            comparison: Comparison::Above,
+        };
+
+        // Spread = (0.50 - 0.46) / 0.50 = 0.08 = 800 bps < 1200 bps
+        // Should be accepted
+        let result = strategy.detect_weather_opportunity(&market, &parsed).await;
+        assert!(result.is_some(), "Market with 8% spread should be accepted (max 12%)");
+    }
+
 
     #[tokio::test]
     async fn test_exit_celsius_neg_risk_converts_threshold() {

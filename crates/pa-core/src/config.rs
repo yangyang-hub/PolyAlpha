@@ -154,6 +154,9 @@ fn default_market_refresh_interval() -> u64 { 1800 }
 pub struct WeatherConfig {
     /// Minimum edge (model_prob - market_price) to trigger a trade, in basis points.
     pub min_edge_bps: u32,
+    /// Maximum bid-ask spread in basis points. Reject markets with wider spreads.
+    #[serde(default = "default_max_spread_bps")]
+    pub max_spread_bps: u32,
     /// Maximum position size as a fraction of wallet balance (0.0-1.0).
     /// E.g. 0.50 = up to 50% of current balance per market.
     pub max_position_pct: Decimal,
@@ -211,6 +214,7 @@ pub struct WeatherConfig {
 
 fn default_exit_buffer_bps() -> u32 { 50 }
 fn default_capital_efficiency_threshold() -> Decimal { Decimal::new(98, 2) } // 0.98
+fn default_max_spread_bps() -> u32 { 1200 } // 12% max spread
 fn default_true() -> bool { true }
 fn default_ensemble_models() -> Vec<String> {
     vec![
@@ -240,6 +244,7 @@ impl Default for WeatherConfig {
     fn default() -> Self {
         Self {
             min_edge_bps: 500,
+            max_spread_bps: default_max_spread_bps(),
             max_position_pct: Decimal::new(50, 2), // 0.50 = 50% of balance
             kelly_fraction: Decimal::new(25, 2), // 0.25 (quarter Kelly)
             forecast_error: ForecastErrorConfig::default(),
