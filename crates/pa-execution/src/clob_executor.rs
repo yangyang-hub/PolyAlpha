@@ -542,7 +542,8 @@ impl ClobExecutor {
     /// Fetch current liquidity rewards from the CLOB API.
     ///
     /// Returns paginated results of markets with active rewards.
-    /// Use `next_cursor` from the previous response to fetch subsequent pages.
+    /// The API expects next_cursor to be a string (like "0", "1", "2") for pagination.
+    /// Pass Some("0") for the first page, Some("1") for the second, etc.
     pub async fn current_rewards(
         &self,
         next_cursor: Option<String>,

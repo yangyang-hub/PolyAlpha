@@ -69,14 +69,20 @@ async fn fetch_clob_rewards(
     clob: &ClobExecutor,
 ) -> anyhow::Result<Vec<pa_strategy::liquidity_rewards::ClobRewardData>> {
     let mut all_rewards = Vec::new();
-    let mut next_cursor = None;
+    let mut next_cursor: Option<String> = Some("0".to_string());  // API expects "0" for first page
+    
+    tracing::debug!("Fetching CLOB rewards with next_cursor={:?}", next_cursor);
     
     // Fetch all pages of rewards
     loop {
-        let page = match clob.current_rewards(next_cursor).await {
+        let page = match clob.current_rewards(next_cursor.as_ref().map(|s| s.to_string())).await {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!(error = %e, "LR: Failed to fetch CLOB rewards, retrying later");
+                tracing::warn!(
+                    error = %e,
+                    next_cursor = ?next_cursor,
+                    "LR: Failed to fetch CLOB rewards, API may have changed"
+                );
                 return Ok(all_rewards); // Return what we have so far
             }
         };
@@ -100,12 +106,12 @@ async fn fetch_clob_rewards(
         if page.next_cursor.is_empty() || page.next_cursor == "0" {
             break;
         }
-        next_cursor = Some(page.next_cursor);
+        next_cursor = Some(page.next_cursor.clone());
     }
     
-    tracing::debug!(
+    tracing::info!(
         count = all_rewards.len(),
-        "LR: Fetched CLOB rewards markets"
+        "LR: Fetched CLOB rewards markets from API"
     );
     
     Ok(all_rewards)
