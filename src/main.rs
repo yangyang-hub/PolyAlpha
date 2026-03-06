@@ -1991,7 +1991,7 @@ async fn lr_quote_one_market(
                     mid, rewards_max_spread, yes_position,
                     config, rewards_min_size, market.tick_size,
                 ) {
-                    tracing::debug!(
+                    tracing::info!(
                         market = %cid, side = "YES", midpoint = %mid,
                         rewards_max_spread = %rewards_max_spread,
                         bid = %quote.bid_price, ask = %quote.ask_price,
@@ -2050,7 +2050,7 @@ async fn lr_quote_one_market(
                     mid, rewards_max_spread, no_position,
                     config, rewards_min_size, market.tick_size,
                 ) {
-                    tracing::debug!(
+                    tracing::info!(
                         market = %cid, side = "NO", midpoint = %mid,
                         rewards_max_spread = %rewards_max_spread,
                         bid = %quote.bid_price, ask = %quote.ask_price,
