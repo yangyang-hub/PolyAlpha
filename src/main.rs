@@ -134,7 +134,7 @@ async fn main() -> Result<()> {
     tracing::info!("PolyAlpha starting...");
 
     // --- Load configuration ---
-    let settings = Settings::load().context("Failed to load configuration")?;
+    let mut settings = Settings::load().context("Failed to load configuration")?;
     tracing::info!(
         chain_id = settings.chain.chain_id,
         clob_host = %settings.clob.host,
@@ -148,6 +148,16 @@ async fn main() -> Result<()> {
         names = ?resolved_accounts.iter().map(|a| &a.name).collect::<Vec<_>>(),
         "Trading accounts resolved"
     );
+
+    // Merge per-account strategies into global enabled list so market discovery
+    // covers all required markets (e.g., LR needs general markets, not just weather/crypto).
+    for acct in &resolved_accounts {
+        for s in &acct.strategies {
+            if !settings.strategy.enabled.contains(s) {
+                settings.strategy.enabled.push(s.clone());
+            }
+        }
+    }
 
     // --- Global cancellation token ---
     let cancel = CancellationToken::new();

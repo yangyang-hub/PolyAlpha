@@ -78,9 +78,14 @@ impl PositionLoader {
         match self.try_load_positions_sdk().await {
             Ok(positions) => Ok(positions),
             Err(e) => {
-                // Check if this is a deserialization error (likely empty endDate)
-                let error_msg = e.to_string().to_lowercase();
-                if error_msg.contains("deserialization") || error_msg.contains("premature end") {
+                // Check if this is a deserialization error (likely empty endDate).
+                // Use {:#} to include the full error chain, not just the outermost .context().
+                let error_chain = format!("{:#}", e).to_lowercase();
+                if error_chain.contains("deserialization")
+                    || error_chain.contains("premature end")
+                    || error_chain.contains("invalid type")
+                    || error_chain.contains("enddate")
+                {
                     tracing::warn!(
                         error = %e,
                         wallet = %self.wallet,
@@ -227,8 +232,12 @@ impl PositionLoader {
         match self.try_find_redeemable_sdk().await {
             Ok(positions) => Ok(positions),
             Err(e) => {
-                let error_msg = e.to_string().to_lowercase();
-                if error_msg.contains("deserialization") || error_msg.contains("premature end") {
+                let error_chain = format!("{:#}", e).to_lowercase();
+                if error_chain.contains("deserialization")
+                    || error_chain.contains("premature end")
+                    || error_chain.contains("invalid type")
+                    || error_chain.contains("enddate")
+                {
                     tracing::warn!(
                         error = %e,
                         wallet = %self.wallet,

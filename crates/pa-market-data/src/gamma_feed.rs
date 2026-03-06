@@ -69,7 +69,7 @@ impl GammaFeed {
         tracing::info!("Discovering markets from Gamma API");
 
         // Check which discovery mode to use
-        let general_strategies = ["yes_no", "neg_risk", "cross_market", "convergence"];
+        let general_strategies = ["yes_no", "neg_risk", "cross_market", "convergence", "liquidity_rewards"];
         let needs_full_scan = self.enabled_strategies.is_empty()
             || self.enabled_strategies.iter().any(|s| general_strategies.contains(&s.as_str()));
 
