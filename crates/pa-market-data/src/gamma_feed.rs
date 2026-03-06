@@ -100,10 +100,16 @@ impl GammaFeed {
             }
         }
 
-        // Sort general markets by liquidity descending, fill remaining slots
+        // Sort general markets by liquidity descending, fill remaining slots.
+        // When liquidity_rewards is enabled, skip truncation — LR needs broad
+        // market coverage to match against CLOB reward condition_ids.
+        // WS subscription is independently limited by ws_max_instruments.
         general_markets.sort_by(|a, b| b.liquidity.cmp(&a.liquidity));
-        let remaining_slots = self.max_markets.saturating_sub(strategy_markets.len());
-        general_markets.truncate(remaining_slots);
+        let lr_enabled = self.enabled_strategies.iter().any(|s| s == "liquidity_rewards");
+        if !lr_enabled {
+            let remaining_slots = self.max_markets.saturating_sub(strategy_markets.len());
+            general_markets.truncate(remaining_slots);
+        }
 
         let mut filtered = strategy_markets;
         let strategy_count = filtered.len();
@@ -537,12 +543,15 @@ impl GammaFeed {
         let neg_risk = event_neg_risk || market.neg_risk.unwrap_or(false);
         let neg_risk_market_id = event_neg_risk_market_id.or(market.neg_risk_market_id);
 
-        // Apply liquidity/volume filters (relaxed for strategy-relevant markets)
+        // Apply liquidity/volume filters (relaxed for strategy-relevant markets
+        // and when liquidity_rewards is enabled, since reward markets are
+        // intentionally low-liquidity and need providers).
         let liquidity = market.liquidity.unwrap_or(Decimal::ZERO);
         let volume_24h = market.volume_24hr.unwrap_or(Decimal::ZERO);
         let strategy_relevant = Self::is_strategy_relevant(&question);
+        let lr_enabled = self.enabled_strategies.iter().any(|s| s == "liquidity_rewards");
 
-        if !strategy_relevant {
+        if !strategy_relevant && !lr_enabled {
             if liquidity < self.min_liquidity {
                 return None;
             }

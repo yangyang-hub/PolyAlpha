@@ -1986,6 +1986,12 @@ async fn lr_quote_one_market(
                     mid, rewards_max_spread, yes_position,
                     config, rewards_min_size, market.tick_size,
                 ) {
+                    tracing::debug!(
+                        market = %cid, side = "YES", midpoint = %mid,
+                        rewards_max_spread = %rewards_max_spread,
+                        bid = %quote.bid_price, ask = %quote.ask_price,
+                        "LR: computed quotes"
+                    );
                     let remaining_pos = (config.max_position_per_market - yes_position).max(Decimal::ZERO);
                     let remaining_exp = (config.max_total_exposure - current_exposure - exposure_added).max(Decimal::ZERO);
                     let bid_size = quote.size.min(remaining_pos).min(remaining_exp);
@@ -2039,6 +2045,12 @@ async fn lr_quote_one_market(
                     mid, rewards_max_spread, no_position,
                     config, rewards_min_size, market.tick_size,
                 ) {
+                    tracing::debug!(
+                        market = %cid, side = "NO", midpoint = %mid,
+                        rewards_max_spread = %rewards_max_spread,
+                        bid = %quote.bid_price, ask = %quote.ask_price,
+                        "LR: computed quotes"
+                    );
                     let remaining_pos = (config.max_position_per_market - no_position).max(Decimal::ZERO);
                     let remaining_exp = (config.max_total_exposure - current_exposure - exposure_added).max(Decimal::ZERO);
                     let bid_size = quote.size.min(remaining_pos).min(remaining_exp);

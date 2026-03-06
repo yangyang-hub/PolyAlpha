@@ -185,12 +185,12 @@ impl PositionLoader {
                 ));
             }
 
-            let raw: RawPositionsResponse = resp.json().await
+            let raw: Vec<RawPosition> = resp.json().await
                 .context("Fallback JSON parsing failed")?;
 
-            let page_len = raw.positions.len();
+            let page_len = raw.len();
 
-            for pos in raw.positions {
+            for pos in raw {
                 all_positions.push(ApiPosition {
                     token_id: pos.asset,
                     size: pos.size,

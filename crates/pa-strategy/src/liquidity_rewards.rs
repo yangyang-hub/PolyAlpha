@@ -152,12 +152,14 @@ pub fn compute_quotes(
     let bid_price = floor_to_tick(midpoint - bid_half, tick_size);
     let ask_price = ceil_to_tick(midpoint + ask_half, tick_size);
 
-    // Validate: within rewards spread, not crossed, within [0.01, 0.99]
+    // Reject if either side falls outside valid price range [0.01, 0.99].
+    // Do NOT clamp — placing orders at the floor/ceiling is not meaningful.
     let min_price = Decimal::new(1, 2);
     let max_price = Decimal::new(99, 2);
 
-    let bid_price = bid_price.max(min_price);
-    let ask_price = ask_price.min(max_price);
+    if bid_price < min_price || ask_price > max_price {
+        return None;
+    }
 
     if bid_price >= ask_price {
         return None;
@@ -396,5 +398,21 @@ mod tests {
         assert_eq!(q.size, config.max_position_per_market);
         // In the run loop, remaining_exposure caps bid_size:
         // e.g. if remaining_exposure=3 USDC, bid_size = min(100, 3) = 3 < min_order_size → skipped
+    }
+
+    #[test]
+    fn test_compute_quotes_rejects_low_midpoint() {
+        // When midpoint is so low that bid falls below 0.01, reject entirely
+        // rather than clamping to floor price.
+        let config = default_config();
+        // midpoint=0.02, spread=0.10 → half_spread = 0.10*0.80/2 = 0.04
+        // bid = 0.02 - 0.04 = -0.02 → below 0.01 → rejected
+        let result = compute_quotes(dec!(0.02), dec!(0.10), Decimal::ZERO, &config, dec!(5), dec!(0.01));
+        assert!(result.is_none(), "Low midpoint should be rejected, not clamped to 0.01");
+
+        // midpoint=0.05, spread=0.10 → half_spread=0.04
+        // bid = 0.05 - 0.04 = 0.01 → exactly 0.01, still valid
+        let result = compute_quotes(dec!(0.05), dec!(0.10), Decimal::ZERO, &config, dec!(5), dec!(0.01));
+        assert!(result.is_some(), "Bid exactly at 0.01 should be accepted");
     }
 }
