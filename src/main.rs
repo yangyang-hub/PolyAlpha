@@ -1115,6 +1115,7 @@ async fn main() -> Result<()> {
                     for candidate in &active_candidates {
                         let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
                             &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
+                            candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
                         ).await;
                         total_exposure += exp;
                         let cid = candidate.market.condition_id;
@@ -1195,6 +1196,7 @@ async fn main() -> Result<()> {
                                         let current_exposure = Decimal::ZERO;
                                         let (metas, _exp, yes_mid, no_mid) = lr_quote_one_market(
                                             &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, current_exposure,
+                                            candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
                                         ).await;
                                         if !metas.is_empty() {
                                             outstanding_orders.insert(cid, metas.into_iter().collect());
@@ -1232,6 +1234,7 @@ async fn main() -> Result<()> {
                                 let cid = candidate.market.condition_id;
                                 let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
                                     &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
+                                    candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
                                 ).await;
                                 total_exposure += exp;
                                 if !metas.is_empty() {
@@ -1297,6 +1300,7 @@ async fn main() -> Result<()> {
                                 let cid = candidate.market.condition_id;
                                 let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
                                     &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
+                                    candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
                                 ).await;
                                 total_exposure += exp;
                                 if !metas.is_empty() {
@@ -1396,6 +1400,7 @@ async fn main() -> Result<()> {
                                             let current_exposure = Decimal::ZERO;
                                             let (metas, _exp, yes_mid, no_mid) = lr_quote_one_market(
                                                 &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, current_exposure,
+                                                candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
                                             ).await;
                                             if !metas.is_empty() {
                                                 outstanding_orders.insert(cid, metas.into_iter().collect());
@@ -1963,12 +1968,12 @@ async fn lr_quote_one_market(
     rm: &RiskManagerImpl,
     clob: &ClobExecutor,
     current_exposure: Decimal,
+    rewards_max_spread: Decimal,
+    rewards_min_size: Decimal,
 ) -> (Vec<(String, LrOrderMeta)>, Decimal, Option<Decimal>, Option<Decimal>) {
     let cid = market.condition_id;
     let yes_tid = market.tokens[0].token_id;
     let no_tid = market.tokens[1].token_id;
-    let rewards_max_spread = market.rewards_max_spread.unwrap_or(Decimal::ZERO);
-    let rewards_min_size = market.rewards_min_size.unwrap_or(Decimal::ZERO);
 
     let mut order_metas: Vec<(String, LrOrderMeta)> = Vec::new();
     let mut exposure_added = Decimal::ZERO;

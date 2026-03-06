@@ -10,6 +10,10 @@ pub struct RewardMarketCandidate {
     pub market: MarketInfo,
     /// reward_density = daily_rate / (liquidity + 1)
     pub density: Decimal,
+    /// CLOB API rewards_max_spread (authoritative source for quoting).
+    pub clob_rewards_max_spread: Decimal,
+    /// CLOB API rewards_min_size.
+    pub clob_rewards_min_size: Decimal,
 }
 
 /// Select and rank markets eligible for liquidity rewards.
@@ -37,6 +41,8 @@ pub fn select_reward_markets(
             RewardMarketCandidate {
                 market: m.clone(),
                 density,
+                clob_rewards_max_spread: m.rewards_max_spread.unwrap_or(Decimal::ZERO),
+                clob_rewards_min_size: m.rewards_min_size.unwrap_or(Decimal::ZERO),
             }
         })
         .collect();
@@ -104,6 +110,8 @@ pub fn select_reward_markets_with_clob_data(
             Some(RewardMarketCandidate {
                 market: m.clone(),
                 density,
+                clob_rewards_max_spread: reward_data.rewards_max_spread,
+                clob_rewards_min_size: reward_data.rewards_min_size,
             })
         })
         .collect();
