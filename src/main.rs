@@ -96,7 +96,9 @@ async fn fetch_clob_rewards(
             
             all_rewards.push(pa_strategy::liquidity_rewards::ClobRewardData {
                 condition_id: reward.condition_id,
-                rewards_max_spread: reward.rewards_max_spread,
+                // CLOB API returns spread as percentage (e.g. 4.5 = 4.5%),
+                // convert to decimal price spread (0.045) for our quoting math.
+                rewards_max_spread: reward.rewards_max_spread / Decimal::from(100),
                 rewards_min_size: reward.rewards_min_size,
                 total_daily_rate,
             });
