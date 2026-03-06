@@ -64,7 +64,7 @@ impl PositionLoader {
         Ok(Self {
             client: DataApiClient::default(),
             wallet,
-            api_base: "https://gamma-api.polymarket.com".to_string(),
+            api_base: "https://data-api.polymarket.com".to_string(),
         })
     }
 
