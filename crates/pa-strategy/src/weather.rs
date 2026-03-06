@@ -2630,6 +2630,24 @@ impl WeatherAlphaStrategy {
                 continue;
             }
 
+            // Deep loss exit: cut losses regardless of model when position has lost >= 50%.
+            // The model reversal check below only triggers when model_prob < best_bid,
+            // which is nearly impossible at low prices (e.g., model_prob would need to be
+            // below 4.5% when best_bid is 0.05). This check provides a model-independent
+            // exit when the loss is severe.
+            if *avg_cost > Decimal::ZERO && best_bid < *avg_cost * dec!(0.50) {
+                let loss_pct = ((*avg_cost - best_bid) / *avg_cost * dec!(100)).round_dp(1);
+                tracing::info!(
+                    token_id = %token_id,
+                    best_bid = %best_bid,
+                    avg_cost = %avg_cost,
+                    loss_pct = %loss_pct,
+                    "[EXIT] Deep loss — weather position lost >= 50%"
+                );
+                exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
+                continue;
+            }
+
             // Model reversal: recompute model_prob using cached forecast
             let market = match token_to_market.get(token_id) {
                 Some(m) => *m,

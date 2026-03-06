@@ -1420,111 +1420,212 @@ async fn main() -> Result<()> {
         }
 
         // --- Auto-redeem resolved positions (every 5 minutes) ---
-        if ctx.trading_enabled {
-            let redeem_signer = PrivateKeySigner::from_str(&ctx.private_key)
-                .context(format!("Invalid private key for redeem signer (account {})", acct_name))?
-                .with_chain_id(Some(ctx.chain_id));
-            let redeem_provider = alloy::providers::ProviderBuilder::new()
+        // Redeem is a pure on-chain operation (CTF/Safe contracts), independent of CLOB auth,
+        // so we do NOT gate on `ctx.trading_enabled`.
+        'redeem: {
+            let redeem_signer = match PrivateKeySigner::from_str(&ctx.private_key) {
+                Ok(s) => s.with_chain_id(Some(ctx.chain_id)),
+                Err(e) => {
+                    tracing::warn!(account = %acct_name, error = %e, "Invalid private key for redeem signer, skipping auto-redeem");
+                    break 'redeem;
+                }
+            };
+            let redeem_provider = match alloy::providers::ProviderBuilder::new()
                 .wallet(redeem_signer.clone())
                 .connect(&settings.chain.rpc_url)
                 .await
-                .context(format!("Failed to connect RPC for redeem (account {})", acct_name))?;
-            let safe_redeemer = SafeRedeemer::new(redeem_provider, redeem_signer, ctx.proxy_addr);
-
-            let _is_owner = match safe_redeemer.verify_ownership().await {
-                Ok(true) => {
-                    tracing::info!(account = %acct_name, safe = %ctx.proxy_addr, "SafeRedeemer: EOA is Safe owner");
-                }
-                Ok(false) => {
-                    tracing::warn!(account = %acct_name, safe = %ctx.proxy_addr, "SafeRedeemer: EOA is NOT a Safe owner, skipping auto-redeem");
-                    continue;
-                }
+            {
+                Ok(p) => p,
                 Err(e) => {
-                    tracing::warn!(account = %acct_name, error = %e, "SafeRedeemer: could not verify ownership, skipping auto-redeem");
-                    continue;
+                    tracing::warn!(account = %acct_name, error = %e, "Failed to connect RPC for redeem, skipping auto-redeem");
+                    break 'redeem;
                 }
             };
-
             let redeem_proxy = ctx.proxy_addr;
             let redeem_cancel = cancel.clone();
             let redeem_name = acct_name.clone();
-            tokio::spawn(async move {
-                let redeem_loader = match PositionLoader::new(redeem_proxy) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        tracing::error!(account = %redeem_name, error = %e, "Failed to create redeem position loader");
-                        return;
+            let redeem_chain_id = ctx.chain_id;
+
+            if ctx.signature_type == 2 {
+                // GnosisSafe path
+                let safe_redeemer = SafeRedeemer::new(redeem_provider, redeem_signer, redeem_proxy);
+                match safe_redeemer.verify_ownership().await {
+                    Ok(true) => {
+                        tracing::info!(account = %acct_name, safe = %redeem_proxy, "SafeRedeemer: EOA is Safe owner");
                     }
-                };
-                let mut interval = tokio::time::interval(Duration::from_secs(300));
-                loop {
-                    tokio::select! {
-                        _ = redeem_cancel.cancelled() => break,
-                        _ = interval.tick() => {
-                            match redeem_loader.find_redeemable().await {
-                                Ok(positions) if positions.is_empty() => {}
-                                Ok(positions) => {
-                                    tracing::info!(
-                                        account = %redeem_name,
-                                        count = positions.len(),
-                                        "Found redeemable positions, claiming..."
-                                    );
-                                    for pos in &positions {
+                    Ok(false) => {
+                        tracing::warn!(account = %acct_name, safe = %redeem_proxy, "SafeRedeemer: EOA is NOT a Safe owner, skipping auto-redeem");
+                        break 'redeem;
+                    }
+                    Err(e) => {
+                        tracing::warn!(account = %acct_name, error = %e, "SafeRedeemer: could not verify ownership, skipping auto-redeem");
+                        break 'redeem;
+                    }
+                }
+                tokio::spawn(async move {
+                    let redeem_loader = match PositionLoader::new(redeem_proxy) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            tracing::error!(account = %redeem_name, error = %e, "Failed to create redeem position loader");
+                            return;
+                        }
+                    };
+                    let mut interval = tokio::time::interval(Duration::from_secs(300));
+                    loop {
+                        tokio::select! {
+                            _ = redeem_cancel.cancelled() => break,
+                            _ = interval.tick() => {
+                                match redeem_loader.find_redeemable().await {
+                                    Ok(positions) if positions.is_empty() => {}
+                                    Ok(positions) => {
                                         tracing::info!(
                                             account = %redeem_name,
-                                            condition_id = %pos.condition_id,
-                                            title = %pos.title,
-                                            size = %pos.size,
-                                            neg_risk = pos.neg_risk,
-                                            outcome_index = pos.outcome_index,
-                                            "Redeeming resolved position via GnosisSafe"
+                                            count = positions.len(),
+                                            "Found redeemable positions, claiming..."
                                         );
-                                        let result = if pos.neg_risk {
-                                            let amount_raw = pos.size * rust_decimal::Decimal::from(1_000_000u64);
-                                            let amount = alloy::primitives::U256::from(
-                                                amount_raw.to_u64().unwrap_or(0)
+                                        for pos in &positions {
+                                            tracing::info!(
+                                                account = %redeem_name,
+                                                condition_id = %pos.condition_id,
+                                                title = %pos.title,
+                                                size = %pos.size,
+                                                neg_risk = pos.neg_risk,
+                                                outcome_index = pos.outcome_index,
+                                                "Redeeming resolved position via GnosisSafe"
                                             );
-                                            let amounts = if pos.outcome_index == 0 {
-                                                vec![amount, alloy::primitives::U256::ZERO]
+                                            let result = if pos.neg_risk {
+                                                let amount_raw = pos.size * rust_decimal::Decimal::from(1_000_000u64);
+                                                let amount = alloy::primitives::U256::from(
+                                                    amount_raw.to_u64().unwrap_or(0)
+                                                );
+                                                let amounts = if pos.outcome_index == 0 {
+                                                    vec![amount, alloy::primitives::U256::ZERO]
+                                                } else {
+                                                    vec![alloy::primitives::U256::ZERO, amount]
+                                                };
+                                                safe_redeemer.redeem_neg_risk(
+                                                    pos.condition_id,
+                                                    amounts,
+                                                ).await
                                             } else {
-                                                vec![alloy::primitives::U256::ZERO, amount]
+                                                safe_redeemer.redeem(pos.condition_id).await
                                             };
-                                            safe_redeemer.redeem_neg_risk(
-                                                pos.condition_id,
-                                                amounts,
-                                            ).await
-                                        } else {
-                                            safe_redeemer.redeem(pos.condition_id).await
-                                        };
-                                        match result {
-                                            Ok(tx) => {
-                                                tracing::info!(
-                                                    account = %redeem_name,
-                                                    condition_id = %pos.condition_id,
-                                                    tx_hash = %tx.tx_hash,
-                                                    "Redeem successful"
-                                                );
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    account = %redeem_name,
-                                                    condition_id = %pos.condition_id,
-                                                    error = %e,
-                                                    "Redeem failed"
-                                                );
+                                            match result {
+                                                Ok(tx) => {
+                                                    tracing::info!(
+                                                        account = %redeem_name,
+                                                        condition_id = %pos.condition_id,
+                                                        tx_hash = %tx.tx_hash,
+                                                        "Redeem successful"
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        account = %redeem_name,
+                                                        condition_id = %pos.condition_id,
+                                                        error = %e,
+                                                        "Redeem failed"
+                                                    );
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                Err(e) => {
-                                    tracing::debug!(account = %redeem_name, error = %e, "Redeemable check failed");
+                                    Err(e) => {
+                                        tracing::debug!(account = %redeem_name, error = %e, "Redeemable check failed");
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            });
-            tracing::info!(account = %acct_name, "Auto-redeem task started");
+                });
+                tracing::info!(account = %acct_name, "Auto-redeem task started (GnosisSafe)");
+            } else {
+                // Direct CTF path for EOA/Proxy accounts
+                let ctf = match CtfExecutor::with_neg_risk(redeem_provider, redeem_chain_id) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(account = %acct_name, error = %e, "Failed to create CtfExecutor for redeem, skipping auto-redeem");
+                        break 'redeem;
+                    }
+                };
+                tokio::spawn(async move {
+                    let redeem_loader = match PositionLoader::new(redeem_proxy) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            tracing::error!(account = %redeem_name, error = %e, "Failed to create redeem position loader");
+                            return;
+                        }
+                    };
+                    let mut interval = tokio::time::interval(Duration::from_secs(300));
+                    loop {
+                        tokio::select! {
+                            _ = redeem_cancel.cancelled() => break,
+                            _ = interval.tick() => {
+                                match redeem_loader.find_redeemable().await {
+                                    Ok(positions) if positions.is_empty() => {}
+                                    Ok(positions) => {
+                                        tracing::info!(
+                                            account = %redeem_name,
+                                            count = positions.len(),
+                                            "Found redeemable positions, claiming via direct CTF..."
+                                        );
+                                        for pos in &positions {
+                                            tracing::info!(
+                                                account = %redeem_name,
+                                                condition_id = %pos.condition_id,
+                                                title = %pos.title,
+                                                size = %pos.size,
+                                                neg_risk = pos.neg_risk,
+                                                outcome_index = pos.outcome_index,
+                                                "Redeeming resolved position via direct CTF"
+                                            );
+                                            let result = if pos.neg_risk {
+                                                let amount_raw = pos.size * rust_decimal::Decimal::from(1_000_000u64);
+                                                let amount = alloy::primitives::U256::from(
+                                                    amount_raw.to_u64().unwrap_or(0)
+                                                );
+                                                let amounts = if pos.outcome_index == 0 {
+                                                    vec![amount, alloy::primitives::U256::ZERO]
+                                                } else {
+                                                    vec![alloy::primitives::U256::ZERO, amount]
+                                                };
+                                                ctf.redeem_neg_risk(
+                                                    pos.condition_id,
+                                                    amounts,
+                                                ).await
+                                            } else {
+                                                ctf.redeem(pos.condition_id).await
+                                            };
+                                            match result {
+                                                Ok(tx) => {
+                                                    tracing::info!(
+                                                        account = %redeem_name,
+                                                        condition_id = %pos.condition_id,
+                                                        tx_hash = %tx.tx_hash,
+                                                        "Redeem successful"
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        account = %redeem_name,
+                                                        condition_id = %pos.condition_id,
+                                                        error = %e,
+                                                        "Redeem failed"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(account = %redeem_name, error = %e, "Redeemable check failed");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+                tracing::info!(account = %acct_name, "Auto-redeem task started (direct CTF)");
+            }
         }
 
         // --- Periodic position sync (reconcile with Data API every 5 min) ---

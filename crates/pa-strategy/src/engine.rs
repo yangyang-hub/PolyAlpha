@@ -536,35 +536,59 @@ impl StrategyEngine {
 
             // Safety check 2: Cross-validate with counter-token.
             // In a binary market (YES/NO), if our token has low bids, check the OTHER token.
-            // If the other side has high bids (>0.80), our side is genuinely losing.
+            // If the other side has high bids (>0.50), our side is genuinely losing.
             // If the other side ALSO has low bids, data is likely stale — don't act.
+            //
+            // IMPORTANT: "counter-token not subscribed" (no orderbook at all) is DIFFERENT
+            // from "counter-token has orderbook with low bids". When a token is not subscribed,
+            // it's typically because WS filtering excluded it as extreme price (>0.95),
+            // which actually CONFIRMS our side is losing. Only block when both sides
+            // have actual orderbook data with low bids.
             if let Some(m) = market {
                 if m.tokens.len() == 2 {
                     let other_token = m.tokens.iter()
                         .find(|t| t.token_id != pos.token_id)
                         .map(|t| t.token_id);
                     if let Some(other_id) = other_token {
-                        let other_bid = (self.get_orderbook)(other_id)
-                            .and_then(|b| b.best_bid().map(|l| l.price))
-                            .unwrap_or(Decimal::ZERO);
-                        // If the other side's best_bid < 0.50, market data is suspicious.
-                        // In a proper binary market, YES + NO should sum close to $1.00.
-                        // If both sides have low bids, the orderbook is stale/empty.
-                        if other_bid < dec!(0.50) {
-                            let condition_id = pos.condition_id.unwrap_or(m.condition_id);
-                            let st = pos.strategy_type.unwrap_or(StrategyType::CryptoAlpha);
-                            let sell_value = best_bid * pos.size;
-                            tracing::info!(
-                                token_id = %pos.token_id,
-                                our_bid = %best_bid,
-                                other_bid = %other_bid,
-                                avg_cost = %pos.avg_cost,
-                                size = %pos.size,
-                                sell_value = %sell_value,
-                                "[STOP-LOSS] Both sides low bids — market illiquid/stale, cannot sell (will retry in 1h)"
-                            );
-                            self.set_cooldown(condition_id, st, 3600); // 1 hour
-                            continue;
+                        let other_book = (self.get_orderbook)(other_id);
+                        match other_book {
+                            Some(book) => {
+                                let other_bid = book.best_bid()
+                                    .map(|l| l.price)
+                                    .unwrap_or(Decimal::ZERO);
+                                if other_bid < dec!(0.50) {
+                                    // Both sides have orderbook data but low bids — likely stale.
+                                    let condition_id = pos.condition_id.unwrap_or(m.condition_id);
+                                    let st = pos.strategy_type.unwrap_or(StrategyType::CryptoAlpha);
+                                    let sell_value = best_bid * pos.size;
+                                    tracing::info!(
+                                        token_id = %pos.token_id,
+                                        our_bid = %best_bid,
+                                        other_bid = %other_bid,
+                                        avg_cost = %pos.avg_cost,
+                                        size = %pos.size,
+                                        sell_value = %sell_value,
+                                        "[STOP-LOSS] Both sides low bids — market illiquid/stale, cannot sell (will retry in 10m)"
+                                    );
+                                    self.set_cooldown(condition_id, st, 600); // 10 min
+                                    continue;
+                                }
+                                // Counter-token has high bids → our side is genuinely losing.
+                                // Fall through to sell.
+                            }
+                            None => {
+                                // Counter-token not in orderbook cache (not subscribed).
+                                // This typically means WS filtering excluded it as extreme price
+                                // (>0.95 or <0.05), which confirms our side is on the losing end.
+                                tracing::info!(
+                                    token_id = %pos.token_id,
+                                    our_bid = %best_bid,
+                                    avg_cost = %pos.avg_cost,
+                                    size = %pos.size,
+                                    "[STOP-LOSS] Counter-token not subscribed (likely extreme price) — proceeding"
+                                );
+                                // Fall through to sell.
+                            }
                         }
                     }
                 }

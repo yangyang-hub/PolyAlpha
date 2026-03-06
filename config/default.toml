@@ -103,6 +103,7 @@ coingecko_api_key = ""
 exit_buffer_bps = 50
 capital_efficiency_threshold = 0.98
 drift_decay = 0.0
+max_spread_bps = 1500
 
 [event_calendar]
 enabled = false

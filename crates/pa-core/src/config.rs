@@ -384,9 +384,15 @@ pub struct CryptoAlphaConfig {
     /// Default 0.0 aligns with Black-Scholes risk-neutral pricing.
     #[serde(default = "default_drift_decay")]
     pub drift_decay: f64,
+    /// Maximum bid-ask spread in basis points. Markets wider than this are skipped.
+    /// Crypto markets often have 10-20% spreads; buying into wide spreads causes
+    /// immediate mark-to-market losses.
+    #[serde(default = "default_crypto_max_spread_bps")]
+    pub max_spread_bps: u32,
 }
 
 fn default_drift_decay() -> f64 { 0.0 }
+fn default_crypto_max_spread_bps() -> u32 { 1500 }
 fn default_crypto_min_edge() -> u32 { 500 }
 fn default_crypto_max_position_pct() -> Decimal { Decimal::new(50, 2) } // 0.50
 fn default_crypto_kelly() -> Decimal { Decimal::new(25, 2) }
@@ -403,6 +409,7 @@ impl Default for CryptoAlphaConfig {
             exit_buffer_bps: default_exit_buffer_bps(),
             capital_efficiency_threshold: default_capital_efficiency_threshold(),
             drift_decay: default_drift_decay(),
+            max_spread_bps: default_crypto_max_spread_bps(),
         }
     }
 }

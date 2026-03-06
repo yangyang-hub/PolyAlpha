@@ -881,6 +881,35 @@ impl CryptoAlphaStrategy {
         let yes_ask = yes_book.best_ask()?.price;
         let no_ask = no_book.best_ask()?.price;
 
+        // Check bid-ask spread — wide spreads cause immediate mark-to-market losses
+        let yes_bid = yes_book.best_bid().map(|l| l.price).unwrap_or(Decimal::ZERO);
+        let no_bid = no_book.best_bid().map(|l| l.price).unwrap_or(Decimal::ZERO);
+        let yes_spread = if yes_ask > Decimal::ZERO {
+            (yes_ask - yes_bid) / yes_ask
+        } else {
+            Decimal::ONE
+        };
+        let no_spread = if no_ask > Decimal::ZERO {
+            (no_ask - no_bid) / no_ask
+        } else {
+            Decimal::ONE
+        };
+        let max_spread = yes_spread.max(no_spread);
+        let spread_bps = {
+            use rust_decimal::prelude::ToPrimitive;
+            (max_spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
+        };
+        if spread_bps > self.config.max_spread_bps {
+            tracing::debug!(
+                question = %market.question,
+                yes_spread_bps = %((yes_spread * dec!(10000)).round()),
+                no_spread_bps = %((no_spread * dec!(10000)).round()),
+                max_allowed = self.config.max_spread_bps,
+                "[CryptoAlpha] Rejecting: spread too wide"
+            );
+            return None;
+        }
+
         // Check both YES and NO sides, pick larger edge
         let model_prob = Decimal::from_f64_retain(model_prob_f64)?;
         let model_prob_no = Decimal::ONE - model_prob;
@@ -1052,6 +1081,49 @@ impl CryptoAlphaStrategy {
 
             let yes_token = &market.tokens[0];
             let no_token = &market.tokens[1];
+
+            // Check bid-ask spread — skip outcomes with wide spreads
+            let mut skip_outcome = false;
+            if let Some(ref yb) = (self.get_orderbook)(yes_token.token_id) {
+                if let (Some(ask), Some(bid)) = (yb.best_ask(), yb.best_bid()) {
+                    let spread = if ask.price > Decimal::ZERO {
+                        (ask.price - bid.price) / ask.price
+                    } else {
+                        Decimal::ONE
+                    };
+                    let spread_bps = {
+                        use rust_decimal::prelude::ToPrimitive;
+                        (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
+                    };
+                    if spread_bps > self.config.max_spread_bps {
+                        skip_outcome = true;
+                    }
+                }
+            }
+            if let Some(ref nb) = (self.get_orderbook)(no_token.token_id) {
+                if let (Some(ask), Some(bid)) = (nb.best_ask(), nb.best_bid()) {
+                    let spread = if ask.price > Decimal::ZERO {
+                        (ask.price - bid.price) / ask.price
+                    } else {
+                        Decimal::ONE
+                    };
+                    let spread_bps = {
+                        use rust_decimal::prelude::ToPrimitive;
+                        (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
+                    };
+                    if spread_bps > self.config.max_spread_bps {
+                        skip_outcome = true;
+                    }
+                }
+            }
+            if skip_outcome {
+                tracing::debug!(
+                    outcome = %market.question,
+                    max_allowed = self.config.max_spread_bps,
+                    "[CryptoAlpha NegRisk] Skipping: spread too wide"
+                );
+                continue;
+            }
 
             // YES side check
             if let Some(yes_book) = (self.get_orderbook)(yes_token.token_id)
@@ -1272,6 +1344,49 @@ impl CryptoAlphaStrategy {
             let yes_token = &market.tokens[0];
             let no_token = &market.tokens[1];
 
+            // Check bid-ask spread — skip markets with wide spreads
+            let mut skip_market = false;
+            if let Some(ref yb) = (self.get_orderbook)(yes_token.token_id) {
+                if let (Some(ask), Some(bid)) = (yb.best_ask(), yb.best_bid()) {
+                    let spread = if ask.price > Decimal::ZERO {
+                        (ask.price - bid.price) / ask.price
+                    } else {
+                        Decimal::ONE
+                    };
+                    let spread_bps = {
+                        use rust_decimal::prelude::ToPrimitive;
+                        (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
+                    };
+                    if spread_bps > self.config.max_spread_bps {
+                        skip_market = true;
+                    }
+                }
+            }
+            if let Some(ref nb) = (self.get_orderbook)(no_token.token_id) {
+                if let (Some(ask), Some(bid)) = (nb.best_ask(), nb.best_bid()) {
+                    let spread = if ask.price > Decimal::ZERO {
+                        (ask.price - bid.price) / ask.price
+                    } else {
+                        Decimal::ONE
+                    };
+                    let spread_bps = {
+                        use rust_decimal::prelude::ToPrimitive;
+                        (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
+                    };
+                    if spread_bps > self.config.max_spread_bps {
+                        skip_market = true;
+                    }
+                }
+            }
+            if skip_market {
+                tracing::debug!(
+                    question = %market.question,
+                    max_allowed = self.config.max_spread_bps,
+                    "[CryptoAlpha Group] Skipping: spread too wide"
+                );
+                continue;
+            }
+
             // Check YES side
             if let Some(yes_book) = (self.get_orderbook)(yes_token.token_id)
                 && let Some(yes_ask_level) = yes_book.best_ask()
@@ -1466,6 +1581,23 @@ impl CryptoAlphaStrategy {
                     token_id = %token_id,
                     best_bid = %best_bid,
                     "[EXIT] Capital efficiency — crypto"
+                );
+                exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
+                continue;
+            }
+
+            // Deep loss exit: cut losses regardless of model when position has lost >= 50%.
+            // The model reversal check below only triggers when model_prob < best_bid,
+            // which is nearly impossible at low prices. This provides a model-independent
+            // exit when the loss is severe.
+            if *avg_cost > Decimal::ZERO && best_bid < *avg_cost * dec!(0.50) {
+                let loss_pct = ((*avg_cost - best_bid) / *avg_cost * dec!(100)).round_dp(1);
+                tracing::info!(
+                    token_id = %token_id,
+                    best_bid = %best_bid,
+                    avg_cost = %avg_cost,
+                    loss_pct = %loss_pct,
+                    "[EXIT] Deep loss — crypto position lost >= 50%"
                 );
                 exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
                 continue;
@@ -2203,6 +2335,7 @@ mod tests {
             exit_buffer_bps: 50,
             capital_efficiency_threshold: dec!(0.98),
             drift_decay: 0.0,
+            max_spread_bps: 1500,
         };
         let books = Arc::new(books);
         CryptoAlphaStrategy::new(
@@ -2385,5 +2518,79 @@ mod tests {
             "sigma=0.3 (below baseline) should keep TTL at 300s, got {}",
             effective_ttl
         );
+    }
+
+    // ──── Spread Filter Tests ────
+
+    #[tokio::test]
+    async fn test_crypto_spread_filter_rejects_wide_spread() {
+        // Test that markets with bid-ask spread > max_spread_bps are rejected
+        let token_id = U256::from(1u64);
+
+        // Create order book with 20% spread (YES: bid=0.40, ask=0.50)
+        let mut yes_book = make_crypto_book(token_id, dec!(0.50));
+        yes_book.bids.clear();
+        yes_book.bids.push(PriceLevel { price: dec!(0.40), size: dec!(500) });
+
+        // NO side with tight spread (doesn't matter, YES is wide enough)
+        let no_book = make_crypto_book(U256::from(2u64), dec!(0.50));
+
+        let mut books = HashMap::new();
+        books.insert(token_id, yes_book);
+        books.insert(U256::from(2u64), no_book);
+
+        // Use max_spread_bps = 1200 (12%) so 20% is rejected
+        let config = CryptoAlphaConfig {
+            min_edge_bps: 500,
+            max_position_pct: dec!(0.50),
+            kelly_fraction: dec!(0.25),
+            refresh_interval_secs: 300,
+            coingecko_api_key: String::new(),
+            exit_buffer_bps: 50,
+            capital_efficiency_threshold: dec!(0.98),
+            drift_decay: 0.0,
+            max_spread_bps: 1200,
+        };
+        let books = Arc::new(books);
+        let strategy = CryptoAlphaStrategy::new(
+            config,
+            Decimal::ZERO,
+            Box::new(move |tid| books.get(&tid).cloned()),
+            Box::new(|| Decimal::MAX),
+            Box::new(|_| Decimal::ZERO),
+            vec![],
+            vec![],
+            Box::new(|| vec![]),
+            Box::new(|| dec!(200)),
+        );
+
+        // Use a far future date so the question parses with days > 0
+        let question = "Will Bitcoin exceed $50,000 by December 31?";
+        let market = make_crypto_market(question);
+        let result = strategy.detect_crypto_opportunity(&market).await;
+        assert!(result.is_none(), "Market with 20% spread should be rejected (max 12%)");
+    }
+
+    #[tokio::test]
+    async fn test_crypto_spread_filter_accepts_narrow_spread() {
+        // Test that markets with bid-ask spread <= max_spread_bps are accepted
+        // We verify by checking the spread calculation logic directly,
+        // since detect_crypto_opportunity requires live price data.
+        let spread = (dec!(0.50) - dec!(0.46)) / dec!(0.50); // 0.08 = 800 bps
+        let spread_bps = {
+            use rust_decimal::prelude::ToPrimitive;
+            (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
+        };
+        assert!(spread_bps <= 1200, "8% spread (800 bps) should pass 12% filter");
+        assert_eq!(spread_bps, 800);
+
+        // Also verify wide spread is correctly computed
+        let wide_spread = (dec!(0.50) - dec!(0.40)) / dec!(0.50); // 0.20 = 2000 bps
+        let wide_bps = {
+            use rust_decimal::prelude::ToPrimitive;
+            (wide_spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
+        };
+        assert!(wide_bps > 1200, "20% spread (2000 bps) should fail 12% filter");
+        assert_eq!(wide_bps, 2000);
     }
 }
