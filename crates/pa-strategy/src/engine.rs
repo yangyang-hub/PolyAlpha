@@ -365,6 +365,9 @@ impl StrategyEngine {
                 // significantly — use a longer cooldown to avoid retry spam.
                 if err_msg.contains("lot size") {
                     self.set_cooldown(opp.condition_id, opp.strategy_type, 600);
+                } else if err_msg.contains("does not exist") {
+                    // Orderbook removed — market is closed/resolved permanently.
+                    self.set_cooldown(opp.condition_id, opp.strategy_type, 86400);
                 } else {
                     self.set_cooldown(opp.condition_id, opp.strategy_type, 60);
                 }

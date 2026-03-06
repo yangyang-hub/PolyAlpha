@@ -152,14 +152,13 @@ pub fn compute_quotes(
     let bid_price = floor_to_tick(midpoint - bid_half, tick_size);
     let ask_price = ceil_to_tick(midpoint + ask_half, tick_size);
 
-    // Reject if either side falls outside valid price range [0.01, 0.99].
-    // Do NOT clamp — placing orders at the floor/ceiling is not meaningful.
+    // Clamp to valid price range [0.01, 0.99].
+    // For LR, bidding at the floor price is valid — low risk, earns rewards.
     let min_price = Decimal::new(1, 2);
     let max_price = Decimal::new(99, 2);
 
-    if bid_price < min_price || ask_price > max_price {
-        return None;
-    }
+    let bid_price = bid_price.max(min_price);
+    let ask_price = ask_price.min(max_price);
 
     if bid_price >= ask_price {
         return None;
@@ -401,17 +400,21 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_quotes_rejects_low_midpoint() {
-        // When midpoint is so low that bid falls below 0.01, reject entirely
-        // rather than clamping to floor price.
+    fn test_compute_quotes_clamps_to_floor() {
+        // When midpoint is low and spread is wide, bid gets clamped to 0.01 floor.
+        // This is valid for LR — low risk, earns rewards.
         let config = default_config();
         // midpoint=0.02, spread=0.10 → half_spread = 0.10*0.80/2 = 0.04
-        // bid = 0.02 - 0.04 = -0.02 → below 0.01 → rejected
+        // bid = 0.02 - 0.04 = -0.02 → clamped to 0.01
+        // ask = 0.02 + 0.04 = 0.06
         let result = compute_quotes(dec!(0.02), dec!(0.10), Decimal::ZERO, &config, dec!(5), dec!(0.01));
-        assert!(result.is_none(), "Low midpoint should be rejected, not clamped to 0.01");
+        assert!(result.is_some(), "Clamped floor bid should be accepted for LR");
+        let q = result.unwrap();
+        assert_eq!(q.bid_price, dec!(0.01));
+        assert_eq!(q.ask_price, dec!(0.06));
 
         // midpoint=0.05, spread=0.10 → half_spread=0.04
-        // bid = 0.05 - 0.04 = 0.01 → exactly 0.01, still valid
+        // bid = 0.05 - 0.04 = 0.01 → exactly 0.01, valid
         let result = compute_quotes(dec!(0.05), dec!(0.10), Decimal::ZERO, &config, dec!(5), dec!(0.01));
         assert!(result.is_some(), "Bid exactly at 0.01 should be accepted");
     }

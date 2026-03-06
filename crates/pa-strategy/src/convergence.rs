@@ -256,12 +256,12 @@ impl ResolutionConvergenceStrategy {
             // exit when the loss is severe.
             if *avg_cost > Decimal::ZERO && best_bid < *avg_cost * dec!(0.50) {
                 let loss_pct = ((*avg_cost - best_bid) / *avg_cost * dec!(100)).round_dp(1);
-                tracing::info!(
+                tracing::debug!(
                     token_id = %token_id,
                     best_bid = %best_bid,
                     avg_cost = %avg_cost,
                     loss_pct = %loss_pct,
-                    "[EXIT] Deep loss — convergence position lost >= 50%"
+                    "[EXIT] Deep loss detected — convergence position lost >= 50%"
                 );
                 exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
                 continue;
