@@ -5,6 +5,13 @@ import HistoryModal from "../components/HistoryModal";
 
 const sections = ["market_filter", "chain", "clob", "gamma"];
 
+const sectionLabels: Record<string, string> = {
+  market_filter: "市场过滤",
+  chain: "链配置",
+  clob: "CLOB 配置",
+  gamma: "Gamma API",
+};
+
 export default function MarketConfig() {
   const [data, setData] = useState<Record<string, Record<string, unknown>>>({});
   const [loading, setLoading] = useState(true);
@@ -29,13 +36,13 @@ export default function MarketConfig() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">Market Configuration</h1>
+      <h1 className="text-2xl font-bold mb-6">市场配置</h1>
       <div className="grid gap-6">
         {sections.map((s) =>
           data[s] ? (
             <div key={s}>
               <div className="flex items-center justify-between mb-2">
-                <h3 className="font-semibold capitalize">{s.replace(/_/g, " ")}</h3>
+                <h3 className="font-semibold">{sectionLabels[s] ?? s}</h3>
                 <HistoryModal section={s} />
               </div>
               <ConfigSection section={s} data={data[s]} onSaved={load} />

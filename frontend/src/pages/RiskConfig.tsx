@@ -20,12 +20,12 @@ export default function RiskConfig() {
   useEffect(() => { load(); }, []);
 
   if (loading) return <span className="loading loading-spinner loading-lg" />;
-  if (!data) return <div className="alert alert-warning">Could not load risk config</div>;
+  if (!data) return <div className="alert alert-warning">无法加载风控配置</div>;
 
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold">Risk Configuration</h1>
+        <h1 className="text-2xl font-bold">风控配置</h1>
         <HistoryModal section="risk" />
       </div>
       <ConfigSection section="risk" data={data} onSaved={load} />

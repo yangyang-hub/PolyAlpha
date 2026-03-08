@@ -26,26 +26,26 @@ export default function HistoryModal({ section }: Props) {
   return (
     <>
       <button className="btn btn-ghost btn-sm" onClick={loadHistory}>
-        History
+        变更记录
       </button>
       {open && (
         <dialog className="modal modal-open">
           <div className="modal-box max-w-2xl">
             <h3 className="font-bold text-lg mb-4">
-              History: {section}
+              变更记录: {section}
             </h3>
             {loading ? (
               <span className="loading loading-spinner" />
             ) : entries.length === 0 ? (
-              <p className="text-base-content/60">No history available</p>
+              <p className="text-base-content/60">暂无变更记录</p>
             ) : (
               <div className="overflow-x-auto">
                 <table className="table table-sm">
                   <thead>
                     <tr>
-                      <th>Version</th>
-                      <th>Changed By</th>
-                      <th>Date</th>
+                      <th>版本</th>
+                      <th>修改者</th>
+                      <th>时间</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -53,7 +53,7 @@ export default function HistoryModal({ section }: Props) {
                       <tr key={i}>
                         <td>v{e.version}</td>
                         <td>{e.changed_by}</td>
-                        <td>{new Date(e.created_at).toLocaleString()}</td>
+                        <td>{new Date(e.created_at).toLocaleString("zh-CN")}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -62,7 +62,7 @@ export default function HistoryModal({ section }: Props) {
             )}
             <div className="modal-action">
               <button className="btn" onClick={() => setOpen(false)}>
-                Close
+                关闭
               </button>
             </div>
           </div>

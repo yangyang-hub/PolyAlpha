@@ -26,7 +26,7 @@ export default function Dashboard() {
   if (error) {
     return (
       <div className="alert alert-error">
-        <span>Cannot connect to bot API: {error}</span>
+        <span>无法连接机器人 API: {error}</span>
       </div>
     );
   }
@@ -40,35 +40,35 @@ export default function Dashboard() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">Dashboard</h1>
+      <h1 className="text-2xl font-bold mb-6">概览</h1>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         {/* Status card */}
         <div className="stat bg-base-100 shadow-sm rounded-box">
-          <div className="stat-title">Status</div>
+          <div className="stat-title">运行状态</div>
           <div className={`stat-value text-lg ${health.status === "healthy" ? "text-success" : "text-warning"}`}>
-            {health.status}
+            {health.status === "healthy" ? "正常" : health.status}
           </div>
           <div className="stat-desc">
-            Uptime: {uptimeHours}h {uptimeMinutes}m
+            运行时间: {uptimeHours}小时 {uptimeMinutes}分钟
           </div>
         </div>
 
         {/* Strategies card */}
         <div className="stat bg-base-100 shadow-sm rounded-box">
-          <div className="stat-title">Active Strategies</div>
+          <div className="stat-title">活跃策略</div>
           <div className="stat-value text-lg">{status.enabled_strategies.length}</div>
           <div className="stat-desc">
-            {status.enabled_strategies.join(", ") || "None"}
+            {status.enabled_strategies.join(", ") || "无"}
           </div>
         </div>
 
         {/* Scan interval card */}
         <div className="stat bg-base-100 shadow-sm rounded-box">
-          <div className="stat-title">Scan Interval</div>
+          <div className="stat-title">扫描间隔</div>
           <div className="stat-value text-lg">{status.scan_interval_ms}ms</div>
           <div className="stat-desc">
-            LR: {status.lr_enabled ? "enabled" : "disabled"} | Calendar: {status.event_calendar_enabled ? "enabled" : "disabled"}
+            流动性奖励: {status.lr_enabled ? "已启用" : "已禁用"} | 事件日历: {status.event_calendar_enabled ? "已启用" : "已禁用"}
           </div>
         </div>
       </div>
@@ -76,13 +76,13 @@ export default function Dashboard() {
       {/* Health checks */}
       <div className="card bg-base-100 shadow-sm">
         <div className="card-body">
-          <h2 className="card-title">Health Checks</h2>
+          <h2 className="card-title">健康检查</h2>
           <div className="overflow-x-auto">
             <table className="table table-sm">
               <thead>
                 <tr>
-                  <th>Check</th>
-                  <th>Status</th>
+                  <th>检查项</th>
+                  <th>状态</th>
                 </tr>
               </thead>
               <tbody>
@@ -91,7 +91,7 @@ export default function Dashboard() {
                     <td className="font-mono">{name}</td>
                     <td>
                       <span className={`badge ${val === "ok" ? "badge-success" : "badge-error"}`}>
-                        {val}
+                        {val === "ok" ? "正常" : val}
                       </span>
                     </td>
                   </tr>

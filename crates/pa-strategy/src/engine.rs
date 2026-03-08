@@ -805,23 +805,6 @@ fn build_token_to_market(markets: &[MarketInfo]) -> HashMap<U256, usize> {
 /// Scale all size fields within an execution plan by the given multiplier.
 fn scale_execution_plan_size(plan: &mut ExecutionPlan, multiplier: Decimal) {
     match plan {
-        ExecutionPlan::BuyAndMerge { merge_amount, .. } => {
-            *merge_amount = (*merge_amount * multiplier).round_dp(2);
-        }
-        ExecutionPlan::SplitAndSell { split_amount, .. } => {
-            *split_amount = (*split_amount * multiplier).round_dp(2);
-        }
-        ExecutionPlan::NegRiskArbitrage { amount, legs, .. } => {
-            *amount = (*amount * multiplier).round_dp(2);
-            for leg in legs {
-                leg.size = (leg.size * multiplier).round_dp(2);
-            }
-        }
-        ExecutionPlan::CrossMarket { amount, leg_a, leg_b, .. } => {
-            *amount = (*amount * multiplier).round_dp(2);
-            leg_a.size = (leg_a.size * multiplier).round_dp(2);
-            leg_b.size = (leg_b.size * multiplier).round_dp(2);
-        }
         ExecutionPlan::DirectionalBuy { size, .. } => {
             *size = (*size * multiplier).round_dp(2);
         }

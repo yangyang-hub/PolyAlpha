@@ -21,7 +21,7 @@ export default function ConfigSection({ section, data, onSaved }: Props) {
     setToast(null);
     try {
       const res = await updateSection(section, formData);
-      setToast({ type: "success", msg: `Saved v${res.version}` });
+      setToast({ type: "success", msg: `已保存 v${res.version}` });
       onSaved?.();
     } catch (e) {
       setToast({ type: "error", msg: String(e) });
@@ -33,8 +33,6 @@ export default function ConfigSection({ section, data, onSaved }: Props) {
   return (
     <div className="card bg-base-100 shadow-sm">
       <div className="card-body">
-        <h2 className="card-title capitalize">{section.replace(/_/g, " ")}</h2>
-
         <div className="grid gap-3 mt-2">
           {Object.entries(formData).map(([key, value]) => (
             <FieldInput
@@ -54,7 +52,7 @@ export default function ConfigSection({ section, data, onSaved }: Props) {
 
         <div className="card-actions justify-end mt-4">
           <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-            {saving ? <span className="loading loading-spinner loading-sm" /> : "Save"}
+            {saving ? <span className="loading loading-spinner loading-sm" /> : "保存"}
           </button>
         </div>
       </div>
@@ -139,7 +137,7 @@ function FieldInput({
             }
           />
           <div className="label">
-            <span className="label-text-alt">Comma-separated</span>
+            <span className="label-text-alt">逗号分隔</span>
           </div>
         </label>
       );

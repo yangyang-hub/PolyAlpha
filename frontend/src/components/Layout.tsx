@@ -2,11 +2,11 @@ import { ReactNode } from "react";
 import { NavLink } from "react-router-dom";
 
 const navItems = [
-  { to: "/", label: "Dashboard" },
-  { to: "/strategy", label: "Strategy" },
-  { to: "/risk", label: "Risk" },
-  { to: "/market", label: "Market" },
-  { to: "/monitor", label: "Monitor" },
+  { to: "/", label: "概览" },
+  { to: "/strategy", label: "策略" },
+  { to: "/risk", label: "风控" },
+  { to: "/market", label: "市场" },
+  { to: "/monitor", label: "监控" },
 ];
 
 export default function Layout({ children }: { children: ReactNode }) {

@@ -30,10 +30,7 @@ use pa_market_data::data_api::PositionLoader;
 use pa_monitor::api::ApiState;
 use pa_risk::manager::RiskManagerImpl;
 use pa_storage::config_store::ConfigStore;
-use pa_strategy::cross_market::{CrossMarketArbitrage, detect_cross_market_pairs};
 use pa_strategy::engine::StrategyEngine;
-use pa_strategy::neg_risk::NegRiskArbitrage;
-use pa_strategy::yes_no::YesNoArbitrage;
 
 /// Metadata for a tracked LR order, used by fill detection to sync positions.
 #[derive(Clone, Debug)]
@@ -295,9 +292,6 @@ async fn main() -> Result<()> {
         "Binary event groups discovered"
     );
 
-    // Detect cross-market pairs
-    let cross_market_pairs = detect_cross_market_pairs(&markets);
-
     // Update metrics
     pa_monitor::metrics::MONITORED_MARKETS.set(markets.len() as f64);
 
@@ -396,229 +390,6 @@ async fn main() -> Result<()> {
         pa_monitor::metrics::ACTIVE_SUBSCRIPTIONS.set(token_ids.len() as f64);
     }
 
-
-    // --- Market spread observer (observation mode) ---
-    // Every 60s, scans all binary markets and logs spread distribution.
-    // Helps evaluate arbitrage opportunity density without executing trades.
-    let observer_cache = market_data.cache().clone();
-    let observer_markets = shared_markets.read().await.clone();
-    let observer_cancel = cancel.clone();
-    let observer_settings = settings.strategy.clone();
-    tokio::spawn(async move {
-        // Wait 30s for order books to populate
-        tokio::time::sleep(Duration::from_secs(30)).await;
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        let profit_calc = pa_strategy::profitability::ProfitCalculator::new(dec!(0.01));
-        loop {
-            tokio::select! {
-                _ = observer_cancel.cancelled() => break,
-                _ = interval.tick() => {
-                    let total_markets = observer_markets.len();
-                    let neg_risk_count = observer_markets.iter().filter(|m| m.neg_risk).count();
-                    let mut total_checked = 0u32;
-                    let mut has_book = 0u32;
-                    let mut no_asks = 0u32;  // markets missing ask data
-                    let mut no_bids = 0u32;  // markets missing bid data
-                    // BuyAndMerge observations
-                    let mut bm_any_spread = 0u32;       // YES+NO ask < 1.00
-                    let mut bm_above_min_bps = 0u32;    // spread >= min_spread_bps
-                    let mut bm_above_min_profit = 0u32;  // net_profit >= min_profit
-                    let mut bm_best_spread = Decimal::ZERO;
-                    let mut bm_best_question = String::new();
-                    // SplitAndSell observations
-                    let mut ss_any_spread = 0u32;
-                    let mut ss_above_min_bps = 0u32;
-                    let mut ss_above_min_profit = 0u32;
-                    let mut ss_best_spread = Decimal::ZERO;
-                    let mut ss_best_question = String::new();
-                    // Track closest-to-opportunity (even when no arb exists)
-                    let mut bm_tightest_gap = Decimal::new(999, 0);  // distance from $1.00
-                    let mut bm_tightest_info = String::new();
-                    let mut ss_tightest_gap = Decimal::new(999, 0);
-                    let mut ss_tightest_info = String::new();
-                    // Sample some actual prices for diagnostics
-                    let mut sample_prices: Vec<String> = Vec::new();
-
-                    for market in &observer_markets {
-                        if market.neg_risk || market.tokens.len() != 2 || !market.active {
-                            continue;
-                        }
-                        total_checked += 1;
-
-                        let yes_book = match observer_cache.get(&market.tokens[0].token_id) {
-                            Some(b) => b,
-                            None => continue,
-                        };
-                        let no_book = match observer_cache.get(&market.tokens[1].token_id) {
-                            Some(b) => b,
-                            None => continue,
-                        };
-                        has_book += 1;
-
-                        // --- BuyAndMerge check (ask side) ---
-                        if let (Some(yes_ask), Some(no_ask)) = (yes_book.best_ask(), no_book.best_ask()) {
-                            let total_cost = yes_ask.price + no_ask.price;
-                            let gap = total_cost - Decimal::ONE; // positive = no arb, negative = arb exists
-
-                            // Track tightest (closest to opportunity)
-                            if gap < bm_tightest_gap {
-                                bm_tightest_gap = gap;
-                                let q = &market.question[..market.question.len().min(40)];
-                                bm_tightest_info = format!(
-                                    "{} Y_ask:{} N_ask:{} sum:{} gap:{}bps",
-                                    q, yes_ask.price, no_ask.price, total_cost,
-                                    (gap * dec!(10000)).round(),
-                                );
-                            }
-
-                            // Sample first 5 markets for price diagnostics
-                            if sample_prices.len() < 5 {
-                                let q = &market.question[..market.question.len().min(30)];
-                                let gamma_yes = market.outcome_prices.as_ref()
-                                    .and_then(|p| p.first())
-                                    .map(|p| p.to_string())
-                                    .unwrap_or("-".into());
-                                let gamma_ask = market.gamma_best_ask
-                                    .map(|p| p.to_string())
-                                    .unwrap_or("-".into());
-                                // Detect if book is gamma-seeded (size=1000) vs WS-sourced
-                                let source = if yes_ask.size == dec!(1000) { "gamma" } else { "ws" };
-                                sample_prices.push(format!(
-                                    "{}.. Y:{}/{} N:{}/{} fee:{}bps src:{} gamma_ask:{} outcome:{}",
-                                    q,
-                                    yes_book.best_bid().map(|b| b.price.to_string()).unwrap_or("-".into()),
-                                    yes_ask.price,
-                                    no_book.best_bid().map(|b| b.price.to_string()).unwrap_or("-".into()),
-                                    no_ask.price,
-                                    market.fee_rate_bps,
-                                    source,
-                                    gamma_ask,
-                                    gamma_yes,
-                                ));
-                            }
-
-                            if total_cost < Decimal::ONE {
-                                let spread = Decimal::ONE - total_cost;
-                                let spread_bps = {
-                                    use rust_decimal::prelude::ToPrimitive;
-                                    (spread * dec!(10000)).to_u32().unwrap_or(0)
-                                };
-                                let max_size = yes_ask.size.min(no_ask.size).min(observer_settings.max_trade_size_usdc);
-                                let est = profit_calc.buy_and_merge_profit(yes_ask.price, no_ask.price, max_size, market.fee_rate_bps);
-
-                                bm_any_spread += 1;
-                                if spread_bps >= observer_settings.min_spread_bps {
-                                    bm_above_min_bps += 1;
-                                }
-                                if est.net_profit >= observer_settings.min_profit_usdc {
-                                    bm_above_min_profit += 1;
-                                }
-                                if spread > bm_best_spread {
-                                    bm_best_spread = spread;
-                                    let q = &market.question[..market.question.len().min(50)];
-                                    bm_best_question = format!(
-                                        "{} (ask:{:.2}+{:.2}={:.2}, spread:{:.1}bps, profit:${:.4}, size:{:.0})",
-                                        q, yes_ask.price, no_ask.price, total_cost,
-                                        spread * dec!(10000), est.net_profit, max_size,
-                                    );
-                                }
-                            }
-                        } else {
-                            no_asks += 1;
-                        }
-
-                        // --- SplitAndSell check (bid side) ---
-                        if let (Some(yes_bid), Some(no_bid)) = (yes_book.best_bid(), no_book.best_bid()) {
-                            let total_revenue = yes_bid.price + no_bid.price;
-                            let gap = Decimal::ONE - total_revenue; // positive = no arb
-
-                            if gap < ss_tightest_gap {
-                                ss_tightest_gap = gap;
-                                let q = &market.question[..market.question.len().min(40)];
-                                ss_tightest_info = format!(
-                                    "{} Y_bid:{} N_bid:{} sum:{} gap:{}bps",
-                                    q, yes_bid.price, no_bid.price, total_revenue,
-                                    (gap * dec!(10000)).round(),
-                                );
-                            }
-
-                            if total_revenue > Decimal::ONE {
-                                let spread = total_revenue - Decimal::ONE;
-                                let spread_bps = {
-                                    use rust_decimal::prelude::ToPrimitive;
-                                    (spread * dec!(10000)).to_u32().unwrap_or(0)
-                                };
-                                let max_size = yes_bid.size.min(no_bid.size).min(observer_settings.max_trade_size_usdc);
-                                let est = profit_calc.split_and_sell_profit(yes_bid.price, no_bid.price, max_size, market.fee_rate_bps);
-
-                                ss_any_spread += 1;
-                                if spread_bps >= observer_settings.min_spread_bps {
-                                    ss_above_min_bps += 1;
-                                }
-                                if est.net_profit >= observer_settings.min_profit_usdc {
-                                    ss_above_min_profit += 1;
-                                }
-                                if spread > ss_best_spread {
-                                    ss_best_spread = spread;
-                                    let q = &market.question[..market.question.len().min(50)];
-                                    ss_best_question = format!(
-                                        "{} (bid:{:.2}+{:.2}={:.2}, spread:{:.1}bps, profit:${:.4}, size:{:.0})",
-                                        q, yes_bid.price, no_bid.price, total_revenue,
-                                        spread * dec!(10000), est.net_profit, max_size,
-                                    );
-                                }
-                            }
-                        } else {
-                            no_bids += 1;
-                        }
-                    }
-
-                    tracing::debug!(
-                        total_markets,
-                        neg_risk = neg_risk_count,
-                        binary_checked = total_checked,
-                        with_orderbook = has_book,
-                        missing_asks = no_asks,
-                        missing_bids = no_bids,
-                        cache_size = observer_cache.len(),
-                        "━━━ Market Spread Observer ━━━"
-                    );
-                    tracing::debug!(
-                        any_spread = bm_any_spread,
-                        pass_bps = bm_above_min_bps,
-                        pass_profit = bm_above_min_profit,
-                        best_spread_bps = %format!("{:.0}", bm_best_spread * dec!(10000)),
-                        tightest_gap_bps = %format!("{:.0}", bm_tightest_gap * dec!(10000)),
-                        "[BuyAndMerge]"
-                    );
-                    if !bm_best_question.is_empty() {
-                        tracing::debug!(market = %bm_best_question, "[BuyAndMerge] best");
-                    }
-                    if !bm_tightest_info.is_empty() {
-                        tracing::debug!(market = %bm_tightest_info, "[BuyAndMerge] tightest");
-                    }
-                    tracing::debug!(
-                        any_spread = ss_any_spread,
-                        pass_bps = ss_above_min_bps,
-                        pass_profit = ss_above_min_profit,
-                        best_spread_bps = %format!("{:.0}", ss_best_spread * dec!(10000)),
-                        tightest_gap_bps = %format!("{:.0}", ss_tightest_gap * dec!(10000)),
-                        "[SplitAndSell]"
-                    );
-                    if !ss_best_question.is_empty() {
-                        tracing::debug!(market = %ss_best_question, "[SplitAndSell] best");
-                    }
-                    if !ss_tightest_info.is_empty() {
-                        tracing::debug!(market = %ss_tightest_info, "[SplitAndSell] tightest");
-                    }
-                    // Log sample prices for data validation
-                    for (i, sample) in sample_prices.iter().enumerate() {
-                        tracing::debug!(idx = i, sample = %sample, "[Sample]");
-                    }
-                }
-            }
-        }
-    });
 
     // --- Build per-account contexts ---
     let mut account_contexts: Vec<AccountContext> = Vec::new();
@@ -908,8 +679,6 @@ async fn main() -> Result<()> {
             .collect();
 
         if !enabled_strategies.is_empty() {
-            let cache = market_data.cache().clone();
-
             let make_capital_fn = |bal: Arc<std::sync::RwLock<Decimal>>|
              -> Box<dyn Fn() -> Decimal + Send + Sync> {
                 Box::new(move || {
@@ -924,53 +693,6 @@ async fn main() -> Result<()> {
             };
 
             let mut strategies: Vec<Box<dyn pa_core::traits::Strategy>> = Vec::new();
-
-            if enabled_strategies.contains(&"yes_no".to_string()) {
-                let yes_no_strategy = YesNoArbitrage::new(
-                    settings.strategy.min_spread_bps,
-                    settings.strategy.max_trade_size_usdc,
-                    settings.strategy.min_profit_usdc,
-                    dec!(0.01),
-                    Box::new({
-                        let c = cache.clone();
-                        move |token_id| c.get(&token_id)
-                    }),
-                    make_capital_fn(Arc::clone(&ctx.usdc_balance)),
-                );
-                strategies.push(Box::new(yes_no_strategy));
-            }
-
-            if enabled_strategies.contains(&"neg_risk".to_string()) && !neg_risk_events.is_empty() {
-                let neg_risk_strategy = NegRiskArbitrage::new(
-                    settings.strategy.min_spread_bps,
-                    settings.strategy.max_trade_size_usdc,
-                    settings.strategy.min_profit_usdc,
-                    dec!(0.01),
-                    neg_risk_events.clone(),
-                    Box::new({
-                        let c = cache.clone();
-                        move |token_id| c.get(&token_id)
-                    }),
-                    make_capital_fn(Arc::clone(&ctx.usdc_balance)),
-                );
-                strategies.push(Box::new(neg_risk_strategy));
-            }
-
-            if enabled_strategies.contains(&"cross_market".to_string()) && !cross_market_pairs.is_empty() {
-                let cross_market_strategy = CrossMarketArbitrage::new(
-                    settings.strategy.min_spread_bps,
-                    settings.strategy.max_trade_size_usdc,
-                    settings.strategy.min_profit_usdc,
-                    dec!(0.02),
-                    cross_market_pairs.clone(),
-                    Box::new({
-                        let c = cache.clone();
-                        move |token_id| c.get(&token_id)
-                    }),
-                    make_capital_fn(Arc::clone(&ctx.usdc_balance)),
-                );
-                strategies.push(Box::new(cross_market_strategy));
-            }
 
             if enabled_strategies.contains(&"weather".to_string()) {
                 let weather_cache = market_data.cache().clone();

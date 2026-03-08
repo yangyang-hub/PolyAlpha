@@ -326,7 +326,7 @@ mod tests {
     fn make_exec(profit: Decimal, fees: Decimal, gas: Decimal) -> ExecutionResult {
         ExecutionResult {
             opportunity_id: Uuid::now_v7(),
-            strategy_type: StrategyType::YesNoMerge,
+            strategy_type: StrategyType::Weather,
             status: if profit > Decimal::ZERO {
                 ExecutionStatus::Success
             } else {

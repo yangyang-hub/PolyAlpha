@@ -5,16 +5,13 @@ use alloy::primitives::U256;
 
 use pa_core::config::{RiskConfig, StrategyConfig};
 use pa_core::traits::{Executor, RiskManager, Strategy};
-use pa_core::types::{NegRiskEvent, OrderBook, RiskDecision};
-use pa_market_data::gamma_feed::GammaFeed;
+use pa_core::types::{OrderBook, RiskDecision};
+
 use pa_risk::manager::RiskManagerImpl;
-use pa_strategy::cross_market::{CrossMarketArbitrage, detect_cross_market_pairs};
-use pa_strategy::neg_risk::NegRiskArbitrage;
-use pa_strategy::yes_no::YesNoArbitrage;
 
 use crate::data_loader::DataLoader;
 use crate::report::{BacktestConfig, BacktestResult};
-use crate::simulator::{SimulatorConfig, TradeSimulator};
+use crate::simulator::TradeSimulator;
 
 /// Backtest engine that replays historical order book data through strategies.
 pub struct BacktestEngine {
@@ -36,7 +33,7 @@ impl BacktestEngine {
         &self,
         config: BacktestConfig,
         risk_config: RiskConfig,
-        strategy_config: StrategyConfig,
+        _strategy_config: StrategyConfig,
     ) -> anyhow::Result<BacktestResult> {
         tracing::info!(
             from = %config.from,
@@ -52,11 +49,8 @@ impl BacktestEngine {
             return Ok(BacktestResult::build(config, 0, 0, 0, vec![], &[]));
         }
 
-        // Group NegRisk events
-        let neg_risk_events = GammaFeed::group_neg_risk_events(&markets);
         tracing::info!(
             markets = markets.len(),
-            neg_risk_events = neg_risk_events.len(),
             "Markets loaded"
         );
 
@@ -78,14 +72,11 @@ impl BacktestEngine {
         let shared_books: Arc<RwLock<HashMap<U256, OrderBook>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
-        // Step 4: Build strategies with closures over shared books
-        let strategies = Self::build_strategies(
-            &strategy_config,
-            &config.simulator,
-            &neg_risk_events,
-            &markets,
-            shared_books.clone(),
-        );
+        // Step 4: Build strategies
+        // Note: All directional strategies (weather, crypto, convergence) require live API
+        // calls and cannot meaningfully replay from DB snapshots.
+        // Arbitrage strategies have been removed from the codebase.
+        let strategies: Vec<Box<dyn Strategy>> = Vec::new();
 
         // Step 5: Build risk manager and simulator
         let risk_manager = RiskManagerImpl::new(risk_config);
@@ -99,7 +90,6 @@ impl BacktestEngine {
 
         for (frame_idx, frame) in frames.iter().enumerate() {
             // Update shared order book state with this frame's data
-            // Merge: keep previous books for tokens not in this frame
             {
                 let mut books = shared_books.write().unwrap();
                 for (token_id, book) in &frame.books {
@@ -185,82 +175,5 @@ impl BacktestEngine {
             all_executions,
             &all_strategy_types,
         ))
-    }
-
-    /// Build strategy instances with closures reading from the shared order book state.
-    fn build_strategies(
-        strategy_config: &StrategyConfig,
-        sim_config: &SimulatorConfig,
-        neg_risk_events: &[NegRiskEvent],
-        markets: &[pa_core::types::MarketInfo],
-        shared_books: Arc<RwLock<HashMap<U256, OrderBook>>>,
-    ) -> Vec<Box<dyn Strategy>> {
-        let mut strategies: Vec<Box<dyn Strategy>> = Vec::new();
-
-        // In backtest, available capital is unlimited (simulation mode)
-
-        // YesNo strategy
-        let books_ref = shared_books.clone();
-        let yes_no = YesNoArbitrage::new(
-            strategy_config.min_spread_bps,
-            strategy_config.max_trade_size_usdc,
-            strategy_config.min_profit_usdc,
-            sim_config.gas_cost_usd,
-            Box::new(move |token_id| {
-                let books = books_ref.read().ok()?;
-                books.get(&token_id).cloned()
-            }),
-            Box::new(|| rust_decimal::Decimal::MAX),
-        );
-        strategies.push(Box::new(yes_no));
-
-        // NegRisk strategy (if events exist)
-        if !neg_risk_events.is_empty() {
-            let books_ref = shared_books.clone();
-            let neg_risk = NegRiskArbitrage::new(
-                strategy_config.min_spread_bps,
-                strategy_config.max_trade_size_usdc,
-                strategy_config.min_profit_usdc,
-                sim_config.gas_cost_usd,
-                neg_risk_events.to_vec(),
-                Box::new(move |token_id| {
-                    let books = books_ref.read().ok()?;
-                    books.get(&token_id).cloned()
-                }),
-                Box::new(|| rust_decimal::Decimal::MAX),
-            );
-            strategies.push(Box::new(neg_risk));
-        }
-
-        // CrossMarket strategy (if pairs are detected)
-        let cross_market_pairs = detect_cross_market_pairs(markets);
-        if !cross_market_pairs.is_empty() {
-            let books_ref = shared_books.clone();
-            let cross_market = CrossMarketArbitrage::new(
-                strategy_config.min_spread_bps,
-                strategy_config.max_trade_size_usdc,
-                strategy_config.min_profit_usdc,
-                sim_config.gas_cost_usd * rust_decimal::Decimal::TWO, // 2x gas
-                cross_market_pairs,
-                Box::new(move |token_id| {
-                    let books = books_ref.read().ok()?;
-                    books.get(&token_id).cloned()
-                }),
-                Box::new(|| rust_decimal::Decimal::MAX),
-            );
-            strategies.push(Box::new(cross_market));
-        }
-
-        // Note: WeatherAlphaStrategy requires live Open-Meteo API calls and cannot
-        // meaningfully replay historical forecasts from DB snapshots alone.
-        // Weather strategy (both binary and NegRisk modes) is excluded from backtest.
-
-        // Note: ResolutionConvergenceStrategy requires end_date which is not stored in DB.
-        // Excluded from backtest, same as Weather.
-
-        // Note: CryptoAlphaStrategy requires live Binance/CoinGecko API calls.
-        // Excluded from backtest, same as Weather/Convergence.
-
-        strategies
     }
 }
