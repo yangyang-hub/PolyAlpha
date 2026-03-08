@@ -81,7 +81,7 @@ pub struct MarketInfo {
 /// each represented as a binary market with YES/NO tokens. The NegRiskAdapter enforces
 /// that the sum of all YES prices should equal $1.00.
 ///
-/// Arbitrage opportunity: if `sum(YES_ask[i]) < $1.00`, buy all YES tokens and merge.
+/// Used by weather/crypto strategies to detect multi-outcome trading opportunities.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NegRiskEvent {
     /// The NegRisk market ID that groups all outcomes.
@@ -249,20 +249,20 @@ impl OrderBook {
     }
 }
 
-// ──── Arbitrage Types ────
+// ──── Trading Types ────
 
-/// A detected arbitrage opportunity.
+/// A detected trading opportunity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ArbitrageOpportunity {
+pub struct TradingOpportunity {
     pub id: Uuid,
     pub strategy_type: StrategyType,
     pub condition_id: B256,
     pub question: String,
-    /// How much YES+NO deviates from $1.00 (absolute value).
+    /// Edge over the market price (absolute value).
     pub spread: Decimal,
-    /// Expected profit after fees and gas.
+    /// Expected profit after fees.
     pub estimated_profit: Decimal,
-    /// Maximum executable quantity.
+    /// Desired trade quantity.
     pub size: Decimal,
     pub detected_at: DateTime<Utc>,
     pub execution_plan: ExecutionPlan,

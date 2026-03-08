@@ -2,7 +2,7 @@ use alloy::primitives::U256;
 use async_trait::async_trait;
 
 use crate::types::{
-    ArbitrageOpportunity, ExecutionResult, MarketInfo, OrderBook, RiskDecision, StrategyType,
+    TradingOpportunity, ExecutionResult, MarketInfo, OrderBook, RiskDecision, StrategyType,
 };
 use crate::Result;
 
@@ -22,7 +22,7 @@ pub trait MarketDataFeed: Send + Sync {
     async fn discover_markets(&self) -> Result<Vec<MarketInfo>>;
 }
 
-/// Strategy that scans markets for arbitrage opportunities.
+/// Strategy that scans markets for trading opportunities.
 #[async_trait]
 pub trait Strategy: Send + Sync {
     /// Human-readable strategy name.
@@ -31,15 +31,15 @@ pub trait Strategy: Send + Sync {
     /// The type of strategy.
     fn strategy_type(&self) -> StrategyType;
 
-    /// Scan a list of markets and return detected arbitrage opportunities.
-    async fn scan(&self, markets: &[MarketInfo]) -> Result<Vec<ArbitrageOpportunity>>;
+    /// Scan a list of markets and return detected trading opportunities.
+    async fn scan(&self, markets: &[MarketInfo]) -> Result<Vec<TradingOpportunity>>;
 }
 
-/// Executor responsible for carrying out arbitrage trades.
+/// Executor responsible for carrying out trades.
 #[async_trait]
 pub trait Executor: Send + Sync {
-    /// Execute a detected arbitrage opportunity.
-    async fn execute(&self, opportunity: &ArbitrageOpportunity) -> Result<ExecutionResult>;
+    /// Execute a detected trading opportunity.
+    async fn execute(&self, opportunity: &TradingOpportunity) -> Result<ExecutionResult>;
 
     /// Cancel all outstanding orders.
     async fn cancel_all(&self) -> Result<()>;
@@ -57,7 +57,7 @@ pub trait Executor: Send + Sync {
 #[async_trait]
 pub trait RiskManager: Send + Sync {
     /// Check whether the opportunity passes risk limits.
-    fn check_pre_trade(&self, opportunity: &ArbitrageOpportunity) -> RiskDecision;
+    fn check_pre_trade(&self, opportunity: &TradingOpportunity) -> RiskDecision;
 
     /// Update internal state after a trade execution.
     fn update_position(&self, result: &ExecutionResult);

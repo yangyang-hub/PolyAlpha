@@ -68,7 +68,7 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 |------|------|
 | `MarketInfo` | 市场元数据（condition_id, tokens, fee_rate_bps, event_title, end_date, category, outcome_prices, rewards_*） |
 | `OrderBook` | 订单簿快照（bids 降序, asks 升序） |
-| `ArbitrageOpportunity` | 检测到的交易机会（含 ExecutionPlan） |
+| `TradingOpportunity` | 检测到的交易机会（含 ExecutionPlan） |
 | `ExecutionPlan` | 枚举: DirectionalBuy（唯一变体） |
 | `ExecutionResult` | 执行结果（profit, fees, gas, status） |
 | `StrategyType` | 枚举: Weather / ResolutionConvergence / CryptoAlpha / LiquidityRewards / SmartMoney |

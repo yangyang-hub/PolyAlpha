@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use pa_core::traits::Executor;
 use pa_core::types::{
-    ArbitrageOpportunity, ExecutionPlan, ExecutionResult,
+    TradingOpportunity, ExecutionPlan, ExecutionResult,
     ExecutionStatus, OrderBook, TradeRecord, TradeSide, TxType,
 };
 use pa_core::Result;
@@ -159,7 +159,7 @@ impl TradeSimulator {
 
 #[async_trait]
 impl Executor for TradeSimulator {
-    async fn execute(&self, opp: &ArbitrageOpportunity) -> Result<ExecutionResult> {
+    async fn execute(&self, opp: &TradingOpportunity) -> Result<ExecutionResult> {
         let mut result = match &opp.execution_plan {
             ExecutionPlan::DirectionalBuy {
                 token_id,

@@ -25,7 +25,7 @@ impl ProfitCalculator {
 
     /// Calculate expected profit for a directional buy.
     ///
-    /// Unlike arbitrage (risk-free), directional buys are probabilistic:
+    /// Directional buys are probabilistic:
     /// - Expected value = model_prob * payout - cost
     /// - EV per unit = model_prob * $1.00 - ask_price
     /// - Net = EV * size - fee - gas(0, CLOB-only)

@@ -14,7 +14,7 @@ use uuid::Uuid;
 use pa_core::config::{ForecastErrorConfig, WeatherConfig};
 use pa_core::traits::Strategy;
 use pa_core::types::{
-    ArbitrageOpportunity, ExecutionPlan, MarketInfo, NegRiskEvent, OrderBook, StrategyType,
+    TradingOpportunity, ExecutionPlan, MarketInfo, NegRiskEvent, OrderBook, StrategyType,
     TradeSide,
 };
 
@@ -1504,7 +1504,7 @@ impl WeatherAlphaStrategy {
     /// When the target date has passed and actual weather data confirms an outcome,
     /// but order book prices haven't updated yet (the "8-hour lag" phenomenon),
     /// we can aggressively buy the underpriced token.
-    async fn scan_stale_liquidity(&self, markets: &[MarketInfo]) -> Vec<ArbitrageOpportunity> {
+    async fn scan_stale_liquidity(&self, markets: &[MarketInfo]) -> Vec<TradingOpportunity> {
         let mut opportunities = Vec::new();
         let today = Local::now().date_naive();
 
@@ -1625,7 +1625,7 @@ impl WeatherAlphaStrategy {
                             market.fee_rate_bps,
                         );
                         if est.net_profit > Decimal::ZERO {
-                            opportunities.push(ArbitrageOpportunity {
+                            opportunities.push(TradingOpportunity {
                                 id: Uuid::now_v7(),
                                 strategy_type: StrategyType::Weather,
                                 condition_id: market.condition_id,
@@ -1663,7 +1663,7 @@ impl WeatherAlphaStrategy {
                             market.fee_rate_bps,
                         );
                         if est.net_profit > Decimal::ZERO {
-                            opportunities.push(ArbitrageOpportunity {
+                            opportunities.push(TradingOpportunity {
                                 id: Uuid::now_v7(),
                                 strategy_type: StrategyType::Weather,
                                 condition_id: market.condition_id,
@@ -1701,7 +1701,7 @@ impl WeatherAlphaStrategy {
         event: &NegRiskEvent,
         metric: WeatherMetric,
         location: &str,
-    ) -> Vec<ArbitrageOpportunity> {
+    ) -> Vec<TradingOpportunity> {
         let mut opportunities = Vec::new();
 
         // Parse target date
@@ -1828,7 +1828,7 @@ impl WeatherAlphaStrategy {
                     continue;
                 }
 
-                opportunities.push(ArbitrageOpportunity {
+                opportunities.push(TradingOpportunity {
                     id: Uuid::now_v7(),
                     strategy_type: StrategyType::Weather,
                     condition_id: market.condition_id,
@@ -1991,7 +1991,7 @@ impl WeatherAlphaStrategy {
         &self,
         market: &MarketInfo,
         parsed: &WeatherQuestion,
-    ) -> Option<ArbitrageOpportunity> {
+    ) -> Option<TradingOpportunity> {
         // Parse target date and precipitation unit from question
         let target_date = parse_target_date(&market.question);
         let precipitation_unit = if matches!(parsed.metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
@@ -2181,7 +2181,7 @@ impl WeatherAlphaStrategy {
             "Weather alpha opportunity detected"
         );
 
-        Some(ArbitrageOpportunity {
+        Some(TradingOpportunity {
             id: Uuid::now_v7(),
             strategy_type: StrategyType::Weather,
             condition_id: market.condition_id,
@@ -2328,7 +2328,7 @@ impl WeatherAlphaStrategy {
         event: &NegRiskEvent,
         metric: WeatherMetric,
         location: &str,
-    ) -> Option<ArbitrageOpportunity> {
+    ) -> Option<TradingOpportunity> {
         // Parse target date and precipitation unit from event title
         let target_date = parse_target_date(&event.title);
         let precipitation_unit = if matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
@@ -2563,7 +2563,7 @@ impl WeatherAlphaStrategy {
             "NegRisk weather alpha opportunity detected"
         );
 
-        Some(ArbitrageOpportunity {
+        Some(TradingOpportunity {
             id: Uuid::now_v7(),
             strategy_type: StrategyType::Weather,
             condition_id: market.condition_id,
@@ -2583,7 +2583,7 @@ impl WeatherAlphaStrategy {
     }
 
     /// Scan held positions for exit conditions (model reversal or capital efficiency).
-    async fn scan_exits(&self, markets: &[MarketInfo]) -> Vec<ArbitrageOpportunity> {
+    async fn scan_exits(&self, markets: &[MarketInfo]) -> Vec<TradingOpportunity> {
         let held = (self.get_held_positions)();
         if held.is_empty() {
             return vec![];
@@ -2819,7 +2819,7 @@ impl WeatherAlphaStrategy {
         avg_cost: Decimal,
         best_bid: Decimal,
         token_to_market: &std::collections::HashMap<U256, &MarketInfo>,
-    ) -> ArbitrageOpportunity {
+    ) -> TradingOpportunity {
         let market = token_to_market.get(&token_id);
         let condition_id = market.map(|m| m.condition_id).unwrap_or_default();
         let question = market.map(|m| m.question.clone()).unwrap_or_default();
@@ -2827,7 +2827,7 @@ impl WeatherAlphaStrategy {
 
         let est = self.profit_calc.directional_sell_profit(best_bid, avg_cost, size, fee_rate_bps);
 
-        ArbitrageOpportunity {
+        TradingOpportunity {
             id: Uuid::now_v7(),
             strategy_type: StrategyType::Weather,
             condition_id,
@@ -2860,7 +2860,7 @@ impl Strategy for WeatherAlphaStrategy {
     async fn scan(
         &self,
         markets: &[MarketInfo],
-    ) -> pa_core::Result<Vec<ArbitrageOpportunity>> {
+    ) -> pa_core::Result<Vec<TradingOpportunity>> {
         let mut opportunities = Vec::new();
         let count = self.scan_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let log_diag = count % 600 == 0;

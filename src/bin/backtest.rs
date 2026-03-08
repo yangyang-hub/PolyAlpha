@@ -14,7 +14,7 @@ use pa_storage::repository::Repository;
 
 /// PolyAlpha Backtest Runner
 ///
-/// Replays historical order book snapshots through arbitrage strategies and
+/// Replays historical order book snapshots through trading strategies and
 /// produces a performance report (PnL, Sharpe ratio, drawdown, win rate).
 #[derive(Parser)]
 #[command(name = "pa-backtest", about = "PolyAlpha Backtest Runner")]
@@ -148,7 +148,7 @@ async fn main() -> Result<()> {
 
 fn default_strategy_config() -> pa_core::config::StrategyConfig {
     pa_core::config::StrategyConfig {
-        enabled: vec!["yes_no".into(), "neg_risk".into(), "cross_market".into()],
+        enabled: vec!["weather".into(), "convergence".into(), "crypto".into()],
         scan_interval_ms: 1000,
         min_spread_bps: 50,
         min_profit_usdc: dec!(0.50),

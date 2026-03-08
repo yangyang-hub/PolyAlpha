@@ -10,7 +10,7 @@ use uuid::Uuid;
 use pa_core::config::ConvergenceConfig;
 use pa_core::traits::Strategy;
 use pa_core::types::{
-    ArbitrageOpportunity, ExecutionPlan, MarketInfo, OrderBook, StrategyType, TradeSide,
+    TradingOpportunity, ExecutionPlan, MarketInfo, OrderBook, StrategyType, TradeSide,
 };
 
 use crate::profitability::ProfitCalculator;
@@ -59,7 +59,7 @@ impl ResolutionConvergenceStrategy {
     }
 
     /// Detect a convergence opportunity on a single market.
-    fn detect_convergence(&self, market: &MarketInfo) -> Option<ArbitrageOpportunity> {
+    fn detect_convergence(&self, market: &MarketInfo) -> Option<TradingOpportunity> {
         // Filter: must have end_date
         let end_date = market.end_date?;
 
@@ -182,7 +182,7 @@ impl ResolutionConvergenceStrategy {
             "Resolution convergence opportunity detected"
         );
 
-        Some(ArbitrageOpportunity {
+        Some(TradingOpportunity {
             id: Uuid::now_v7(),
             strategy_type: StrategyType::ResolutionConvergence,
             condition_id: market.condition_id,
@@ -202,7 +202,7 @@ impl ResolutionConvergenceStrategy {
     }
 
     /// Scan held positions for exit conditions (model reversal or capital efficiency).
-    fn scan_exits(&self, markets: &[MarketInfo]) -> Vec<ArbitrageOpportunity> {
+    fn scan_exits(&self, markets: &[MarketInfo]) -> Vec<TradingOpportunity> {
         let held = (self.get_held_positions)();
         if held.is_empty() {
             return vec![];
@@ -340,7 +340,7 @@ impl ResolutionConvergenceStrategy {
         avg_cost: Decimal,
         best_bid: Decimal,
         token_to_market: &std::collections::HashMap<U256, &MarketInfo>,
-    ) -> ArbitrageOpportunity {
+    ) -> TradingOpportunity {
         let market = token_to_market.get(&token_id);
         let condition_id = market.map(|m| m.condition_id).unwrap_or_default();
         let question = market.map(|m| m.question.clone()).unwrap_or_default();
@@ -348,7 +348,7 @@ impl ResolutionConvergenceStrategy {
 
         let est = self.profit_calc.directional_sell_profit(best_bid, avg_cost, size, fee_rate_bps);
 
-        ArbitrageOpportunity {
+        TradingOpportunity {
             id: Uuid::now_v7(),
             strategy_type: StrategyType::ResolutionConvergence,
             condition_id,
@@ -381,7 +381,7 @@ impl Strategy for ResolutionConvergenceStrategy {
     async fn scan(
         &self,
         markets: &[MarketInfo],
-    ) -> pa_core::Result<Vec<ArbitrageOpportunity>> {
+    ) -> pa_core::Result<Vec<TradingOpportunity>> {
         let mut opportunities = Vec::new();
         let count = self.scan_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let log_diag = count.is_multiple_of(600);

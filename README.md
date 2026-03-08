@@ -1,27 +1,27 @@
 # PolyAlpha
 
-Polymarket 量化套利 + 方向性 Alpha 交易机器人，基于 Rust 构建。
+Polymarket 量化方向性 Alpha 交易机器人，基于 Rust 构建。
 
-**套利策略**：实时监控订单簿价差，自动发现并执行 YES/NO 二元市场、NegRisk 多结果事件及跨市场相关性套利。混合执行层：CLOB API 下单 + Polygon 链上 CTF（Conditional Token Framework）拆分/合并。
+**方向性策略**：基于外部数据源（天气预报、加密货币实时价格、市场到期时间、智能钱包跟单）构建概率模型，识别 mispriced tokens 并方向性买入。支持模型反转退出和万能止损安全网。
 
-**方向性策略**：基于外部数据源（天气预报、加密货币实时价格、市场到期时间）构建概率模型，识别 mispriced tokens 并方向性买入。支持模型反转退出和万能止损安全网。
+**流动性奖励做市**：自动在有奖励的市场挂单做市，赚取 Polymarket 流动性奖励。支持余额感知动态仓位、失败冷却、重复检测、市场级配置覆盖。
 
 **风控增强**：事件日历过滤器在 FOMC、CPI、Token Unlock 等重大事件窗口期自动降低仓位上限。三层仓位积累检查 + 熔断机制。
 
 - **语言**: Rust Edition 2024, MSRV 1.88.0
 - **代码量**: ~19500 行
-- **测试**: 199 个（全部通过）
+- **测试**: 231 个（全部通过）
 - **实盘模式无需 PostgreSQL** — 仓位从 Polymarket Data API 加载
 
 ## 目录
 
 - [架构概览](#架构概览)
-- [套利策略](#套利策略)
 - [方向性策略](#方向性策略)
+- [流动性奖励做市](#流动性奖励做市)
 - [Strategy Engine](#strategy-engine)
 - [仓位管理](#仓位管理)
 - [事件日历过滤器](#事件日历过滤器)
-- [做市模块](#做市模块)
+- [流动性奖励做市](#流动性奖励做市)
 - [项目结构](#项目结构)
 - [快速开始](#快速开始)
 - [配置说明](#配置说明)
@@ -41,16 +41,15 @@ Polymarket 量化套利 + 方向性 Alpha 交易机器人，基于 Rust 构建�
 │  ┌──────────────────┐  ┌───────────────────┐  ┌───────────────────────┐  │
 │  │   Market Data     │  │    Strategies      │  │   Execution Layer     │  │
 │  │                   │  │                    │  │                       │  │
-│  │ Gamma API         │─▶│ YesNo Arb          │─▶│ CLOB Executor (API)   │  │
-│  │ (discovery)       │  │ NegRisk Arb        │  │ CTF Executor (chain)  │  │
-│  │                   │  │ CrossMkt Arb       │  │ Hybrid Orchestrator   │  │
-│  │ WebSocket         │  │ Weather Alpha      │  │ SafeRedeemer (Gnosis) │  │
-│  │ (orderbook, sort) │  │ Convergence        │  │                       │  │
-│  │                   │  │ CryptoAlpha        │  │  ┌─────┐  ┌────────┐ │  │
-│  │ OB Cache (DashMap)│  │                    │  │  │ FOK │  │ Split/ │ │  │
-│  │                   │  │ Strategy Engine     │  │  │Order│  │ Merge  │ │  │
-│  │ Data API          │  │ ├─ Depth Validate  │  │  └─────┘  └────────┘ │  │
-│  │ (positions)       │  │ ├─ Budget Track    │  └───────────────────────┘  │
+│  │ Gamma API         │─▶│ Weather Alpha      │─▶│ CLOB Executor (API)   │  │
+│  │ (discovery)       │  │ CryptoAlpha        │  │ Hybrid Orchestrator   │  │
+│  │                   │  │ Convergence        │  │ SafeRedeemer (Gnosis) │  │
+│  │ WebSocket         │  │ SmartMoney         │  │                       │  │
+│  │ (orderbook, sort) │  │ LiquidityRewards   │  │  ┌─────┐             │  │
+│  │                   │  │                    │  │  │ FOK │             │  │
+│  │ OB Cache (DashMap)│  │ Strategy Engine     │  │  │Order│             │  │
+│  │                   │  │ ├─ Depth Validate  │  │  └─────┘             │  │
+│  │ Data API          │  │ ├─ Budget Track    │  └───────────────────────┘  │
 │  │                   │  │ ├─ Model Exit      │                             │
 │  │ Event Calendar    │  │ └─ Stop-Loss Net   │                             │
 │  └────────┬─────────┘  └────────┬──────────┘                              │
@@ -71,52 +70,26 @@ Polymarket 量化套利 + 方向性 Alpha 交易机器人，基于 Rust 构建�
 
 1. **市场发现** — Gamma API 获取活跃市场（NegRisk 自动分组 + 二元事件分组）
 2. **实时数据** — Smart WS 订阅（持仓优先 > 策略相关 > 一般，最多 500 instruments）
-3. **策略扫描** — 事件驱动 + 定时轮询双模式，检测套利与方向性 Alpha
+3. **策略扫描** — 事件驱动 + 定时轮询双模式，检测方向性 Alpha
 4. **事件过滤** — 事件日历在 FOMC/CPI 等窗口期自动缩减仓位
 5. **风控检查** — 三层仓位积累 + 日损失限制 + 熔断机制
 6. **深度验证** — 按比例缩小或拒绝深度不足的机会
-7. **混合执行** — CLOB API（FOK/GTC）+ Polygon 链上 CTF（split/merge）
+7. **执行** — CLOB API FOK/GTC 订单
 8. **模型退出** — 方向性策略检测模型反转或资金效率信号时自动卖出
 9. **止损安全网** — 扫描所有持仓，亏损 >= 50% 时强制退出
 10. **自动赎回** — 已解决市场的 winning tokens 通过 GnosisSafe 自动赎回
 11. **仓位同步** — 每 5 分钟与 Data API 对账，处理外部变化
 12. **监控** — 22 个 Prometheus 指标 + Grafana 18 面板仪表盘
 
-## 套利策略
+## 方向性策略
 
-### 1. YesNo Merge/Split（二元市场套利）
-
-Polymarket 的每个二元市场都有 YES 和 NO 两个 token，理论价格之和 = $1.00。
-
-- **Merge（买入套利）**: 当 `ask(YES) + ask(NO) < $1.00` 时，买入双方 token 后合并为 USDC
-- **Split（卖出套利）**: 当 `bid(YES) + bid(NO) > $1.00` 时，拆分 USDC 为双方 token 后卖出
-
-最小利润空间约 2.5-3%（Polymarket 2% 手续费 + Polygon gas）。
-
-### 2. NegRisk 多结果套利
-
-NegRisk 事件（如"谁将赢得选举？"）包含 N 个互斥结果市场，所有 YES 价格之和理论上 = $1.00。
-
-- 当 `sum(ask[YES_i]) < $1.00` 时，买入所有 YES token 并通过 NegRiskAdapter 合并
-- 结果数越多，定价偏离越频繁
-
-### 3. CrossMarket 跨市场套利
-
-检测不同二元市场间的相关性（通过问题文本的词汇相似度自动发现）。
-
-- 例如："X 在6月前发生吗？" vs "X 在12月前发生吗？"
-- 两个市场 YES 价格之和偏离理论值时进行套利
-- 支持 ComplementaryYes 和 InverseYesNo 两种相关性模式
+通过外部数据源构建概率模型，当模型概率与市场价格存在显著偏差（edge）时买入。
 
 ### 手续费模型
 
 Polymarket 采用封顶手续费模型：`fee = min(fee_rate × price, price × (1 - price))`
 
-## 方向性策略
-
-与套利策略不同，方向性策略带有方向性风险。通过外部数据源构建概率模型，当模型概率与市场价格存在显著偏差（edge）时买入。
-
-### 4. Weather Alpha（天气 Alpha）
+### 1. Weather Alpha（天气 Alpha）
 
 利用 Open-Meteo 免费天气预报 API 为 Polymarket 上的天气相关市场定价。
 
@@ -138,7 +111,7 @@ Polymarket 采用封顶手续费模型：`fee = min(fee_rate × price, price × 
 
 **启用**: `strategy.enabled` 中添加 `"weather"`
 
-### 5. Resolution Convergence（到期收敛）
+### 2. Resolution Convergence（到期收敛）
 
 买入接近到期且价格已收敛至 0 或 1 附近的 token。市场越接近到期，结果越确定。
 
@@ -148,7 +121,7 @@ Polymarket 采用封顶手续费模型：`fee = min(fee_rate × price, price × 
 
 **启用**: `strategy.enabled` 中添加 `"convergence"`
 
-### 6. Crypto Alpha（加密货币 Alpha）
+### 3. Crypto Alpha（加密货币 Alpha）
 
 利用实时 crypto 价格 + GBM（几何布朗运动）模型为 crypto 预测市场定价。
 
@@ -264,17 +237,20 @@ Polymarket 采用封顶手续费模型：`fee = min(fee_rate × price, price × 
 
 **启用**: `[event_calendar] enabled = true` + API keys
 
-## 做市模块
+## 流动性奖励做市
 
-被动做市赚取 bid-ask 价差。作为后台任务运行（非 Strategy trait）。
+赚取 Polymarket CLOB 流动性奖励。作为后台任务运行（非 Strategy trait）。
 
-- 独立 CLOB 连接，避免与策略竞争
-- Cancel-then-replace: 每周期取消全部再重新报价
-- Buy-only start: 只有持仓时才挂 ask（避免裸空头）
-- Inventory skew: 持仓偏重时加宽该侧价差
-- 市场选择: 非 NegRisk, 价格 0.20-0.80, 按接近 0.50 排序
+- 自动发现有奖励的市场（按 reward density 排序）
+- 支持三种市场模式: auto（自动发现）、manual（仅手动列表）、hybrid（两者结合）
+- 余额感知动态仓位: 根据可用余额自动计算可负担仓位
+- 失败订单冷却: 60s 内不重复挂同一价位的失败订单
+- 重复订单检测: 对比期望订单与现有订单，只增删差异
+- 市场级配置覆盖: 每个市场可独立设置 max_position、spread、quote_yes/no
+- Fill 检测: 10s CLOB 轮询，部分成交跟踪，全部成交立即 re-quote
+- 订单得分验证: 可选检查订单是否满足奖励计分要求
 
-**启用**: `[market_making] enabled = true`
+**启用**: `[liquidity_rewards] enabled = true`
 
 ## 项目结构
 
@@ -286,7 +262,7 @@ PolyAlpha/
 ├── crates/
 │   ├── pa-core/                     # 核心类型、traits、配置、错误
 │   ├── pa-market-data/              # Gamma API + WS (排序) + Cache + DataAPI + EventCalendar
-│   ├── pa-strategy/                 # 6 策略 + ProfitCalculator + StrategyEngine
+│   ├── pa-strategy/                 # 5 策略 + ProfitCalculator + StrategyEngine
 │   ├── pa-execution/                # CLOB + CTF + Orchestrator + SafeRedeemer
 │   ├── pa-risk/                     # RiskManager + PositionTracker (3 层积累检查)
 │   ├── pa-storage/                  # PostgreSQL Repository (sqlx)
@@ -375,7 +351,7 @@ proxy_wallet = ""                      # GnosisSafe/Proxy 钱包地址
 host = "https://gamma-api.polymarket.com"
 
 [strategy]
-enabled = ["weather"]                  # 可选: yes_no, weather, convergence, crypto
+enabled = ["weather"]                  # 可选: weather, convergence, crypto, smart_money
 scan_interval_ms = 100
 min_spread_bps = 300
 min_profit_usdc = 0.50
@@ -434,13 +410,16 @@ coinmarketcal_api_key = ""
 pre_event_hours = 4
 post_event_hours = 2
 
-[market_making]
-enabled = false
-target_spread_bps = 300
-max_position_per_market = 50
-max_markets = 5
-quote_refresh_secs = 30
-inventory_skew_factor = 0.50
+[liquidity_rewards]
+enabled = true
+max_markets = 10
+max_position_per_market = 100.0
+max_total_exposure = 500.0
+spread_fraction = 0.80
+min_order_size = 5.0
+min_daily_rate = 1.0
+market_mode = "auto"                  # auto / manual / hybrid
+failed_cooldown_secs = 60
 ```
 
 ### 环境变量
@@ -518,15 +497,15 @@ cargo run --bin backtest -- \
 | `active_ws_subscriptions` | Gauge | 活跃 WS 订阅数 |
 | `monitored_markets` | Gauge | 监控中的市场数 |
 | `circuit_breaker_active` | Gauge | 熔断器状态 |
-| `mm_active_markets` | Gauge | 做市活跃市场 |
+| `mm_active_markets` | Gauge | LR 活跃市场数 |
 | `ws_reconnect_total` | Counter | WS 重连次数 |
 | `snapshots_recorded_total` | Counter | 快照记录数 |
 | `event_filter_applied_total` | Counter | 事件日历降仓次数 |
 | `exit_trades_total` | Counter | 退出交易次数 |
 | `depth_validation_scaled_total` | Counter | 深度缩放次数 |
 | `depth_validation_rejected_total` | Counter | 深度拒绝次数 |
-| `mm_orders_placed_total` | Counter | 做市下单次数 |
-| `mm_orders_cancelled_total` | Counter | 做市撤单次数 |
+| `mm_orders_placed_total` | Counter | LR 下单次数 |
+| `mm_orders_cancelled_total` | Counter | LR 撤单次数 |
 
 ## 数据库
 
@@ -562,20 +541,20 @@ Chain ID: 137, ~2s blocks, ~$0.01 gas, ERC-1155 approval required。
 
 ```bash
 cargo check --workspace          # 编译检查
-cargo test --workspace           # 运行 199 个测试
+cargo test --workspace           # 运行 231 个测试
 cargo build --release            # 构建 release
 cargo run --release              # 运行机器人
 ```
 
-### 测试分布（199 个）
+### 测试分布（231 个）
 
 | Crate | 数量 | 覆盖 |
 |-------|------|------|
-| pa-strategy | 141 | ProfitCalc, CrossMarket, Weather(79), Convergence(14), CryptoAlpha(26), YesNo |
-| pa-market-data | 17 | OrderBook, EventCalendar(12), GammaFeed(4) |
-| pa-backtest | 11 | DataLoader, Report, Simulator |
-| pa-execution | 11 | Gas, Cost precision(5), GCD, min_cost_adjusted_size(4) |
-| pa-core | 10 | OrderBook depth(3), walk_book(4), liquidity_requirements(3) |
+| pa-strategy | 171 | ProfitCalc(6), Weather(79), Convergence(14), CryptoAlpha(30), LR(23), SmartMoney(5) |
+| pa-market-data | 24 | OrderBook(1), EventCalendar(12), GammaFeed(4), WalletTracker(7) |
+| pa-backtest | 8 | DataLoader, Report, Simulator |
+| pa-execution | 11 | Gas(1), Cost precision(5), GCD(1), min_cost(4) |
+| pa-core | 8 | OrderBook depth(3), walk_book(4), liquidity_requirements(1) |
 | pa-risk | 9 | PositionTracker(3), RiskManager(5), exit_bypass(1) |
 
 ### 关键 Trait
@@ -590,16 +569,16 @@ trait MarketDataFeed {
 trait Strategy {
     fn name(&self) -> &str;
     fn strategy_type(&self) -> StrategyType;
-    async fn scan(&self, markets: &[MarketInfo]) -> Result<Vec<ArbitrageOpportunity>>;
+    async fn scan(&self, markets: &[MarketInfo]) -> Result<Vec<TradingOpportunity>>;
 }
 
 trait Executor {
-    async fn execute(&self, opp: &ArbitrageOpportunity) -> Result<ExecutionResult>;
+    async fn execute(&self, opp: &TradingOpportunity) -> Result<ExecutionResult>;
     async fn cancel_all(&self) -> Result<()>;
 }
 
 trait RiskManager {
-    fn check_pre_trade(&self, opp: &ArbitrageOpportunity) -> RiskDecision;
+    fn check_pre_trade(&self, opp: &TradingOpportunity) -> RiskDecision;
     fn update_position(&self, result: &ExecutionResult);
     fn is_circuit_broken(&self) -> bool;
 }
@@ -635,7 +614,7 @@ trait RiskManager {
 
 本项目仅供学习和研究目的。在使用前请注意：
 
-- 套利和方向性交易存在资金损失风险
+- 方向性交易存在资金损失风险
 - 请确保充分理解 Polymarket 的交易规则和手续费结构
 - 建议先使用回测系统验证策略表现，再投入真实资金
 - 确保私钥安全，切勿将 `.env` 文件提交到版本控制

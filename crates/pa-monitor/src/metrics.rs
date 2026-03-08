@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 /// Global Prometheus metrics registry.
 pub static REGISTRY: LazyLock<Registry> = LazyLock::new(Registry::new);
 
-/// Number of arbitrage opportunities detected.
+/// Number of trading opportunities detected.
 pub static OPPORTUNITIES_DETECTED: LazyLock<IntCounter> = LazyLock::new(|| {
     let counter = IntCounter::new("opportunities_detected_total", "Total opportunities detected").unwrap();
     REGISTRY.register(Box::new(counter.clone())).unwrap();
@@ -18,7 +18,7 @@ pub static OPPORTUNITIES_REJECTED: LazyLock<IntCounter> = LazyLock::new(|| {
     counter
 });
 
-/// Number of arbitrage opportunities executed.
+/// Number of trading opportunities executed.
 pub static EXECUTIONS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     let counter = IntCounter::new("executions_total", "Total executions attempted").unwrap();
     REGISTRY.register(Box::new(counter.clone())).unwrap();

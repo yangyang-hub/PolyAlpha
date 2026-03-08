@@ -1948,7 +1948,7 @@ struct DryRunExecutor;
 impl pa_core::traits::Executor for DryRunExecutor {
     async fn execute(
         &self,
-        opportunity: &pa_core::types::ArbitrageOpportunity,
+        opportunity: &pa_core::types::TradingOpportunity,
     ) -> pa_core::Result<pa_core::types::ExecutionResult> {
         tracing::info!(
             id = %opportunity.id,

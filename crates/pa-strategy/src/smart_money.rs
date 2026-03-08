@@ -10,7 +10,7 @@ use uuid::Uuid;
 use pa_core::config::SmartMoneyConfig;
 use pa_core::traits::Strategy;
 use pa_core::types::{
-    ArbitrageOpportunity, ExecutionPlan, MarketInfo, OrderBook, StrategyType, TradeSide,
+    TradingOpportunity, ExecutionPlan, MarketInfo, OrderBook, StrategyType, TradeSide,
 };
 use pa_market_data::wallet_tracker::{SignalType, SmartMoneySignal};
 
@@ -125,8 +125,8 @@ impl SmartMoneyStrategy {
         map
     }
 
-    /// Process an aggregated entry signal → ArbitrageOpportunity.
-    fn process_entry_signal(&self, agg: &AggregatedSignal) -> Option<ArbitrageOpportunity> {
+    /// Process an aggregated entry signal → TradingOpportunity.
+    fn process_entry_signal(&self, agg: &AggregatedSignal) -> Option<TradingOpportunity> {
         let book = (self.get_orderbook)(agg.token_id)?;
         let best_ask = book.best_ask()?.price;
 
@@ -172,7 +172,7 @@ impl SmartMoneyStrategy {
             "SmartMoney: following entry signal"
         );
 
-        Some(ArbitrageOpportunity {
+        Some(TradingOpportunity {
             id: Uuid::now_v7(),
             strategy_type: StrategyType::SmartMoney,
             condition_id: agg.condition_id,
@@ -191,8 +191,8 @@ impl SmartMoneyStrategy {
         })
     }
 
-    /// Process an aggregated exit signal → ArbitrageOpportunity.
-    fn process_exit_signal(&self, agg: &AggregatedSignal) -> Option<ArbitrageOpportunity> {
+    /// Process an aggregated exit signal → TradingOpportunity.
+    fn process_exit_signal(&self, agg: &AggregatedSignal) -> Option<TradingOpportunity> {
         let our_position = (self.get_position)(agg.token_id);
         if our_position <= Decimal::ZERO {
             return None;
@@ -229,7 +229,7 @@ impl SmartMoneyStrategy {
             "SmartMoney: following exit signal"
         );
 
-        Some(ArbitrageOpportunity {
+        Some(TradingOpportunity {
             id: Uuid::now_v7(),
             strategy_type: StrategyType::SmartMoney,
             condition_id: agg.condition_id,
@@ -249,7 +249,7 @@ impl SmartMoneyStrategy {
     }
 
     /// Scan held positions for capital efficiency exits (best_bid >= threshold).
-    fn scan_exits(&self) -> Vec<ArbitrageOpportunity> {
+    fn scan_exits(&self) -> Vec<TradingOpportunity> {
         let held = (self.get_held_positions)();
         if held.is_empty() {
             return vec![];
@@ -297,7 +297,7 @@ impl SmartMoneyStrategy {
                     "[SmartMoney EXIT] Capital efficiency"
                 );
 
-                exits.push(ArbitrageOpportunity {
+                exits.push(TradingOpportunity {
                     id: Uuid::now_v7(),
                     strategy_type: StrategyType::SmartMoney,
                     condition_id,
@@ -334,7 +334,7 @@ impl Strategy for SmartMoneyStrategy {
     async fn scan(
         &self,
         markets: &[MarketInfo],
-    ) -> pa_core::Result<Vec<ArbitrageOpportunity>> {
+    ) -> pa_core::Result<Vec<TradingOpportunity>> {
         // Update markets lookup
         self.update_markets(markets);
 

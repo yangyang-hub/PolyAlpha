@@ -3,7 +3,7 @@ use alloy::primitives::U256;
 use rust_decimal::Decimal;
 use pa_core::config::RiskConfig;
 use pa_core::traits::RiskManager;
-use pa_core::types::{ArbitrageOpportunity, ExecutionResult, RiskDecision, RiskRejectReason, StrategyType};
+use pa_core::types::{TradingOpportunity, ExecutionResult, RiskDecision, RiskRejectReason, StrategyType};
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::limits::LimitsChecker;
@@ -68,7 +68,7 @@ impl RiskManagerImpl {
 
 #[async_trait]
 impl RiskManager for RiskManagerImpl {
-    fn check_pre_trade(&self, opp: &ArbitrageOpportunity) -> RiskDecision {
+    fn check_pre_trade(&self, opp: &TradingOpportunity) -> RiskDecision {
         if self.circuit_breaker.is_broken() {
             return RiskDecision::Reject(RiskRejectReason::CircuitBroken);
         }
@@ -160,8 +160,8 @@ mod tests {
         B256::from(bytes)
     }
 
-    fn make_opp(condition_id: B256, strategy_type: StrategyType, size: Decimal, price: Decimal) -> ArbitrageOpportunity {
-        ArbitrageOpportunity {
+    fn make_opp(condition_id: B256, strategy_type: StrategyType, size: Decimal, price: Decimal) -> TradingOpportunity {
+        TradingOpportunity {
             id: Uuid::now_v7(),
             strategy_type,
             condition_id,
@@ -264,7 +264,7 @@ mod tests {
         assert_ne!(rm.check_pre_trade(&buy_opp), RiskDecision::Approve);
 
         // But an EXIT (sell) should always be approved — it reduces risk
-        let exit_opp = ArbitrageOpportunity {
+        let exit_opp = TradingOpportunity {
             id: Uuid::now_v7(),
             strategy_type: StrategyType::Weather,
             condition_id: cid(1),

@@ -147,7 +147,7 @@ impl ClobExecutor {
     ///
     /// Builds a limit order via the SDK's order builder, signs it, and posts it.
     /// FOK ensures the order is either fully filled immediately or cancelled entirely,
-    /// preventing single-side exposure in arbitrage.
+    /// preventing single-side exposure.
     pub async fn buy_fok(
         &self,
         token_id: U256,

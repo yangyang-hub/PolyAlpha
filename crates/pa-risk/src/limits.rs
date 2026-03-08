@@ -1,6 +1,6 @@
 use rust_decimal::Decimal;
 use pa_core::config::RiskConfig;
-use pa_core::types::{ArbitrageOpportunity, RiskDecision, RiskRejectReason};
+use pa_core::types::{TradingOpportunity, RiskDecision, RiskRejectReason};
 
 /// Checks trade-level risk limits.
 pub struct LimitsChecker {
@@ -15,7 +15,7 @@ impl LimitsChecker {
     /// Check if an opportunity passes all risk limits.
     pub fn check(
         &self,
-        opp: &ArbitrageOpportunity,
+        opp: &TradingOpportunity,
         total_exposure: Decimal,
     ) -> RiskDecision {
         // Check minimum order size

@@ -6,7 +6,7 @@ use chrono::{TimeDelta, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use pa_core::traits::{Executor, RiskManager, Strategy};
-use pa_core::types::{ArbitrageOpportunity, ExecutionPlan, MarketInfo, OrderBook, RiskDecision, StrategyType, TradeSide};
+use pa_core::types::{TradingOpportunity, ExecutionPlan, MarketInfo, OrderBook, RiskDecision, StrategyType, TradeSide};
 use pa_market_data::event_calendar::EventCalendarService;
 use tokio::sync::{RwLock, broadcast};
 use tokio::time::{Duration, interval};
@@ -295,7 +295,7 @@ impl StrategyEngine {
         timer.observe_duration();
     }
 
-    async fn process_opportunity(&self, opp: &ArbitrageOpportunity) {
+    async fn process_opportunity(&self, opp: &TradingOpportunity) {
         tracing::debug!(
             id = %opp.id,
             strategy = ?opp.strategy_type,
@@ -653,7 +653,7 @@ impl StrategyEngine {
                 "[STOP-LOSS] Forced exit — position lost >= 50%"
             );
 
-            let opp = ArbitrageOpportunity {
+            let opp = TradingOpportunity {
                 id: Uuid::new_v4(),
                 condition_id,
                 question: format!("[STOP-LOSS] Force exit token {}", pos.token_id),
@@ -685,7 +685,7 @@ impl StrategyEngine {
     /// - Checks available depth and slippage on each leg.
     /// - Scales down the opportunity if depth is insufficient.
     /// - Returns `None` if zero depth or scaled below `min_order_usdc`.
-    fn validate_depth(&self, opp: &ArbitrageOpportunity) -> Option<ArbitrageOpportunity> {
+    fn validate_depth(&self, opp: &TradingOpportunity) -> Option<TradingOpportunity> {
         // Exit orders bypass depth validation
         if opp.execution_plan.is_exit() {
             return Some(opp.clone());

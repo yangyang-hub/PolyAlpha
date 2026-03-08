@@ -36,7 +36,7 @@ impl Repository {
         Ok(())
     }
 
-    /// Insert an arbitrage opportunity record.
+    /// Insert a trading opportunity record.
     pub async fn insert_opportunity(&self, row: &OpportunityRow) -> anyhow::Result<()> {
         sqlx::query(
             r#"INSERT INTO opportunities

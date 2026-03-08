@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use pa_core::traits::Executor;
 use pa_core::types::{
-    ArbitrageOpportunity, ExecutionPlan, ExecutionResult,
+    TradingOpportunity, ExecutionPlan, ExecutionResult,
     ExecutionStatus, TradeRecord, TradeSide, TxType,
 };
 use pa_core::Result;
@@ -95,7 +95,7 @@ fn opp_strategy_type_placeholder() -> pa_core::types::StrategyType {
 
 #[async_trait]
 impl<P: alloy::providers::Provider + Clone + Send + Sync> Executor for HybridOrchestrator<P> {
-    async fn execute(&self, opp: &ArbitrageOpportunity) -> Result<ExecutionResult> {
+    async fn execute(&self, opp: &TradingOpportunity) -> Result<ExecutionResult> {
         let mut result = match &opp.execution_plan {
             ExecutionPlan::DirectionalBuy {
                 token_id,

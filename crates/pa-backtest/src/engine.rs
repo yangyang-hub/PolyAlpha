@@ -75,7 +75,7 @@ impl BacktestEngine {
         // Step 4: Build strategies
         // Note: All directional strategies (weather, crypto, convergence) require live API
         // calls and cannot meaningfully replay from DB snapshots.
-        // Arbitrage strategies have been removed from the codebase.
+        // Only directional strategies are used (weather, crypto, convergence).
         let strategies: Vec<Box<dyn Strategy>> = Vec::new();
 
         // Step 5: Build risk manager and simulator

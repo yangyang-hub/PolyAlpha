@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS orderbook_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_ob_snap_token_ts ON orderbook_snapshots(token_id, timestamp);
 
--- Arbitrage opportunities
+-- Trading opportunities
 CREATE TABLE IF NOT EXISTS opportunities (
     id              UUID PRIMARY KEY,
     strategy_type   VARCHAR(50) NOT NULL,

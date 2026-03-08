@@ -11,7 +11,7 @@ use uuid::Uuid;
 use pa_core::config::CryptoAlphaConfig;
 use pa_core::traits::Strategy;
 use pa_core::types::{
-    ArbitrageOpportunity, BinaryEventGroup, ExecutionPlan, MarketInfo, NegRiskEvent, OrderBook,
+    TradingOpportunity, BinaryEventGroup, ExecutionPlan, MarketInfo, NegRiskEvent, OrderBook,
     StrategyType, TradeSide,
 };
 
@@ -823,7 +823,7 @@ impl CryptoAlphaStrategy {
     pub async fn detect_crypto_opportunity(
         &self,
         market: &MarketInfo,
-    ) -> Option<ArbitrageOpportunity> {
+    ) -> Option<TradingOpportunity> {
         let question = parse_crypto_question(&market.question)?;
 
         // Require a target date
@@ -1009,7 +1009,7 @@ impl CryptoAlphaStrategy {
             "Crypto alpha opportunity detected"
         );
 
-        Some(ArbitrageOpportunity {
+        Some(TradingOpportunity {
             id: Uuid::now_v7(),
             strategy_type: StrategyType::CryptoAlpha,
             condition_id: market.condition_id,
@@ -1036,7 +1036,7 @@ impl CryptoAlphaStrategy {
         event: &NegRiskEvent,
         asset: &'static CryptoAsset,
         days: f64,
-    ) -> Option<ArbitrageOpportunity> {
+    ) -> Option<TradingOpportunity> {
         // Fetch price data
         let price_data = match self.get_price_data(asset).await {
             Ok(d) => d,
@@ -1239,7 +1239,7 @@ impl CryptoAlphaStrategy {
             "NegRisk crypto alpha opportunity detected"
         );
 
-        Some(ArbitrageOpportunity {
+        Some(TradingOpportunity {
             id: Uuid::now_v7(),
             strategy_type: StrategyType::CryptoAlpha,
             condition_id: market.condition_id,
@@ -1267,7 +1267,7 @@ impl CryptoAlphaStrategy {
     async fn detect_crypto_group(
         &self,
         group: &BinaryEventGroup,
-    ) -> Option<ArbitrageOpportunity> {
+    ) -> Option<TradingOpportunity> {
         // Try to identify crypto asset from the group title first, then from individual markets
         let asset = find_asset(&group.title).or_else(|| {
             group.markets.iter().find_map(|m| {
@@ -1517,7 +1517,7 @@ impl CryptoAlphaStrategy {
             "Binary group crypto alpha opportunity detected"
         );
 
-        Some(ArbitrageOpportunity {
+        Some(TradingOpportunity {
             id: Uuid::now_v7(),
             strategy_type: StrategyType::CryptoAlpha,
             condition_id: market.condition_id,
@@ -1539,7 +1539,7 @@ impl CryptoAlphaStrategy {
 
 impl CryptoAlphaStrategy {
     /// Scan held positions for exit conditions (model reversal or capital efficiency).
-    async fn scan_exits(&self, markets: &[MarketInfo]) -> Vec<ArbitrageOpportunity> {
+    async fn scan_exits(&self, markets: &[MarketInfo]) -> Vec<TradingOpportunity> {
         let held = (self.get_held_positions)();
         if held.is_empty() {
             return vec![];
@@ -1741,7 +1741,7 @@ impl CryptoAlphaStrategy {
         avg_cost: Decimal,
         best_bid: Decimal,
         token_to_market: &HashMap<U256, &MarketInfo>,
-    ) -> ArbitrageOpportunity {
+    ) -> TradingOpportunity {
         let market = token_to_market.get(&token_id);
         let condition_id = market.map(|m| m.condition_id).unwrap_or_default();
         let question = market.map(|m| m.question.clone()).unwrap_or_default();
@@ -1749,7 +1749,7 @@ impl CryptoAlphaStrategy {
 
         let est = self.profit_calc.directional_sell_profit(best_bid, avg_cost, size, fee_rate_bps);
 
-        ArbitrageOpportunity {
+        TradingOpportunity {
             id: Uuid::now_v7(),
             strategy_type: StrategyType::CryptoAlpha,
             condition_id,
@@ -1782,7 +1782,7 @@ impl Strategy for CryptoAlphaStrategy {
     async fn scan(
         &self,
         markets: &[MarketInfo],
-    ) -> pa_core::Result<Vec<ArbitrageOpportunity>> {
+    ) -> pa_core::Result<Vec<TradingOpportunity>> {
         let mut opportunities = Vec::new();
         let count = self.scan_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let log_diag = count.is_multiple_of(600); // ~every 60s at 100ms interval
