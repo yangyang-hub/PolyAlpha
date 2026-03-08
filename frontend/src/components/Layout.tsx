@@ -4,6 +4,7 @@ import { NavLink } from "react-router-dom";
 const navItems = [
   { to: "/", label: "概览" },
   { to: "/strategy", label: "策略" },
+  { to: "/lr", label: "LR" },
   { to: "/risk", label: "风控" },
   { to: "/market", label: "市场" },
   { to: "/monitor", label: "监控" },

@@ -69,3 +69,29 @@ export async function fetchHealth(): Promise<HealthResponse> {
   if (!res.ok) throw new Error(`Failed to fetch health: ${res.status}`);
   return res.json();
 }
+
+export interface LrMarketStatus {
+  condition_id: string;
+  question: string;
+  daily_rate: number;
+  outstanding_orders: number;
+  yes_bid: number | null;
+  yes_ask: number | null;
+  no_bid: number | null;
+  no_ask: number | null;
+}
+
+export interface LrRuntimeStatus {
+  active_markets: LrMarketStatus[];
+  total_exposure: number;
+  cached_balance: number;
+  market_mode: string;
+  last_refresh: string | null;
+  error?: string;
+}
+
+export async function fetchLRStatus(): Promise<LrRuntimeStatus> {
+  const res = await fetch(`${API_BASE}/api/lr/status`);
+  if (!res.ok) throw new Error(`Failed to fetch LR status: ${res.status}`);
+  return res.json();
+}

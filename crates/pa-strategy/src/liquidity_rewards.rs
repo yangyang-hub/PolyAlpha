@@ -1,6 +1,7 @@
 use pa_core::config::LiquidityRewardsConfig;
 use pa_core::types::MarketInfo;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 
 // ──── Market Selection ────
 
@@ -302,6 +303,278 @@ pub fn should_cancel_depth_order(
         let position = below + 1;
         position <= cancel_depth_level
     }
+}
+
+// ──── Balance-Aware Sizing ────
+
+/// Compute the affordable order size given current balance and quoting context.
+///
+/// `price` is the quote price for this order (bid price for buys, 1-bid for sells).
+/// `sides_quoted` is the number of sides being quoted across all markets (for splitting budget).
+/// Returns the affordable size floored to 2dp, or zero if below `min_order_size`.
+pub fn balance_aware_size(
+    price: Decimal,
+    balance: Decimal,
+    sides_quoted: u32,
+    max_position_per_market: Decimal,
+    remaining_exposure: Decimal,
+    min_order_size: Decimal,
+) -> Decimal {
+    if price <= Decimal::ZERO || sides_quoted == 0 || balance <= Decimal::ZERO {
+        return Decimal::ZERO;
+    }
+
+    let unit_cost = price;
+    let per_side_budget = balance / Decimal::from(sides_quoted);
+    // Truncate to 2 decimal places (floor)
+    let raw = per_side_budget / unit_cost;
+    let affordable = (raw * Decimal::from(100)).floor() / Decimal::from(100);
+
+    let size = affordable
+        .min(max_position_per_market)
+        .min(remaining_exposure);
+
+    if size < min_order_size {
+        Decimal::ZERO
+    } else {
+        size
+    }
+}
+
+// ──── Cooldown ────
+
+/// Check if a failed order is still on cooldown.
+///
+/// Returns `true` if `(now - last_failure_time) < cooldown_duration`, meaning
+/// the order should not be retried yet.
+pub fn is_order_on_cooldown(
+    last_failure: std::time::Instant,
+    now: std::time::Instant,
+    cooldown: std::time::Duration,
+) -> bool {
+    now.duration_since(last_failure) < cooldown
+}
+
+// ──── Duplicate Order Detection ────
+
+/// A desired order computed by the quoting engine.
+#[derive(Debug, Clone)]
+pub struct DesiredOrder {
+    pub token_id: alloy::primitives::U256,
+    pub is_buy: bool,
+    pub price: Decimal,
+    pub size: Decimal,
+}
+
+/// Result of reconciling desired orders against existing outstanding orders.
+#[derive(Debug, Default)]
+pub struct ReconcileResult {
+    /// Order IDs that should be cancelled (no longer desired or price changed).
+    pub to_cancel: Vec<String>,
+    /// New orders that need to be placed.
+    pub to_place: Vec<DesiredOrder>,
+    /// Count of existing orders that are still valid (no action needed).
+    pub kept: usize,
+}
+
+/// Compare desired orders against existing outstanding orders.
+///
+/// An existing order is "kept" if there is a desired order with the same
+/// `(token_id, is_buy)` and the price hasn't drifted more than `tolerance_bps`
+/// from the desired price.
+///
+/// Orders that don't match are cancelled; desired orders without a match are placed.
+pub fn reconcile_desired_vs_existing(
+    desired: &[DesiredOrder],
+    existing: &[(String, alloy::primitives::U256, bool, Decimal)], // (order_id, token_id, is_buy, price)
+    tolerance_bps: u32,
+) -> ReconcileResult {
+    let mut result = ReconcileResult::default();
+    let mut matched_existing: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut matched_desired: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+    for (di, d) in desired.iter().enumerate() {
+        // Find best matching existing order: same token_id + side, within tolerance
+        let best = existing.iter().enumerate()
+            .filter(|(ei, _)| !matched_existing.contains(ei))
+            .find(|(_, (_, tid, is_buy, price))| {
+                *tid == d.token_id && *is_buy == d.is_buy && {
+                    if d.price <= Decimal::ZERO { return false; }
+                    let drift = ((d.price - *price).abs() / d.price * Decimal::from(10_000))
+                        .to_u32()
+                        .unwrap_or(u32::MAX);
+                    drift <= tolerance_bps
+                }
+            });
+
+        if let Some((ei, _)) = best {
+            matched_existing.insert(ei);
+            matched_desired.insert(di);
+            result.kept += 1;
+        }
+    }
+
+    // Cancel unmatched existing orders
+    for (ei, (oid, _, _, _)) in existing.iter().enumerate() {
+        if !matched_existing.contains(&ei) {
+            result.to_cancel.push(oid.clone());
+        }
+    }
+
+    // Place unmatched desired orders
+    for (di, d) in desired.iter().enumerate() {
+        if !matched_desired.contains(&di) {
+            result.to_place.push(d.clone());
+        }
+    }
+
+    result
+}
+
+// ──── Market Selection Hybrid ────
+
+/// Select markets based on market_mode: auto, manual, or hybrid.
+///
+/// - `auto`: Standard density-ranked selection (backward compatible).
+/// - `manual`: Only markets listed in `manual_markets`.
+/// - `hybrid`: Auto-discovered markets + always include manual markets.
+pub fn select_reward_markets_hybrid(
+    markets: &[MarketInfo],
+    clob_rewards: &[ClobRewardData],
+    config: &LiquidityRewardsConfig,
+) -> Vec<RewardMarketCandidate> {
+    let mode = config.market_mode.as_str();
+
+    match mode {
+        "manual" => {
+            // Only include manually specified markets
+            let manual_cids: std::collections::HashSet<alloy::primitives::B256> = config
+                .manual_markets
+                .iter()
+                .filter_map(|o| {
+                    o.condition_id
+                        .parse::<alloy::primitives::B256>()
+                        .ok()
+                })
+                .collect();
+
+            let reward_map: std::collections::HashMap<alloy::primitives::B256, &ClobRewardData> =
+                clob_rewards.iter().map(|r| (r.condition_id, r)).collect();
+
+            markets
+                .iter()
+                .filter(|m| {
+                    m.active
+                        && manual_cids.contains(&m.condition_id)
+                        && (m.tokens.len() == 2 || config.allow_neg_risk)
+                        && (!m.neg_risk || config.allow_neg_risk)
+                })
+                .filter_map(|m| {
+                    let reward_data = reward_map.get(&m.condition_id);
+                    let daily_rate = reward_data.map_or(Decimal::ZERO, |r| r.total_daily_rate);
+                    let density = daily_rate / (m.liquidity + Decimal::ONE);
+                    let (max_spread, min_size) = match reward_data {
+                        Some(r) => (r.rewards_max_spread, r.rewards_min_size),
+                        None => (Decimal::ZERO, Decimal::ZERO),
+                    };
+                    Some(RewardMarketCandidate {
+                        market: m.clone(),
+                        density,
+                        clob_rewards_max_spread: max_spread,
+                        clob_rewards_min_size: min_size,
+                    })
+                })
+                .collect()
+        }
+        "hybrid" => {
+            // Auto-discovered + always include manual markets
+            let mut auto = select_reward_markets_with_clob_data(markets, clob_rewards, config);
+
+            let manual_cids: std::collections::HashSet<alloy::primitives::B256> = config
+                .manual_markets
+                .iter()
+                .filter_map(|o| {
+                    o.condition_id
+                        .parse::<alloy::primitives::B256>()
+                        .ok()
+                })
+                .collect();
+
+            let auto_cids: std::collections::HashSet<alloy::primitives::B256> =
+                auto.iter().map(|c| c.market.condition_id).collect();
+
+            let reward_map: std::collections::HashMap<alloy::primitives::B256, &ClobRewardData> =
+                clob_rewards.iter().map(|r| (r.condition_id, r)).collect();
+
+            // Add manual markets not already in auto list
+            for m in markets {
+                if manual_cids.contains(&m.condition_id)
+                    && !auto_cids.contains(&m.condition_id)
+                    && m.active
+                    && (m.tokens.len() == 2 || config.allow_neg_risk)
+                    && (!m.neg_risk || config.allow_neg_risk)
+                {
+                    let reward_data = reward_map.get(&m.condition_id);
+                    let daily_rate = reward_data.map_or(Decimal::ZERO, |r| r.total_daily_rate);
+                    let density = daily_rate / (m.liquidity + Decimal::ONE);
+                    let (max_spread, min_size) = match reward_data {
+                        Some(r) => (r.rewards_max_spread, r.rewards_min_size),
+                        None => (Decimal::ZERO, Decimal::ZERO),
+                    };
+                    auto.push(RewardMarketCandidate {
+                        market: m.clone(),
+                        density,
+                        clob_rewards_max_spread: max_spread,
+                        clob_rewards_min_size: min_size,
+                    });
+                }
+            }
+
+            auto
+        }
+        _ => {
+            // "auto" or any other value — backward compatible
+            select_reward_markets_with_clob_data(markets, clob_rewards, config)
+        }
+    }
+}
+
+/// Get the effective config value for a specific market, merging global and per-market overrides.
+pub fn effective_market_config(
+    global: &LiquidityRewardsConfig,
+    condition_id: &alloy::primitives::B256,
+) -> EffectiveMarketConfig {
+    let cid_hex = format!("{:#x}", condition_id);
+
+    let override_entry = global.manual_markets.iter().find(|o| o.condition_id == cid_hex);
+
+    EffectiveMarketConfig {
+        max_position_per_market: override_entry
+            .and_then(|o| o.max_position_per_market)
+            .unwrap_or(global.max_position_per_market),
+        spread_fraction: override_entry
+            .and_then(|o| o.spread_fraction)
+            .unwrap_or(global.spread_fraction),
+        quote_yes: override_entry
+            .and_then(|o| o.quote_yes)
+            .unwrap_or(global.quote_yes),
+        quote_no: override_entry
+            .and_then(|o| o.quote_no)
+            .unwrap_or(global.quote_no),
+        order_depth_level: override_entry
+            .and_then(|o| o.order_depth_level)
+            .unwrap_or(global.order_depth_level),
+    }
+}
+
+/// Resolved per-market configuration after merging global + override.
+#[derive(Debug, Clone)]
+pub struct EffectiveMarketConfig {
+    pub max_position_per_market: Decimal,
+    pub spread_fraction: Decimal,
+    pub quote_yes: bool,
+    pub quote_no: bool,
+    pub order_depth_level: usize,
 }
 
 // ──── Tests ────
@@ -648,5 +921,272 @@ mod tests {
         );
         assert!(!should_cancel_depth_order(&book2, dec!(0.53), false, 2),
             "Sell at level 3 should NOT trigger cancel when cancel_depth=2");
+    }
+
+    // ──── Balance-Aware Sizing tests ────
+
+    #[test]
+    fn test_balance_aware_size_buy() {
+        // balance=100 USDC, 4 sides being quoted, bid price=0.40
+        // per_side_budget = 100/4 = 25
+        // affordable = floor_2dp(25/0.40) = floor_2dp(62.50) = 62.50
+        let size = balance_aware_size(
+            dec!(0.40), dec!(100), 4, dec!(100), dec!(500), dec!(5),
+        );
+        assert_eq!(size, dec!(62.50));
+    }
+
+    #[test]
+    fn test_balance_aware_size_sell() {
+        // Sell: unit_cost = 1 - bid_price for the complement. Here price = 0.60
+        // balance=50, 2 sides, max_pos=200, remaining_exp=1000
+        // per_side_budget = 50/2 = 25
+        // affordable = floor(25/0.60) = floor(41.666..) = 41.66
+        let size = balance_aware_size(
+            dec!(0.60), dec!(50), 2, dec!(200), dec!(1000), dec!(5),
+        );
+        assert_eq!(size, dec!(41.66));
+    }
+
+    #[test]
+    fn test_balance_aware_size_respects_limits() {
+        // affordable=100 but max_position=30 → 30
+        let size = balance_aware_size(
+            dec!(0.50), dec!(100), 2, dec!(30), dec!(500), dec!(5),
+        );
+        assert_eq!(size, dec!(30));
+
+        // affordable=62 but remaining_exposure=10 → 10
+        let size = balance_aware_size(
+            dec!(0.40), dec!(100), 4, dec!(100), dec!(10), dec!(5),
+        );
+        assert_eq!(size, dec!(10));
+
+        // Result below min_order_size → 0
+        let size = balance_aware_size(
+            dec!(0.40), dec!(100), 4, dec!(100), dec!(3), dec!(5),
+        );
+        assert_eq!(size, Decimal::ZERO);
+    }
+
+    // ──── Cooldown tests ────
+
+    #[test]
+    fn test_cooldown_blocks() {
+        let now = std::time::Instant::now();
+        let failure = now; // Just failed
+        let cooldown = std::time::Duration::from_secs(60);
+        assert!(is_order_on_cooldown(failure, now, cooldown));
+    }
+
+    #[test]
+    fn test_cooldown_allows_after_expiry() {
+        let failure = std::time::Instant::now();
+        // Simulate time passing by using duration arithmetic
+        let cooldown = std::time::Duration::from_secs(0); // Zero cooldown = always allowed
+        assert!(!is_order_on_cooldown(failure, failure, cooldown));
+    }
+
+    // ──── Reconcile tests ────
+
+    #[test]
+    fn test_reconcile_no_change() {
+        let desired = vec![DesiredOrder {
+            token_id: U256::from(1u64),
+            is_buy: true,
+            price: dec!(0.50),
+            size: dec!(100),
+        }];
+        let existing = vec![
+            ("order1".to_string(), U256::from(1u64), true, dec!(0.50)),
+        ];
+        let result = reconcile_desired_vs_existing(&desired, &existing, 50);
+        assert_eq!(result.kept, 1);
+        assert!(result.to_cancel.is_empty());
+        assert!(result.to_place.is_empty());
+    }
+
+    #[test]
+    fn test_reconcile_price_drift() {
+        let desired = vec![DesiredOrder {
+            token_id: U256::from(1u64),
+            is_buy: true,
+            price: dec!(0.50),
+            size: dec!(100),
+        }];
+        // Existing order drifted to 0.48 — 400 bps drift > 50 bps tolerance
+        let existing = vec![
+            ("order1".to_string(), U256::from(1u64), true, dec!(0.48)),
+        ];
+        let result = reconcile_desired_vs_existing(&desired, &existing, 50);
+        assert_eq!(result.kept, 0);
+        assert_eq!(result.to_cancel.len(), 1);
+        assert_eq!(result.to_place.len(), 1);
+    }
+
+    #[test]
+    fn test_reconcile_new_side() {
+        // No existing orders, want to place a new one
+        let desired = vec![DesiredOrder {
+            token_id: U256::from(1u64),
+            is_buy: false,
+            price: dec!(0.55),
+            size: dec!(50),
+        }];
+        let existing: Vec<(String, alloy::primitives::U256, bool, Decimal)> = vec![];
+        let result = reconcile_desired_vs_existing(&desired, &existing, 50);
+        assert_eq!(result.kept, 0);
+        assert!(result.to_cancel.is_empty());
+        assert_eq!(result.to_place.len(), 1);
+    }
+
+    // ──── Hybrid market selection tests ────
+
+    #[test]
+    fn test_hybrid_mode_auto_backward_compatible() {
+        let config = default_config(); // market_mode = "auto"
+        let clob_rewards = vec![ClobRewardData {
+            condition_id: B256::from(U256::from(1u64)),
+            rewards_max_spread: dec!(0.04),
+            rewards_min_size: dec!(5),
+            total_daily_rate: dec!(10),
+        }];
+        let markets = vec![
+            make_reward_market(1, Some(dec!(10)), dec!(100), Some(dec!(5)), Some(dec!(0.04))),
+        ];
+        let result = select_reward_markets_hybrid(&markets, &clob_rewards, &config);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_hybrid_mode_manual_only() {
+        let mut config = default_config();
+        config.market_mode = "manual".to_string();
+        config.manual_markets = vec![pa_core::config::LrMarketOverride {
+            condition_id: format!("{:#x}", B256::from(U256::from(2u64))),
+            max_position_per_market: None,
+            spread_fraction: None,
+            quote_yes: None,
+            quote_no: None,
+            order_depth_level: None,
+        }];
+        let clob_rewards = vec![
+            ClobRewardData {
+                condition_id: B256::from(U256::from(1u64)),
+                rewards_max_spread: dec!(0.04),
+                rewards_min_size: dec!(5),
+                total_daily_rate: dec!(10),
+            },
+            ClobRewardData {
+                condition_id: B256::from(U256::from(2u64)),
+                rewards_max_spread: dec!(0.04),
+                rewards_min_size: dec!(5),
+                total_daily_rate: dec!(5),
+            },
+        ];
+        let markets = vec![
+            make_reward_market(1, Some(dec!(10)), dec!(100), Some(dec!(5)), Some(dec!(0.04))),
+            make_reward_market(2, Some(dec!(5)), dec!(100), Some(dec!(5)), Some(dec!(0.04))),
+        ];
+        let result = select_reward_markets_hybrid(&markets, &clob_rewards, &config);
+        // Only market 2 should be selected (manual)
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].market.condition_id, B256::from(U256::from(2u64)));
+    }
+
+    #[test]
+    fn test_hybrid_mode_merges() {
+        let mut config = default_config();
+        config.market_mode = "hybrid".to_string();
+        config.manual_markets = vec![pa_core::config::LrMarketOverride {
+            condition_id: format!("{:#x}", B256::from(U256::from(3u64))),
+            max_position_per_market: Some(dec!(200)),
+            spread_fraction: None,
+            quote_yes: None,
+            quote_no: None,
+            order_depth_level: None,
+        }];
+        let clob_rewards = vec![
+            ClobRewardData {
+                condition_id: B256::from(U256::from(1u64)),
+                rewards_max_spread: dec!(0.04),
+                rewards_min_size: dec!(5),
+                total_daily_rate: dec!(10),
+            },
+        ];
+        let markets = vec![
+            make_reward_market(1, Some(dec!(10)), dec!(100), Some(dec!(5)), Some(dec!(0.04))),
+            make_reward_market(3, Some(dec!(3)), dec!(50), Some(dec!(5)), Some(dec!(0.04))),
+        ];
+        let result = select_reward_markets_hybrid(&markets, &clob_rewards, &config);
+        // Market 1 from auto + market 3 from manual
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_effective_market_config_override() {
+        let mut config = default_config();
+        let cid = B256::from(U256::from(42u64));
+        config.manual_markets = vec![pa_core::config::LrMarketOverride {
+            condition_id: format!("{:#x}", cid),
+            max_position_per_market: Some(dec!(500)),
+            spread_fraction: Some(dec!(0.90)),
+            quote_yes: Some(true),
+            quote_no: Some(false),
+            order_depth_level: Some(5),
+        }];
+        let eff = effective_market_config(&config, &cid);
+        assert_eq!(eff.max_position_per_market, dec!(500));
+        assert_eq!(eff.spread_fraction, dec!(0.90));
+        assert!(eff.quote_yes);
+        assert!(!eff.quote_no);
+        assert_eq!(eff.order_depth_level, 5);
+    }
+
+    // ──── NegRisk filter tests ────
+
+    #[test]
+    fn test_neg_risk_filtered_by_default() {
+        let config = default_config(); // allow_neg_risk = false
+        let mut m = make_reward_market(1, Some(dec!(10)), dec!(100), Some(dec!(5)), Some(dec!(0.04)));
+        m.neg_risk = true;
+        let markets = vec![m];
+        let result = select_reward_markets(&markets, &config);
+        assert!(result.is_empty(), "NegRisk should be filtered by default");
+    }
+
+    #[test]
+    fn test_neg_risk_allowed_with_flag() {
+        let mut config = default_config();
+        config.allow_neg_risk = true;
+        config.market_mode = "manual".to_string();
+
+        let mut m = make_reward_market(1, Some(dec!(10)), dec!(100), Some(dec!(5)), Some(dec!(0.04)));
+        m.neg_risk = true;
+        // NegRisk markets can have >2 tokens — add a 3rd
+        m.tokens.push(TokenInfo {
+            token_id: U256::from(13u64),
+            outcome: Outcome::Yes,
+            complement_id: U256::ZERO,
+        });
+        config.manual_markets = vec![pa_core::config::LrMarketOverride {
+            condition_id: format!("{:#x}", m.condition_id),
+            max_position_per_market: None,
+            spread_fraction: None,
+            quote_yes: None,
+            quote_no: None,
+            order_depth_level: None,
+        }];
+
+        let clob_rewards = vec![ClobRewardData {
+            condition_id: m.condition_id,
+            rewards_max_spread: dec!(0.04),
+            rewards_min_size: dec!(5),
+            total_daily_rate: dec!(10),
+        }];
+
+        let markets = vec![m];
+        let result = select_reward_markets_hybrid(&markets, &clob_rewards, &config);
+        assert_eq!(result.len(), 1, "NegRisk should be allowed with allow_neg_risk=true");
     }
 }

@@ -5,6 +5,8 @@ use axum::extract::{Path, State};
 use axum::response::Json;
 use axum::{Router, routing::get};
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
@@ -14,6 +16,29 @@ use pa_storage::config_store::{ConfigStore, validate_section, extract_section};
 
 use crate::health::HealthCheck;
 
+/// Runtime status of a single LR-quoted market.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LrMarketStatus {
+    pub condition_id: String,
+    pub question: String,
+    pub daily_rate: Decimal,
+    pub outstanding_orders: usize,
+    pub yes_bid: Option<Decimal>,
+    pub yes_ask: Option<Decimal>,
+    pub no_bid: Option<Decimal>,
+    pub no_ask: Option<Decimal>,
+}
+
+/// LR task runtime status, written by the LR background task and read by the API.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LrRuntimeStatus {
+    pub active_markets: Vec<LrMarketStatus>,
+    pub total_exposure: Decimal,
+    pub cached_balance: Decimal,
+    pub market_mode: String,
+    pub last_refresh: Option<DateTime<Utc>>,
+}
+
 /// Shared API state for all Axum handlers.
 pub struct ApiState {
     pub config: Arc<ArcSwap<Settings>>,
@@ -21,6 +46,8 @@ pub struct ApiState {
     pub config_tx: tokio::sync::watch::Sender<u64>,
     pub start_time: DateTime<Utc>,
     pub health_checks: Vec<(&'static str, HealthCheck)>,
+    /// Optional LR runtime status, populated by the LR background task.
+    pub lr_status: Option<Arc<tokio::sync::RwLock<LrRuntimeStatus>>>,
 }
 
 /// Build the full Axum router with health, metrics, config API, and SPA fallback.
@@ -29,7 +56,8 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
         .route("/api/config", get(get_all_config))
         .route("/api/config/{section}", get(get_section).put(put_section))
         .route("/api/config/history/{section}", get(get_history))
-        .route("/api/status", get(get_status));
+        .route("/api/status", get(get_status))
+        .route("/api/lr/status", get(get_lr_status));
 
     Router::new()
         .route("/health", get(health_handler))
@@ -263,4 +291,15 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         "lr_enabled": settings.liquidity_rewards.enabled,
         "event_calendar_enabled": settings.event_calendar.enabled,
     }))
+}
+
+/// GET /api/lr/status — LR runtime status.
+async fn get_lr_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
+    match &state.lr_status {
+        Some(lr) => {
+            let status = lr.read().await;
+            Json(serde_json::to_value(&*status).unwrap_or(json!({})))
+        }
+        None => Json(json!({"error": "LR not running"})),
+    }
 }

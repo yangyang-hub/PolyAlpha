@@ -207,3 +207,25 @@ pub static LR_FILL_REQUOTES: LazyLock<IntCounter> = LazyLock::new(|| {
     REGISTRY.register(Box::new(counter.clone())).unwrap();
     counter
 });
+
+/// Number of LR orders skipped because an identical order already exists.
+pub static LR_ORDERS_SKIPPED_DUPLICATE: LazyLock<IntCounter> = LazyLock::new(|| {
+    let counter = IntCounter::new(
+        "lr_orders_skipped_duplicate_total",
+        "LR orders skipped because identical order already exists",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
+/// Number of LR orders that failed scoring verification.
+pub static LR_ORDERS_NOT_SCORING: LazyLock<IntCounter> = LazyLock::new(|| {
+    let counter = IntCounter::new(
+        "lr_orders_not_scoring_total",
+        "LR orders that failed scoring verification",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});

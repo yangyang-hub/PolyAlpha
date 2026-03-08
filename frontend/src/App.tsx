@@ -5,6 +5,7 @@ import StrategyConfig from "./pages/StrategyConfig";
 import RiskConfig from "./pages/RiskConfig";
 import MarketConfig from "./pages/MarketConfig";
 import MonitorConfig from "./pages/MonitorConfig";
+import LRMarkets from "./pages/LRMarkets";
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
         <Route path="/risk" element={<RiskConfig />} />
         <Route path="/market" element={<MarketConfig />} />
         <Route path="/monitor" element={<MonitorConfig />} />
+        <Route path="/lr" element={<LRMarkets />} />
       </Routes>
     </Layout>
   );

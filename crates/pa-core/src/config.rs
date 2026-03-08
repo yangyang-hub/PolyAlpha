@@ -587,6 +587,18 @@ pub struct LiquidityRewardsConfig {
     /// Example: 2 = cancel when order is at buy2/sell2 position.
     #[serde(default = "default_lr_cancel_depth")]
     pub cancel_depth_level: usize,
+    /// Cooldown (seconds) after a failed order before retrying that (token, side, price).
+    #[serde(default = "default_lr_failed_cooldown")]
+    pub failed_cooldown_secs: u64,
+    /// Market selection mode: "auto" (default), "manual", or "hybrid".
+    #[serde(default = "default_lr_market_mode")]
+    pub market_mode: String,
+    /// Manually managed markets with optional per-market config overrides.
+    #[serde(default)]
+    pub manual_markets: Vec<LrMarketOverride>,
+    /// Whether to allow NegRisk multi-outcome markets for LR quoting.
+    #[serde(default)]
+    pub allow_neg_risk: bool,
 }
 
 fn default_lr_max_markets() -> usize { 10 }
@@ -602,6 +614,33 @@ fn default_lr_skew() -> Decimal { Decimal::new(50, 2) } // 0.50
 fn default_lr_min_daily_rate() -> Decimal { Decimal::ONE }
 fn default_lr_fill_check() -> u64 { 10 }
 fn default_lr_cancel_depth() -> usize { 2 }
+fn default_lr_failed_cooldown() -> u64 { 60 }
+fn default_lr_market_mode() -> String { "auto".to_string() }
+
+/// Per-market configuration override for liquidity rewards.
+///
+/// Allows customizing quoting parameters for specific markets when using
+/// manual or hybrid market selection mode.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LrMarketOverride {
+    /// Condition ID hex string (e.g. "0x1234...").
+    pub condition_id: String,
+    /// Override max position per market (USDC).
+    #[serde(default)]
+    pub max_position_per_market: Option<Decimal>,
+    /// Override spread fraction.
+    #[serde(default)]
+    pub spread_fraction: Option<Decimal>,
+    /// Override whether to quote YES side.
+    #[serde(default)]
+    pub quote_yes: Option<bool>,
+    /// Override whether to quote NO side.
+    #[serde(default)]
+    pub quote_no: Option<bool>,
+    /// Override order depth level.
+    #[serde(default)]
+    pub order_depth_level: Option<usize>,
+}
 
 impl Default for LiquidityRewardsConfig {
     fn default() -> Self {
@@ -624,6 +663,10 @@ impl Default for LiquidityRewardsConfig {
             fill_check_secs: default_lr_fill_check(),
             order_depth_level: 0,
             cancel_depth_level: default_lr_cancel_depth(),
+            failed_cooldown_secs: default_lr_failed_cooldown(),
+            market_mode: default_lr_market_mode(),
+            manual_markets: vec![],
+            allow_neg_risk: false,
         }
     }
 }

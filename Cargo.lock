@@ -3243,6 +3243,7 @@ dependencies = [
  "pa-storage",
  "prometheus",
  "reqwest 0.12.28",
+ "rust_decimal",
  "serde",
  "serde_json",
  "socket2 0.5.10",

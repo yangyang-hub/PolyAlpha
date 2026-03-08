@@ -215,6 +215,8 @@ async fn main() -> Result<()> {
 
     // --- Start health/metrics/config API server ---
     let ws_connected = market_data.ws_feed_ws_connected().await;
+    let lr_runtime_status: Arc<tokio::sync::RwLock<pa_monitor::api::LrRuntimeStatus>> =
+        Arc::new(tokio::sync::RwLock::new(pa_monitor::api::LrRuntimeStatus::default()));
     let api_state = Arc::new(ApiState {
         config: Arc::clone(&config_arc),
         config_store: config_store.unwrap_or_else(|| {
@@ -233,6 +235,7 @@ async fn main() -> Result<()> {
                 }),
             ),
         ],
+        lr_status: Some(Arc::clone(&lr_runtime_status)),
     });
     let health_port = settings.monitor.health_port;
     tokio::spawn(async move {
@@ -868,6 +871,7 @@ async fn main() -> Result<()> {
             let lr_chain_id = ctx.chain_id;
             let lr_name = acct_name.clone();
             let lr_update_rx = market_data.ws_feed().await.subscribe_updates();
+            let lr_status_ref = Arc::clone(&lr_runtime_status);
 
             tokio::spawn(async move {
                 let lr_signer = match PrivateKeySigner::from_str(&lr_private_key) {
@@ -913,6 +917,9 @@ async fn main() -> Result<()> {
                 let mut last_quoted_mid: std::collections::HashMap<alloy::primitives::U256, Decimal> = std::collections::HashMap::new();
                 let mut token_to_condition: std::collections::HashMap<alloy::primitives::U256, alloy::primitives::B256> = std::collections::HashMap::new();
                 let mut last_quote_time: std::collections::HashMap<alloy::primitives::B256, std::time::Instant> = std::collections::HashMap::new();
+                let mut cooldown_map: std::collections::HashMap<(alloy::primitives::U256, bool, Decimal), std::time::Instant> = std::collections::HashMap::new();
+                let cooldown_duration = Duration::from_secs(lr_config.failed_cooldown_secs);
+                let mut cached_balance = effective_max_exposure; // Start with effective cap, refreshed each tick
 
                 // Fetch current rewards from CLOB API
                 let clob_rewards = match fetch_clob_rewards(&lr_clob).await {
@@ -924,7 +931,7 @@ async fn main() -> Result<()> {
                 };
                 
                 let markets_init = lr_shared.read().await;
-                let mut active_candidates = pa_strategy::liquidity_rewards::select_reward_markets_with_clob_data(
+                let mut active_candidates = pa_strategy::liquidity_rewards::select_reward_markets_hybrid(
                     &markets_init, &clob_rewards, &lr_config,
                 );
                 drop(markets_init);
@@ -947,11 +954,26 @@ async fn main() -> Result<()> {
                     for (idx, c) in active_candidates.iter().enumerate() {
                         let cid = c.market.condition_id;
                         cid_to_candidate_idx.insert(cid, idx);
-                        if c.market.tokens.len() >= 2 {
-                            token_to_condition.insert(c.market.tokens[0].token_id, cid);
-                            token_to_condition.insert(c.market.tokens[1].token_id, cid);
+                        for t in &c.market.tokens {
+                            token_to_condition.insert(t.token_id, cid);
                         }
                     }
+
+                    // Count total sides being quoted for balance splitting
+                    let sides_being_quoted: u32 = active_candidates.iter()
+                        .map(|c| {
+                            let eff = pa_strategy::liquidity_rewards::effective_market_config(&lr_config, &c.market.condition_id);
+                            let mut sides = 0u32;
+                            if c.market.tokens.len() == 2 {
+                                if eff.quote_yes { sides += 1; }
+                                if eff.quote_no { sides += 1; }
+                            } else {
+                                sides += c.market.tokens.len() as u32;
+                            }
+                            sides
+                        })
+                        .sum::<u32>()
+                        .max(1);
 
                     pa_monitor::metrics::LR_ACTIVE_MARKETS.set(active_candidates.len() as f64);
 
@@ -960,7 +982,8 @@ async fn main() -> Result<()> {
                         let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
                             &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
                             candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
-                            effective_max_exposure,
+                            effective_max_exposure, cached_balance, sides_being_quoted,
+                            &cooldown_map, cooldown_duration,
                         ).await;
                         total_exposure += exp;
                         let cid = candidate.market.condition_id;
@@ -1048,7 +1071,8 @@ async fn main() -> Result<()> {
                                             let (metas, _exp, yes_mid, no_mid) = lr_quote_one_market(
                                                 &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, current_exposure,
                                                 candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
-                                                effective_max_exposure,
+                                                effective_max_exposure, cached_balance, 2,
+                                                &cooldown_map, cooldown_duration,
                                             ).await;
                                             if !metas.is_empty() {
                                                 outstanding_orders.insert(cid, metas.into_iter().collect());
@@ -1101,7 +1125,8 @@ async fn main() -> Result<()> {
                                             let (metas, _exp, yes_mid, no_mid) = lr_quote_one_market(
                                                 &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, current_exposure,
                                                 candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
-                                                effective_max_exposure,
+                                                effective_max_exposure, cached_balance, 2,
+                                                &cooldown_map, cooldown_duration,
                                             ).await;
                                             if !metas.is_empty() {
                                                 outstanding_orders.insert(cid, metas.into_iter().collect());
@@ -1135,13 +1160,30 @@ async fn main() -> Result<()> {
                                 continue;
                             }
 
+                            // Refresh balance for budget splitting
+                            if let Ok(bal) = lr_clob.get_balance().await {
+                                cached_balance = bal.min(lr_config.max_total_exposure);
+                            }
+                            // Prune expired cooldowns
+                            let now_cd = std::time::Instant::now();
+                            cooldown_map.retain(|_, t| now_cd.duration_since(*t) < cooldown_duration);
+
+                            let sides_being_quoted: u32 = active_candidates.iter()
+                                .map(|c| {
+                                    let eff = pa_strategy::liquidity_rewards::effective_market_config(&lr_config, &c.market.condition_id);
+                                    if c.market.tokens.len() == 2 {
+                                        (if eff.quote_yes { 1u32 } else { 0 }) + (if eff.quote_no { 1 } else { 0 })
+                                    } else { c.market.tokens.len() as u32 }
+                                }).sum::<u32>().max(1);
+
                             let mut total_exposure = Decimal::ZERO;
                             for candidate in &active_candidates {
                                 let cid = candidate.market.condition_id;
                                 let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
                                     &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
                                     candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
-                                    effective_max_exposure,
+                                    effective_max_exposure, cached_balance, sides_being_quoted,
+                                    &cooldown_map, cooldown_duration,
                                 ).await;
                                 total_exposure += exp;
                                 if !metas.is_empty() {
@@ -1159,6 +1201,55 @@ async fn main() -> Result<()> {
                                 active_markets = outstanding_orders.len(),
                                 "LR: fallback quote refresh complete"
                             );
+
+                            // Update LR runtime status
+                            {
+                                let mut status = lr_status_ref.write().await;
+                                status.active_markets = active_candidates.iter().map(|c| {
+                                    let cid = c.market.condition_id;
+                                    let order_count = outstanding_orders.get(&cid).map_or(0, |m| m.len());
+                                    pa_monitor::api::LrMarketStatus {
+                                        condition_id: format!("{:#x}", cid),
+                                        question: c.market.question.clone(),
+                                        daily_rate: c.density * (c.market.liquidity + Decimal::ONE),
+                                        outstanding_orders: order_count,
+                                        yes_bid: None,
+                                        yes_ask: None,
+                                        no_bid: None,
+                                        no_ask: None,
+                                    }
+                                }).collect();
+                                status.total_exposure = total_exposure;
+                                status.cached_balance = cached_balance;
+                                status.market_mode = lr_config.market_mode.clone();
+                                status.last_refresh = Some(Utc::now());
+                            }
+
+                            // Scoring verification
+                            if lr_config.verify_scoring {
+                                let order_ids: Vec<String> = outstanding_orders.values()
+                                    .flat_map(|m| m.keys().cloned())
+                                    .collect();
+                                if !order_ids.is_empty() {
+                                    tokio::time::sleep(Duration::from_secs(2)).await;
+                                    let refs: Vec<&str> = order_ids.iter().map(|s| s.as_str()).collect();
+                                    match lr_clob.are_orders_scoring(&refs).await {
+                                        Ok(scoring_map) => {
+                                            for (oid, scoring) in &scoring_map {
+                                                if !scoring {
+                                                    pa_monitor::metrics::LR_ORDERS_NOT_SCORING.inc();
+                                                    tracing::warn!(
+                                                        account = %lr_name,
+                                                        order_id = %oid,
+                                                        "LR: order NOT scoring"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Err(e) => tracing::debug!(error = %e, "LR: scoring check failed"),
+                                    }
+                                }
+                            }
                         }
                         _ = market_interval.tick() => {
                             let prev_ids: Vec<String> = outstanding_orders.drain()
@@ -1182,7 +1273,7 @@ async fn main() -> Result<()> {
                             };
                             
                             let markets_snapshot = lr_shared.read().await;
-                            active_candidates = pa_strategy::liquidity_rewards::select_reward_markets_with_clob_data(
+                            active_candidates = pa_strategy::liquidity_rewards::select_reward_markets_hybrid(
                                 &markets_snapshot, &clob_rewards, &lr_config,
                             );
                             drop(markets_snapshot);
@@ -1194,13 +1285,24 @@ async fn main() -> Result<()> {
                             for (idx, c) in active_candidates.iter().enumerate() {
                                 let cid = c.market.condition_id;
                                 cid_to_candidate_idx.insert(cid, idx);
-                                if c.market.tokens.len() >= 2 {
-                                    token_to_condition.insert(c.market.tokens[0].token_id, cid);
-                                    token_to_condition.insert(c.market.tokens[1].token_id, cid);
+                                for t in &c.market.tokens {
+                                    token_to_condition.insert(t.token_id, cid);
                                 }
                             }
 
                             pa_monitor::metrics::LR_ACTIVE_MARKETS.set(active_candidates.len() as f64);
+
+                            // Refresh balance for market refresh cycle
+                            if let Ok(bal) = lr_clob.get_balance().await {
+                                cached_balance = bal.min(lr_config.max_total_exposure);
+                            }
+                            let sides_being_quoted: u32 = active_candidates.iter()
+                                .map(|c| {
+                                    let eff = pa_strategy::liquidity_rewards::effective_market_config(&lr_config, &c.market.condition_id);
+                                    if c.market.tokens.len() == 2 {
+                                        (if eff.quote_yes { 1u32 } else { 0 }) + (if eff.quote_no { 1 } else { 0 })
+                                    } else { c.market.tokens.len() as u32 }
+                                }).sum::<u32>().max(1);
 
                             let mut total_exposure = Decimal::ZERO;
                             for candidate in &active_candidates {
@@ -1208,7 +1310,8 @@ async fn main() -> Result<()> {
                                 let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
                                     &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
                                     candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
-                                    effective_max_exposure,
+                                    effective_max_exposure, cached_balance, sides_being_quoted,
+                                    &cooldown_map, cooldown_duration,
                                 ).await;
                                 total_exposure += exp;
                                 if !metas.is_empty() {
@@ -1309,7 +1412,8 @@ async fn main() -> Result<()> {
                                             let (metas, _exp, yes_mid, no_mid) = lr_quote_one_market(
                                                 &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, current_exposure,
                                                 candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
-                                                effective_max_exposure,
+                                                effective_max_exposure, cached_balance, 2,
+                                                &cooldown_map, cooldown_duration,
                                             ).await;
                                             if !metas.is_empty() {
                                                 outstanding_orders.insert(cid, metas.into_iter().collect());
@@ -1880,165 +1984,134 @@ async fn lr_quote_one_market(
     rewards_max_spread: Decimal,
     rewards_min_size: Decimal,
     effective_max_exposure: Decimal,
+    cached_balance: Decimal,
+    sides_being_quoted: u32,
+    cooldown_map: &std::collections::HashMap<(alloy::primitives::U256, bool, Decimal), std::time::Instant>,
+    cooldown_duration: Duration,
 ) -> (Vec<(String, LrOrderMeta)>, Decimal, Option<Decimal>, Option<Decimal>) {
     let cid = market.condition_id;
-    let yes_tid = market.tokens[0].token_id;
-    let no_tid = market.tokens[1].token_id;
+    let eff = pa_strategy::liquidity_rewards::effective_market_config(config, &cid);
 
     let mut order_metas: Vec<(String, LrOrderMeta)> = Vec::new();
     let mut exposure_added = Decimal::ZERO;
-    let mut yes_mid_out: Option<Decimal> = None;
-    let mut no_mid_out: Option<Decimal> = None;
+    let mut first_mid_out: Option<Decimal> = None;
+    let mut second_mid_out: Option<Decimal> = None;
 
-    // Quote YES side
-    if config.quote_yes {
-        let yes_position = rm.get_position_size(&yes_tid);
-        if let Some(yes_book) = cache.get(&yes_tid) {
-            if let Some(mid) = yes_book.midpoint() {
-                yes_mid_out = Some(mid);
+    // Iterate token pairs: for binary (2 tokens) → YES/NO; for NegRisk → all tokens
+    let token_pairs: Vec<(alloy::primitives::U256, bool, bool)> = if market.tokens.len() == 2 {
+        let mut pairs = Vec::new();
+        if eff.quote_yes {
+            pairs.push((market.tokens[0].token_id, true, true)); // YES bid+ask
+        }
+        if eff.quote_no {
+            pairs.push((market.tokens[1].token_id, false, true)); // NO bid+ask
+        }
+        pairs
+    } else {
+        // NegRisk: quote each token
+        market.tokens.iter().map(|t| (t.token_id, true, true)).collect()
+    };
 
-                let quote_opt = if config.order_depth_level > 0 {
-                    pa_strategy::liquidity_rewards::compute_depth_quotes(
-                        &yes_book, config.order_depth_level,
-                        rewards_max_spread, yes_position, config, rewards_min_size,
-                    )
-                } else {
-                    pa_strategy::liquidity_rewards::compute_quotes(
-                        mid, rewards_max_spread, yes_position,
-                        config, rewards_min_size, market.tick_size,
-                    )
-                };
+    for (idx, &(tid, is_yes_side, _do_ask)) in token_pairs.iter().enumerate() {
+        let position = rm.get_position_size(&tid);
+        let Some(book) = cache.get(&tid) else { continue };
+        let Some(mid) = book.midpoint() else { continue };
 
-                if let Some(quote) = quote_opt {
-                    tracing::info!(
-                        market = %cid, side = "YES", midpoint = %mid,
-                        rewards_max_spread = %rewards_max_spread,
-                        bid = %quote.bid_price, ask = %quote.ask_price,
-                        "LR: computed quotes"
-                    );
-                    let remaining_pos = (config.max_position_per_market - yes_position).max(Decimal::ZERO);
-                    let remaining_exp = (effective_max_exposure - current_exposure - exposure_added).max(Decimal::ZERO);
-                    // Convert remaining exposure (USDC) to max token count at bid price
-                    let max_from_exp = if quote.bid_price > Decimal::ZERO {
-                        remaining_exp / quote.bid_price
-                    } else {
-                        Decimal::ZERO
-                    };
-                    let bid_size = quote.size.min(remaining_pos).min(max_from_exp);
+        if idx == 0 { first_mid_out = Some(mid); }
+        if idx == 1 { second_mid_out = Some(mid); }
 
-                    if bid_size >= config.min_order_size {
-                        match clob.buy_limit_post_only(yes_tid, quote.bid_price, bid_size).await {
-                            Ok(r) if !r.order_id.is_empty() => {
-                                pa_monitor::metrics::LR_ORDERS_PLACED.inc();
-                                exposure_added += bid_size * quote.bid_price;
-                                order_metas.push((r.order_id, LrOrderMeta {
-                                    token_id: yes_tid, is_buy: true,
-                                    price: quote.bid_price, size: bid_size,
-                                    last_synced_matched: Decimal::ZERO,
-                                }));
-                            }
-                            Ok(_) => {}
-                            Err(e) => tracing::debug!(error = %e, market = %cid, "LR: YES bid failed"),
-                        }
+        let quote_opt = if eff.order_depth_level > 0 {
+            pa_strategy::liquidity_rewards::compute_depth_quotes(
+                &book, eff.order_depth_level,
+                rewards_max_spread, position, config, rewards_min_size,
+            )
+        } else {
+            pa_strategy::liquidity_rewards::compute_quotes(
+                mid, rewards_max_spread, position,
+                config, rewards_min_size, market.tick_size,
+            )
+        };
+
+        let Some(quote) = quote_opt else { continue };
+
+        tracing::info!(
+            market = %cid, side = if is_yes_side { "YES" } else { "NO" },
+            token = %tid, midpoint = %mid,
+            rewards_max_spread = %rewards_max_spread,
+            bid = %quote.bid_price, ask = %quote.ask_price,
+            "LR: computed quotes"
+        );
+
+        // ── Bid (buy) ──
+        let remaining_pos = (eff.max_position_per_market - position).max(Decimal::ZERO);
+        let remaining_exp = (effective_max_exposure - current_exposure - exposure_added).max(Decimal::ZERO);
+        let max_from_exp = if quote.bid_price > Decimal::ZERO {
+            remaining_exp / quote.bid_price
+        } else {
+            Decimal::ZERO
+        };
+
+        let balance_size = pa_strategy::liquidity_rewards::balance_aware_size(
+            quote.bid_price, cached_balance, sides_being_quoted,
+            eff.max_position_per_market, remaining_exp, config.min_order_size,
+        );
+
+        let bid_size = quote.size
+            .min(remaining_pos)
+            .min(max_from_exp)
+            .min(balance_size.max(quote.size)); // Use balance cap if available, else original
+        let bid_size = if cached_balance > Decimal::ZERO {
+            bid_size.min(balance_size)
+        } else {
+            bid_size
+        };
+
+        let bid_cooldown_key = (tid, true, quote.bid_price);
+        let bid_on_cooldown = cooldown_map.get(&bid_cooldown_key).is_some_and(|&t| {
+            pa_strategy::liquidity_rewards::is_order_on_cooldown(t, std::time::Instant::now(), cooldown_duration)
+        });
+
+        if bid_size >= config.min_order_size && !bid_on_cooldown {
+            match clob.buy_limit_post_only(tid, quote.bid_price, bid_size).await {
+                Ok(r) if !r.order_id.is_empty() => {
+                    pa_monitor::metrics::LR_ORDERS_PLACED.inc();
+                    exposure_added += bid_size * quote.bid_price;
+                    order_metas.push((r.order_id, LrOrderMeta {
+                        token_id: tid, is_buy: true,
+                        price: quote.bid_price, size: bid_size,
+                        last_synced_matched: Decimal::ZERO,
+                    }));
+                }
+                Ok(_) => {}
+                Err(e) => tracing::debug!(error = %e, market = %cid, "LR: bid failed for {}", tid),
+            }
+        }
+
+        // ── Ask (sell) — only if we hold position ──
+        if position > Decimal::ZERO {
+            let sell_size = quote.size.min(position);
+            let ask_cooldown_key = (tid, false, quote.ask_price);
+            let ask_on_cooldown = cooldown_map.get(&ask_cooldown_key).is_some_and(|&t| {
+                pa_strategy::liquidity_rewards::is_order_on_cooldown(t, std::time::Instant::now(), cooldown_duration)
+            });
+            if sell_size >= config.min_order_size && !ask_on_cooldown {
+                match clob.sell_limit_post_only(tid, quote.ask_price, sell_size).await {
+                    Ok(r) if !r.order_id.is_empty() => {
+                        pa_monitor::metrics::LR_ORDERS_PLACED.inc();
+                        order_metas.push((r.order_id, LrOrderMeta {
+                            token_id: tid, is_buy: false,
+                            price: quote.ask_price, size: sell_size,
+                            last_synced_matched: Decimal::ZERO,
+                        }));
                     }
-
-                    if yes_position > Decimal::ZERO {
-                        let sell_size = quote.size.min(yes_position);
-                        if sell_size >= config.min_order_size {
-                            match clob.sell_limit_post_only(yes_tid, quote.ask_price, sell_size).await {
-                                Ok(r) if !r.order_id.is_empty() => {
-                                    pa_monitor::metrics::LR_ORDERS_PLACED.inc();
-                                    order_metas.push((r.order_id, LrOrderMeta {
-                                        token_id: yes_tid, is_buy: false,
-                                        price: quote.ask_price, size: sell_size,
-                                        last_synced_matched: Decimal::ZERO,
-                                    }));
-                                }
-                                Ok(_) => {}
-                                Err(e) => tracing::debug!(error = %e, market = %cid, "LR: YES ask failed"),
-                            }
-                        }
-                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::debug!(error = %e, market = %cid, "LR: ask failed for {}", tid),
                 }
             }
         }
     }
 
-    // Quote NO side
-    if config.quote_no {
-        let no_position = rm.get_position_size(&no_tid);
-        if let Some(no_book) = cache.get(&no_tid) {
-            if let Some(mid) = no_book.midpoint() {
-                no_mid_out = Some(mid);
-
-                let quote_opt = if config.order_depth_level > 0 {
-                    pa_strategy::liquidity_rewards::compute_depth_quotes(
-                        &no_book, config.order_depth_level,
-                        rewards_max_spread, no_position, config, rewards_min_size,
-                    )
-                } else {
-                    pa_strategy::liquidity_rewards::compute_quotes(
-                        mid, rewards_max_spread, no_position,
-                        config, rewards_min_size, market.tick_size,
-                    )
-                };
-
-                if let Some(quote) = quote_opt {
-                    tracing::info!(
-                        market = %cid, side = "NO", midpoint = %mid,
-                        rewards_max_spread = %rewards_max_spread,
-                        bid = %quote.bid_price, ask = %quote.ask_price,
-                        "LR: computed quotes"
-                    );
-                    let remaining_pos = (config.max_position_per_market - no_position).max(Decimal::ZERO);
-                    let remaining_exp = (effective_max_exposure - current_exposure - exposure_added).max(Decimal::ZERO);
-                    // Convert remaining exposure (USDC) to max token count at bid price
-                    let max_from_exp = if quote.bid_price > Decimal::ZERO {
-                        remaining_exp / quote.bid_price
-                    } else {
-                        Decimal::ZERO
-                    };
-                    let bid_size = quote.size.min(remaining_pos).min(max_from_exp);
-
-                    if bid_size >= config.min_order_size {
-                        match clob.buy_limit_post_only(no_tid, quote.bid_price, bid_size).await {
-                            Ok(r) if !r.order_id.is_empty() => {
-                                pa_monitor::metrics::LR_ORDERS_PLACED.inc();
-                                exposure_added += bid_size * quote.bid_price;
-                                order_metas.push((r.order_id, LrOrderMeta {
-                                    token_id: no_tid, is_buy: true,
-                                    price: quote.bid_price, size: bid_size,
-                                    last_synced_matched: Decimal::ZERO,
-                                }));
-                            }
-                            Ok(_) => {}
-                            Err(e) => tracing::debug!(error = %e, market = %cid, "LR: NO bid failed"),
-                        }
-                    }
-
-                    if no_position > Decimal::ZERO {
-                        let sell_size = quote.size.min(no_position);
-                        if sell_size >= config.min_order_size {
-                            match clob.sell_limit_post_only(no_tid, quote.ask_price, sell_size).await {
-                                Ok(r) if !r.order_id.is_empty() => {
-                                    pa_monitor::metrics::LR_ORDERS_PLACED.inc();
-                                    order_metas.push((r.order_id, LrOrderMeta {
-                                        token_id: no_tid, is_buy: false,
-                                        price: quote.ask_price, size: sell_size,
-                                        last_synced_matched: Decimal::ZERO,
-                                    }));
-                                }
-                                Ok(_) => {}
-                                Err(e) => tracing::debug!(error = %e, market = %cid, "LR: NO ask failed"),
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    (order_metas, exposure_added, yes_mid_out, no_mid_out)
+    (order_metas, exposure_added, first_mid_out, second_mid_out)
 }
 
 /// Seed the OrderBookCache for a single market using its gamma prices.
