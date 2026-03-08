@@ -576,6 +576,15 @@ pub struct LiquidityRewardsConfig {
     /// How often to check for filled orders (seconds). 0 = disabled.
     #[serde(default = "default_lr_fill_check")]
     pub fill_check_secs: u64,
+    /// Order depth level: place orders at Nth price level in the orderbook.
+    /// 0 = use legacy midpoint-based compute_quotes(), N > 0 = use Nth level.
+    /// Example: 3 = place bid at buy3 price, ask at sell3 price.
+    #[serde(default)]
+    pub order_depth_level: usize,
+    /// Cancel depth level: cancel and re-quote when order reaches this depth.
+    /// Example: 2 = cancel when order is at buy2/sell2 position.
+    #[serde(default = "default_lr_cancel_depth")]
+    pub cancel_depth_level: usize,
 }
 
 fn default_lr_max_markets() -> usize { 10 }
@@ -590,6 +599,7 @@ fn default_lr_min_order_size() -> Decimal { Decimal::from(5) }
 fn default_lr_skew() -> Decimal { Decimal::new(50, 2) } // 0.50
 fn default_lr_min_daily_rate() -> Decimal { Decimal::ONE }
 fn default_lr_fill_check() -> u64 { 10 }
+fn default_lr_cancel_depth() -> usize { 2 }
 
 impl Default for LiquidityRewardsConfig {
     fn default() -> Self {
@@ -610,6 +620,8 @@ impl Default for LiquidityRewardsConfig {
             quote_yes: true,
             quote_no: true,
             fill_check_secs: default_lr_fill_check(),
+            order_depth_level: 0,
+            cancel_depth_level: default_lr_cancel_depth(),
         }
     }
 }

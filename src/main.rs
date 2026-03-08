@@ -1063,6 +1063,25 @@ async fn main() -> Result<()> {
                 };
                 tracing::info!(account = %lr_name, "LR: CLOB authenticated, starting liquidity rewards");
 
+                // Query actual USDC balance to cap exposure
+                let effective_max_exposure = match lr_clob.get_balance().await {
+                    Ok(bal) => {
+                        let cap = bal.min(lr_config.max_total_exposure);
+                        tracing::info!(
+                            account = %lr_name,
+                            balance_usdc = %bal,
+                            config_max = %lr_config.max_total_exposure,
+                            effective_cap = %cap,
+                            "LR: exposure cap set from balance"
+                        );
+                        cap
+                    }
+                    Err(e) => {
+                        tracing::warn!(account = %lr_name, error = %e, "LR: failed to query balance, using config max");
+                        lr_config.max_total_exposure
+                    }
+                };
+
                 let mut outstanding_orders: std::collections::HashMap<
                     alloy::primitives::B256,
                     std::collections::HashMap<String, LrOrderMeta>,
@@ -1118,6 +1137,7 @@ async fn main() -> Result<()> {
                         let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
                             &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
                             candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
+                            effective_max_exposure,
                         ).await;
                         total_exposure += exp;
                         let cid = candidate.market.condition_id;
@@ -1160,54 +1180,115 @@ async fn main() -> Result<()> {
                             if let Ok(update) = result {
                                 let tid = update.token_id;
                                 let Some(&cid) = token_to_condition.get(&tid) else { continue };
-                                let Some(new_mid) = lr_cache.get(&tid).and_then(|b| b.midpoint()) else { continue };
-                                let Some(&old_mid) = last_quoted_mid.get(&tid) else { continue };
-                                if old_mid <= Decimal::ZERO { continue; }
 
-                                let drift_bps = ((new_mid - old_mid).abs() / old_mid * dec!(10000)).to_u32().unwrap_or(0);
-                                if drift_bps < lr_config.requote_trigger_bps { continue; }
-
-                                let now = std::time::Instant::now();
-                                if let Some(&last_t) = last_quote_time.get(&cid) {
-                                    if now.duration_since(last_t) < requote_cooldown { continue; }
-                                }
-
-                                tracing::info!(
-                                    account = %lr_name,
-                                    token = %tid, market = %cid,
-                                    old_mid = %old_mid, new_mid = %new_mid,
-                                    drift_bps = drift_bps,
-                                    "LR: WS re-quote triggered"
-                                );
-
-                                if let Some(order_map) = outstanding_orders.remove(&cid) {
-                                    if !order_map.is_empty() {
-                                        let id_strs: Vec<String> = order_map.into_keys().collect();
-                                        let refs: Vec<&str> = id_strs.iter().map(|s| s.as_str()).collect();
-                                        if let Err(e) = lr_clob.cancel_orders(&refs).await {
-                                            tracing::warn!(error = %e, "LR: WS re-quote cancel failed");
-                                        }
-                                        pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(id_strs.len() as u64);
+                                if lr_config.order_depth_level > 0 {
+                                    // ── Depth mode: check if any order has reached cancel depth ──
+                                    let now = std::time::Instant::now();
+                                    if let Some(&last_t) = last_quote_time.get(&cid) {
+                                        if now.duration_since(last_t) < requote_cooldown { continue; }
                                     }
-                                }
 
-                                last_quoted_mid.remove(&tid);
+                                    let need_requote = outstanding_orders.get(&cid).is_some_and(|order_map| {
+                                        order_map.values().any(|meta| {
+                                            lr_cache.get(&meta.token_id).is_some_and(|book| {
+                                                pa_strategy::liquidity_rewards::should_cancel_depth_order(
+                                                    &book, meta.price, meta.is_buy, lr_config.cancel_depth_level,
+                                                )
+                                            })
+                                        })
+                                    });
 
-                                if let Some(&idx) = cid_to_candidate_idx.get(&cid) {
-                                    if let Some(candidate) = active_candidates.get(idx) {
-                                        let current_exposure = Decimal::ZERO;
-                                        let (metas, _exp, yes_mid, no_mid) = lr_quote_one_market(
-                                            &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, current_exposure,
-                                            candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
-                                        ).await;
-                                        if !metas.is_empty() {
-                                            outstanding_orders.insert(cid, metas.into_iter().collect());
+                                    if !need_requote { continue; }
+
+                                    tracing::info!(
+                                        account = %lr_name,
+                                        token = %tid, market = %cid,
+                                        cancel_depth = lr_config.cancel_depth_level,
+                                        "LR: depth cancel triggered"
+                                    );
+
+                                    // Cancel all orders for this market and re-quote
+                                    if let Some(order_map) = outstanding_orders.remove(&cid) {
+                                        if !order_map.is_empty() {
+                                            let id_strs: Vec<String> = order_map.into_keys().collect();
+                                            let refs: Vec<&str> = id_strs.iter().map(|s| s.as_str()).collect();
+                                            if let Err(e) = lr_clob.cancel_orders(&refs).await {
+                                                tracing::warn!(error = %e, "LR: depth re-quote cancel failed");
+                                            }
+                                            pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(id_strs.len() as u64);
                                         }
-                                        if candidate.market.tokens.len() >= 2 {
-                                            if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
-                                            if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
+                                    }
+
+                                    if let Some(&idx) = cid_to_candidate_idx.get(&cid) {
+                                        if let Some(candidate) = active_candidates.get(idx) {
+                                            let current_exposure = Decimal::ZERO;
+                                            let (metas, _exp, yes_mid, no_mid) = lr_quote_one_market(
+                                                &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, current_exposure,
+                                                candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
+                                                effective_max_exposure,
+                                            ).await;
+                                            if !metas.is_empty() {
+                                                outstanding_orders.insert(cid, metas.into_iter().collect());
+                                            }
+                                            if candidate.market.tokens.len() >= 2 {
+                                                if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
+                                                if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
+                                            }
+                                            last_quote_time.insert(cid, now);
                                         }
-                                        last_quote_time.insert(cid, now);
+                                    }
+                                } else {
+                                    // ── Legacy midpoint drift mode ──
+                                    let Some(new_mid) = lr_cache.get(&tid).and_then(|b| b.midpoint()) else { continue };
+                                    let Some(&old_mid) = last_quoted_mid.get(&tid) else { continue };
+                                    if old_mid <= Decimal::ZERO { continue; }
+
+                                    let drift_bps = ((new_mid - old_mid).abs() / old_mid * dec!(10000)).to_u32().unwrap_or(0);
+                                    if drift_bps < lr_config.requote_trigger_bps { continue; }
+
+                                    let now = std::time::Instant::now();
+                                    if let Some(&last_t) = last_quote_time.get(&cid) {
+                                        if now.duration_since(last_t) < requote_cooldown { continue; }
+                                    }
+
+                                    tracing::info!(
+                                        account = %lr_name,
+                                        token = %tid, market = %cid,
+                                        old_mid = %old_mid, new_mid = %new_mid,
+                                        drift_bps = drift_bps,
+                                        "LR: WS re-quote triggered"
+                                    );
+
+                                    if let Some(order_map) = outstanding_orders.remove(&cid) {
+                                        if !order_map.is_empty() {
+                                            let id_strs: Vec<String> = order_map.into_keys().collect();
+                                            let refs: Vec<&str> = id_strs.iter().map(|s| s.as_str()).collect();
+                                            if let Err(e) = lr_clob.cancel_orders(&refs).await {
+                                                tracing::warn!(error = %e, "LR: WS re-quote cancel failed");
+                                            }
+                                            pa_monitor::metrics::LR_ORDERS_CANCELLED.inc_by(id_strs.len() as u64);
+                                        }
+                                    }
+
+                                    last_quoted_mid.remove(&tid);
+
+                                    if let Some(&idx) = cid_to_candidate_idx.get(&cid) {
+                                        if let Some(candidate) = active_candidates.get(idx) {
+                                            let current_exposure = Decimal::ZERO;
+                                            let (metas, _exp, yes_mid, no_mid) = lr_quote_one_market(
+                                                &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, current_exposure,
+                                                candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
+                                                effective_max_exposure,
+                                            ).await;
+                                            if !metas.is_empty() {
+                                                outstanding_orders.insert(cid, metas.into_iter().collect());
+                                            }
+                                            if candidate.market.tokens.len() >= 2 {
+                                                if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
+                                                if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
+                                            }
+                                            last_quote_time.insert(cid, now);
+                                        }
                                     }
                                 }
                             }
@@ -1237,6 +1318,7 @@ async fn main() -> Result<()> {
                                 let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
                                     &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
                                     candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
+                                    effective_max_exposure,
                                 ).await;
                                 total_exposure += exp;
                                 if !metas.is_empty() {
@@ -1303,6 +1385,7 @@ async fn main() -> Result<()> {
                                 let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
                                     &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
                                     candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
+                                    effective_max_exposure,
                                 ).await;
                                 total_exposure += exp;
                                 if !metas.is_empty() {
@@ -1403,6 +1486,7 @@ async fn main() -> Result<()> {
                                             let (metas, _exp, yes_mid, no_mid) = lr_quote_one_market(
                                                 &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, current_exposure,
                                                 candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
+                                                effective_max_exposure,
                                             ).await;
                                             if !metas.is_empty() {
                                                 outstanding_orders.insert(cid, metas.into_iter().collect());
@@ -1972,6 +2056,7 @@ async fn lr_quote_one_market(
     current_exposure: Decimal,
     rewards_max_spread: Decimal,
     rewards_min_size: Decimal,
+    effective_max_exposure: Decimal,
 ) -> (Vec<(String, LrOrderMeta)>, Decimal, Option<Decimal>, Option<Decimal>) {
     let cid = market.condition_id;
     let yes_tid = market.tokens[0].token_id;
@@ -1989,10 +2074,19 @@ async fn lr_quote_one_market(
             if let Some(mid) = yes_book.midpoint() {
                 yes_mid_out = Some(mid);
 
-                if let Some(quote) = pa_strategy::liquidity_rewards::compute_quotes(
-                    mid, rewards_max_spread, yes_position,
-                    config, rewards_min_size, market.tick_size,
-                ) {
+                let quote_opt = if config.order_depth_level > 0 {
+                    pa_strategy::liquidity_rewards::compute_depth_quotes(
+                        &yes_book, config.order_depth_level,
+                        rewards_max_spread, yes_position, config, rewards_min_size,
+                    )
+                } else {
+                    pa_strategy::liquidity_rewards::compute_quotes(
+                        mid, rewards_max_spread, yes_position,
+                        config, rewards_min_size, market.tick_size,
+                    )
+                };
+
+                if let Some(quote) = quote_opt {
                     tracing::info!(
                         market = %cid, side = "YES", midpoint = %mid,
                         rewards_max_spread = %rewards_max_spread,
@@ -2000,8 +2094,14 @@ async fn lr_quote_one_market(
                         "LR: computed quotes"
                     );
                     let remaining_pos = (config.max_position_per_market - yes_position).max(Decimal::ZERO);
-                    let remaining_exp = (config.max_total_exposure - current_exposure - exposure_added).max(Decimal::ZERO);
-                    let bid_size = quote.size.min(remaining_pos).min(remaining_exp);
+                    let remaining_exp = (effective_max_exposure - current_exposure - exposure_added).max(Decimal::ZERO);
+                    // Convert remaining exposure (USDC) to max token count at bid price
+                    let max_from_exp = if quote.bid_price > Decimal::ZERO {
+                        remaining_exp / quote.bid_price
+                    } else {
+                        Decimal::ZERO
+                    };
+                    let bid_size = quote.size.min(remaining_pos).min(max_from_exp);
 
                     if bid_size >= config.min_order_size {
                         match clob.buy_limit_post_only(yes_tid, quote.bid_price, bid_size).await {
@@ -2048,10 +2148,19 @@ async fn lr_quote_one_market(
             if let Some(mid) = no_book.midpoint() {
                 no_mid_out = Some(mid);
 
-                if let Some(quote) = pa_strategy::liquidity_rewards::compute_quotes(
-                    mid, rewards_max_spread, no_position,
-                    config, rewards_min_size, market.tick_size,
-                ) {
+                let quote_opt = if config.order_depth_level > 0 {
+                    pa_strategy::liquidity_rewards::compute_depth_quotes(
+                        &no_book, config.order_depth_level,
+                        rewards_max_spread, no_position, config, rewards_min_size,
+                    )
+                } else {
+                    pa_strategy::liquidity_rewards::compute_quotes(
+                        mid, rewards_max_spread, no_position,
+                        config, rewards_min_size, market.tick_size,
+                    )
+                };
+
+                if let Some(quote) = quote_opt {
                     tracing::info!(
                         market = %cid, side = "NO", midpoint = %mid,
                         rewards_max_spread = %rewards_max_spread,
@@ -2059,8 +2168,14 @@ async fn lr_quote_one_market(
                         "LR: computed quotes"
                     );
                     let remaining_pos = (config.max_position_per_market - no_position).max(Decimal::ZERO);
-                    let remaining_exp = (config.max_total_exposure - current_exposure - exposure_added).max(Decimal::ZERO);
-                    let bid_size = quote.size.min(remaining_pos).min(remaining_exp);
+                    let remaining_exp = (effective_max_exposure - current_exposure - exposure_added).max(Decimal::ZERO);
+                    // Convert remaining exposure (USDC) to max token count at bid price
+                    let max_from_exp = if quote.bid_price > Decimal::ZERO {
+                        remaining_exp / quote.bid_price
+                    } else {
+                        Decimal::ZERO
+                    };
+                    let bid_size = quote.size.min(remaining_pos).min(max_from_exp);
 
                     if bid_size >= config.min_order_size {
                         match clob.buy_limit_post_only(no_tid, quote.bid_price, bid_size).await {

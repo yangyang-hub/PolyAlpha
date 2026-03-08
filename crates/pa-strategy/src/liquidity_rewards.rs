@@ -208,6 +208,102 @@ fn ceil_to_tick(price: Decimal, tick: Decimal) -> Decimal {
     (price / tick).ceil() * tick
 }
 
+/// Compute bid/ask quotes by taking the Nth price level from the orderbook.
+///
+/// Unlike `compute_quotes()` which computes from midpoint ± spread, this reads
+/// prices directly from the orderbook at the specified depth level.
+///
+/// Returns `None` if the orderbook lacks sufficient depth, quotes are crossed,
+/// out of bounds, or outside the rewards spread band.
+pub fn compute_depth_quotes(
+    book: &pa_core::types::OrderBook,
+    depth_level: usize,
+    rewards_max_spread: Decimal,
+    _position: Decimal,
+    config: &LiquidityRewardsConfig,
+    rewards_min_size: Decimal,
+) -> Option<TokenQuote> {
+    if depth_level < 1 {
+        return None;
+    }
+
+    // Need at least depth_level entries on each side
+    if book.bids.len() < depth_level || book.asks.len() < depth_level {
+        return None;
+    }
+
+    let bid_price = book.bids[depth_level - 1].price;
+    let ask_price = book.asks[depth_level - 1].price;
+
+    // Quotes must not cross
+    if bid_price >= ask_price {
+        return None;
+    }
+
+    // Valid price range [0.01, 0.99]
+    let min_price = Decimal::new(1, 2);
+    let max_price = Decimal::new(99, 2);
+    if bid_price < min_price || bid_price > max_price {
+        return None;
+    }
+    if ask_price < min_price || ask_price > max_price {
+        return None;
+    }
+
+    // Verify within rewards_max_spread of midpoint (using best bid/ask for midpoint)
+    let best_bid = book.bids[0].price;
+    let best_ask = book.asks[0].price;
+    let midpoint = (best_bid + best_ask) / Decimal::TWO;
+
+    if (midpoint - bid_price).abs() > rewards_max_spread
+        || (ask_price - midpoint).abs() > rewards_max_spread
+    {
+        return None;
+    }
+
+    // Size: same as compute_quotes — target max_position_per_market
+    let floor_size = config.min_order_size.max(rewards_min_size);
+    let size = config.max_position_per_market.max(floor_size);
+
+    Some(TokenQuote {
+        bid_price,
+        ask_price,
+        size,
+    })
+}
+
+/// Check if an outstanding order should be cancelled because it has reached
+/// or passed the cancel depth level (i.e., it's now too close to best price).
+///
+/// For a buy order: counts how many bid levels have a strictly higher price.
+/// If that count + 1 <= cancel_depth_level, the order is at or above the cancel
+/// threshold and should be re-quoted further back.
+///
+/// For a sell order: counts how many ask levels have a strictly lower price.
+/// Same logic applies.
+pub fn should_cancel_depth_order(
+    book: &pa_core::types::OrderBook,
+    order_price: Decimal,
+    is_buy: bool,
+    cancel_depth_level: usize,
+) -> bool {
+    if cancel_depth_level == 0 {
+        return false;
+    }
+
+    if is_buy {
+        // Position = number of bids with price strictly above ours + 1
+        let above = book.bids.iter().take_while(|l| l.price > order_price).count();
+        let position = above + 1;
+        position <= cancel_depth_level
+    } else {
+        // Position = number of asks with price strictly below ours + 1
+        let below = book.asks.iter().take_while(|l| l.price < order_price).count();
+        let position = below + 1;
+        position <= cancel_depth_level
+    }
+}
+
 // ──── Tests ────
 
 #[cfg(test)]
@@ -425,5 +521,132 @@ mod tests {
         // bid = 0.05 - 0.04 = 0.01 → exactly 0.01, valid
         let result = compute_quotes(dec!(0.05), dec!(0.10), Decimal::ZERO, &config, dec!(5), dec!(0.01));
         assert!(result.is_some(), "Bid exactly at 0.01 should be accepted");
+    }
+
+    fn make_orderbook(bids: Vec<(Decimal, Decimal)>, asks: Vec<(Decimal, Decimal)>) -> pa_core::types::OrderBook {
+        pa_core::types::OrderBook {
+            token_id: U256::from(1u64),
+            bids: bids.into_iter().map(|(price, size)| pa_core::types::PriceLevel { price, size }).collect(),
+            asks: asks.into_iter().map(|(price, size)| pa_core::types::PriceLevel { price, size }).collect(),
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_compute_depth_quotes_basic() {
+        let config = default_config();
+        // 5 levels on each side, take 3rd level
+        let book = make_orderbook(
+            vec![
+                (dec!(0.50), dec!(100)), // best bid
+                (dec!(0.49), dec!(100)),
+                (dec!(0.48), dec!(100)), // 3rd level
+                (dec!(0.47), dec!(100)),
+                (dec!(0.46), dec!(100)),
+            ],
+            vec![
+                (dec!(0.51), dec!(100)), // best ask
+                (dec!(0.52), dec!(100)),
+                (dec!(0.53), dec!(100)), // 3rd level
+                (dec!(0.54), dec!(100)),
+                (dec!(0.55), dec!(100)),
+            ],
+        );
+        let result = compute_depth_quotes(&book, 3, dec!(0.10), Decimal::ZERO, &config, dec!(5));
+        assert!(result.is_some());
+        let q = result.unwrap();
+        assert_eq!(q.bid_price, dec!(0.48));
+        assert_eq!(q.ask_price, dec!(0.53));
+    }
+
+    #[test]
+    fn test_compute_depth_quotes_insufficient_depth() {
+        let config = default_config();
+        // Only 2 levels, request 3rd
+        let book = make_orderbook(
+            vec![(dec!(0.50), dec!(100)), (dec!(0.49), dec!(100))],
+            vec![(dec!(0.51), dec!(100)), (dec!(0.52), dec!(100))],
+        );
+        let result = compute_depth_quotes(&book, 3, dec!(0.10), Decimal::ZERO, &config, dec!(5));
+        assert!(result.is_none(), "Should return None when depth is insufficient");
+    }
+
+    #[test]
+    fn test_compute_depth_quotes_outside_reward_spread() {
+        let config = default_config();
+        // 3rd level prices are far from midpoint
+        let book = make_orderbook(
+            vec![
+                (dec!(0.50), dec!(100)),
+                (dec!(0.49), dec!(100)),
+                (dec!(0.40), dec!(100)), // 3rd bid far from mid ~0.505
+            ],
+            vec![
+                (dec!(0.51), dec!(100)),
+                (dec!(0.52), dec!(100)),
+                (dec!(0.60), dec!(100)), // 3rd ask far from mid ~0.505
+            ],
+        );
+        // rewards_max_spread = 0.04, midpoint = (0.50+0.51)/2 = 0.505
+        // |0.505 - 0.40| = 0.105 > 0.04 → rejected
+        let result = compute_depth_quotes(&book, 3, dec!(0.04), Decimal::ZERO, &config, dec!(5));
+        assert!(result.is_none(), "Should reject quotes outside rewards_max_spread");
+    }
+
+    #[test]
+    fn test_should_cancel_buy_at_depth() {
+        // Buy order at 0.48 (was at level 3). After book changes, it's now at level 2.
+        let book = make_orderbook(
+            vec![
+                (dec!(0.49), dec!(100)), // level 1 (was 0.50, now gone)
+                (dec!(0.48), dec!(100)), // level 2 — our order moved up!
+                (dec!(0.47), dec!(100)),
+            ],
+            vec![(dec!(0.51), dec!(100))],
+        );
+        // cancel_depth_level = 2: cancel when position <= 2
+        assert!(should_cancel_depth_order(&book, dec!(0.48), true, 2),
+            "Buy at level 2 should trigger cancel when cancel_depth=2");
+
+        // Same order but book still has 0.50 above → position = 3
+        let book2 = make_orderbook(
+            vec![
+                (dec!(0.50), dec!(100)),
+                (dec!(0.49), dec!(100)),
+                (dec!(0.48), dec!(100)), // level 3 — safe
+                (dec!(0.47), dec!(100)),
+            ],
+            vec![(dec!(0.51), dec!(100))],
+        );
+        assert!(!should_cancel_depth_order(&book2, dec!(0.48), true, 2),
+            "Buy at level 3 should NOT trigger cancel when cancel_depth=2");
+    }
+
+    #[test]
+    fn test_should_cancel_sell_at_depth() {
+        // Sell order at 0.53. Book has only 0.52 below → position = 2.
+        let book = make_orderbook(
+            vec![(dec!(0.50), dec!(100))],
+            vec![
+                (dec!(0.52), dec!(100)), // level 1
+                (dec!(0.53), dec!(100)), // level 2 — our order
+                (dec!(0.54), dec!(100)),
+            ],
+        );
+        assert!(should_cancel_depth_order(&book, dec!(0.53), false, 2),
+            "Sell at level 2 should trigger cancel when cancel_depth=2");
+
+        // Add one more level below → position = 3
+        let book2 = make_orderbook(
+            vec![(dec!(0.50), dec!(100))],
+            vec![
+                (dec!(0.51), dec!(100)), // level 1
+                (dec!(0.52), dec!(100)), // level 2
+                (dec!(0.53), dec!(100)), // level 3 — safe
+                (dec!(0.54), dec!(100)),
+            ],
+        );
+        assert!(!should_cancel_depth_order(&book2, dec!(0.53), false, 2),
+            "Sell at level 3 should NOT trigger cancel when cancel_depth=2");
     }
 }

@@ -133,6 +133,8 @@ verify_scoring = false
 quote_yes = true
 quote_no = true
 fill_check_secs = 10
+order_depth_level = 3       # 0 = legacy midpoint mode, N = place at Nth orderbook level
+cancel_depth_level = 2      # cancel and re-quote when order reaches this depth
 
 # ──── Multi-Account Configuration ────
 # Define named accounts to run different strategies with different wallets.
