@@ -47,7 +47,7 @@ futures = "0.3"
 
 # Database
 sqlx = { version = "0.8", features = [
-    "runtime-tokio", "postgres", "chrono", "uuid", "rust_decimal",
+    "runtime-tokio", "postgres", "chrono", "uuid", "rust_decimal", "json",
 ] }
 
 # Serialization
@@ -65,6 +65,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Monitoring
 prometheus = "0.13"
 axum = "0.8"
+arc-swap = "1"
+tower-http = { version = "0.6", features = ["fs", "cors"] }
 
 # Error handling
 thiserror = "2"
@@ -114,6 +116,9 @@ chrono = { workspace = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
 clap = { workspace = true }
+arc-swap = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
 
 [profile.release]
 lto = "thin"

@@ -313,6 +313,8 @@ pub enum StrategyType {
     CryptoAlpha,
     /// Liquidity rewards market making
     LiquidityRewards,
+    /// Smart money copy-trading: follow high-PnL wallets' positions.
+    SmartMoney,
 }
 
 /// Concrete execution plan for an arbitrage opportunity.

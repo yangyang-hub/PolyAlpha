@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 pa-core = { workspace = true }
+pa-storage = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 prometheus = { workspace = true }
@@ -15,4 +16,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 reqwest = { workspace = true }
+arc-swap = { workspace = true }
+tower-http = { workspace = true }
+sqlx = { workspace = true }
 socket2 = "0.5"

@@ -1,8 +1,8 @@
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Top-level application settings, loaded from config files + env vars.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Settings {
     pub chain: ChainConfig,
     pub clob: ClobConfig,
@@ -23,13 +23,15 @@ pub struct Settings {
     pub event_calendar: EventCalendarConfig,
     #[serde(default)]
     pub liquidity_rewards: LiquidityRewardsConfig,
+    #[serde(default)]
+    pub smart_money: SmartMoneyConfig,
     /// Named trading accounts. When empty, a single "default" account is created
     /// from `POLYMARKET_PRIVATE_KEY` env var + `clob.signature_type` + `clob.proxy_wallet`.
     #[serde(default)]
     pub accounts: Vec<AccountConfig>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChainConfig {
     pub chain_id: u64,
     pub rpc_url: String,
@@ -37,7 +39,7 @@ pub struct ChainConfig {
     pub rpc_fallbacks: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ClobConfig {
     pub host: String,
     pub ws_host: String,
@@ -52,12 +54,12 @@ pub struct ClobConfig {
     pub proxy_wallet: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GammaConfig {
     pub host: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct StrategyConfig {
     pub enabled: Vec<String>,
     pub scan_interval_ms: u64,
@@ -70,7 +72,7 @@ pub struct StrategyConfig {
     pub max_market_end_days: Option<u64>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RiskConfig {
     pub max_position_per_market: Decimal,
     pub max_total_exposure: Decimal,
@@ -108,7 +110,7 @@ fn default_max_markets_per_strategy() -> usize {
     50
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DatabaseConfig {
     #[serde(default)]
     pub url: String,
@@ -129,7 +131,7 @@ impl Default for DatabaseConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MonitorConfig {
     pub prometheus_port: u16,
     pub health_port: u16,
@@ -137,7 +139,7 @@ pub struct MonitorConfig {
     pub alert_webhook: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MarketFilterConfig {
     pub min_liquidity: Decimal,
     pub min_volume_24h: Decimal,
@@ -150,7 +152,7 @@ pub struct MarketFilterConfig {
 
 fn default_market_refresh_interval() -> u64 { 1800 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WeatherConfig {
     /// Minimum edge (model_prob - market_price) to trigger a trade, in basis points.
     pub min_edge_bps: u32,
@@ -267,7 +269,7 @@ impl Default for WeatherConfig {
 
 /// Per-metric forecast error standard deviations (absolute units).
 /// These represent the expected error between the forecast and actual observed value.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ForecastErrorConfig {
     #[serde(default = "default_temp_sigma")]
     pub temperature_sigma_f: f64,
@@ -299,7 +301,7 @@ impl Default for ForecastErrorConfig {
 ///
 /// Targets tokens priced near 0 or 1 in markets approaching resolution,
 /// where outcomes become increasingly certain.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ConvergenceConfig {
     /// Minimum token price to consider (e.g. 0.93 = 93% implied certainty).
     #[serde(default = "default_min_price_threshold")]
@@ -356,7 +358,7 @@ impl Default for ConvergenceConfig {
 /// Configuration for the Crypto Alpha strategy.
 ///
 /// Uses real-time crypto prices + GBM model to find mispriced crypto prediction markets.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CryptoAlphaConfig {
     /// Minimum edge in basis points.
     #[serde(default = "default_crypto_min_edge")]
@@ -418,7 +420,7 @@ impl Default for CryptoAlphaConfig {
 ///
 /// When enabled, reduces position sizes during high-impact event windows
 /// (e.g. FOMC, CPI, token unlocks) to avoid model unreliability.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EventCalendarConfig {
     /// Whether the event calendar filter is enabled.
     #[serde(default)]
@@ -477,7 +479,7 @@ impl Default for EventCalendarConfig {
 }
 
 /// A manually-defined event in the config file.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct StaticEventConfig {
     pub title: String,
     /// Category: "macro", "crypto", "political", "sports"
@@ -495,7 +497,7 @@ pub struct StaticEventConfig {
 /// Each account uses a separate private key, proxy wallet, and can run
 /// different strategies independently. Accounts share market data but have
 /// isolated execution, risk management, and position tracking.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AccountConfig {
     /// Unique name for this account (used as reference in logs/metrics).
     pub name: String,
@@ -523,7 +525,7 @@ fn default_private_key_env() -> String {
 /// Places GTC limit orders within the rewards spread band on both YES and NO sides
 /// to earn Polymarket CLOB liquidity rewards. Automatically discovers markets with
 /// active rewards and ranks them by reward density.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct LiquidityRewardsConfig {
     /// Whether liquidity rewards quoting is enabled.
     #[serde(default)]
@@ -626,7 +628,112 @@ impl Default for LiquidityRewardsConfig {
     }
 }
 
+/// Configuration for the SmartMoney copy-trading strategy.
+///
+/// Monitors high-PnL wallets on Polymarket and follows their position changes
+/// proportionally. Supports Data API polling and optional on-chain Transfer event
+/// monitoring for real-time detection.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct SmartMoneyConfig {
+    /// Manually configured wallets to track.
+    #[serde(default)]
+    pub wallets: Vec<TrackedWalletConfig>,
+    /// Fraction of tracked wallet's position to follow (0.0-1.0).
+    #[serde(default = "default_sm_follow_ratio")]
+    pub follow_ratio: Decimal,
+    /// Maximum position per market in USDC.
+    #[serde(default = "default_sm_max_position")]
+    pub max_position_usdc: Decimal,
+    /// Data API poll interval (seconds).
+    #[serde(default = "default_sm_poll_interval")]
+    pub poll_interval_secs: u64,
+    /// Signal time-to-live (seconds). Stale signals are discarded.
+    #[serde(default = "default_sm_signal_ttl")]
+    pub signal_ttl_secs: u64,
+    /// Exit buffer in bps.
+    #[serde(default = "default_exit_buffer_bps")]
+    pub exit_buffer_bps: u32,
+    /// Capital efficiency threshold. Auto-sell when best_bid >= this value.
+    #[serde(default = "default_capital_efficiency_threshold")]
+    pub capital_efficiency_threshold: Decimal,
+    /// Enable on-chain Transfer event monitoring for real-time detection.
+    #[serde(default)]
+    pub onchain_enabled: bool,
+    /// On-chain log poll interval (seconds). Only used if onchain_enabled=true.
+    #[serde(default = "default_sm_onchain_poll")]
+    pub onchain_poll_secs: u64,
+    /// Enable auto-discovery of high-PnL wallets from candidate list.
+    #[serde(default)]
+    pub auto_discover_enabled: bool,
+    /// Candidate wallet addresses for auto-discovery scoring.
+    #[serde(default)]
+    pub auto_discover_candidates: Vec<String>,
+    /// Auto-discovery re-evaluation interval (seconds).
+    #[serde(default = "default_sm_discover_interval")]
+    pub auto_discover_interval_secs: u64,
+    /// Minimum P&L-to-volume ratio to auto-track a wallet.
+    #[serde(default = "default_sm_min_score")]
+    pub min_wallet_score: Decimal,
+    /// Maximum number of wallets to track (manual + auto-discovered).
+    #[serde(default = "default_sm_max_wallets")]
+    pub max_wallets: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TrackedWalletConfig {
+    pub address: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default = "default_sm_wallet_weight")]
+    pub weight: Decimal,
+}
+
+fn default_sm_follow_ratio() -> Decimal { Decimal::new(10, 2) } // 0.10
+fn default_sm_max_position() -> Decimal { Decimal::from(100) }
+fn default_sm_poll_interval() -> u64 { 30 }
+fn default_sm_signal_ttl() -> u64 { 300 }
+fn default_sm_onchain_poll() -> u64 { 4 }
+fn default_sm_discover_interval() -> u64 { 3600 }
+fn default_sm_min_score() -> Decimal { Decimal::new(5, 2) } // 0.05
+fn default_sm_max_wallets() -> usize { 20 }
+fn default_sm_wallet_weight() -> Decimal { Decimal::ONE }
+
+impl Default for SmartMoneyConfig {
+    fn default() -> Self {
+        Self {
+            wallets: vec![],
+            follow_ratio: default_sm_follow_ratio(),
+            max_position_usdc: default_sm_max_position(),
+            poll_interval_secs: default_sm_poll_interval(),
+            signal_ttl_secs: default_sm_signal_ttl(),
+            exit_buffer_bps: default_exit_buffer_bps(),
+            capital_efficiency_threshold: default_capital_efficiency_threshold(),
+            onchain_enabled: false,
+            onchain_poll_secs: default_sm_onchain_poll(),
+            auto_discover_enabled: false,
+            auto_discover_candidates: vec![],
+            auto_discover_interval_secs: default_sm_discover_interval(),
+            min_wallet_score: default_sm_min_score(),
+            max_wallets: default_sm_max_wallets(),
+        }
+    }
+}
+
 impl Settings {
+    /// Return a copy with sensitive fields redacted for API responses.
+    pub fn redacted(&self) -> Self {
+        let mut s = self.clone();
+        s.chain.rpc_url = "***".into();
+        s.chain.rpc_fallbacks = vec!["***".into()];
+        s.database.url = "***".into();
+        s.clob.proxy_wallet = "***".into();
+        s.crypto_alpha.coingecko_api_key = "***".into();
+        s.event_calendar.finnhub_api_key = "***".into();
+        s.event_calendar.coinmarketcal_api_key = "***".into();
+        s.accounts = vec![];
+        s
+    }
+
     /// Load settings from config files and environment variables.
     ///
     /// Priority (highest to lowest):

@@ -5,3 +5,4 @@ pub mod cache;
 pub mod service;
 pub mod event_calendar;
 pub mod data_api;
+pub mod wallet_tracker;

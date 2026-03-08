@@ -7,6 +7,7 @@ use std::time::Duration;
 use alloy::signers::Signer as _;
 use alloy::signers::local::PrivateKeySigner;
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::Utc;
 use rust_decimal::Decimal;
@@ -26,8 +27,9 @@ use pa_market_data::gamma_feed::GammaFeed;
 use pa_market_data::service::MarketDataService;
 use pa_market_data::event_calendar::EventCalendarService;
 use pa_market_data::data_api::PositionLoader;
-use pa_monitor::health::HealthState;
+use pa_monitor::api::ApiState;
 use pa_risk::manager::RiskManagerImpl;
+use pa_storage::config_store::ConfigStore;
 use pa_strategy::cross_market::{CrossMarketArbitrage, detect_cross_market_pairs};
 use pa_strategy::engine::StrategyEngine;
 use pa_strategy::neg_risk::NegRiskArbitrage;
@@ -137,6 +139,49 @@ async fn main() -> Result<()> {
 
     // --- Load configuration ---
     let mut settings = Settings::load().context("Failed to load configuration")?;
+
+    // --- Connect to PostgreSQL for config store (optional) ---
+    let config_store = if !settings.database.url.is_empty() {
+        match sqlx::PgPool::connect(&settings.database.url).await {
+            Ok(pool) => {
+                // Run migrations
+                if let Err(e) = sqlx::migrate!("./migrations").run(&pool).await {
+                    tracing::warn!(error = %e, "DB migration failed (non-fatal for config store)");
+                }
+                let store = ConfigStore::new(pool);
+                // Apply DB config overrides
+                match store.load_all().await {
+                    Ok(overrides) if !overrides.is_empty() => {
+                        if let Err(e) = ConfigStore::apply_overrides(&mut settings, &overrides) {
+                            tracing::warn!(error = %e, "Failed to apply DB config overrides");
+                        } else {
+                            tracing::info!(
+                                sections = overrides.len(),
+                                "Applied DB config overrides"
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to load DB config overrides");
+                    }
+                }
+                Some(store)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "PostgreSQL connection failed — config store disabled");
+                None
+            }
+        }
+    } else {
+        tracing::info!("No database URL configured — config store disabled");
+        None
+    };
+
+    // --- ArcSwap for hot-reloadable config ---
+    let config_arc = Arc::new(ArcSwap::new(Arc::new(settings.clone())));
+    let (config_tx, _config_rx) = tokio::sync::watch::channel(0u64);
+
     tracing::info!(
         chain_id = settings.chain.chain_id,
         clob_host = %settings.clob.host,
@@ -171,10 +216,18 @@ async fn main() -> Result<()> {
     );
     tracing::info!("Market data service initialized");
 
-    // --- Start health/metrics server ---
+    // --- Start health/metrics/config API server ---
     let ws_connected = market_data.ws_feed_ws_connected().await;
-    let health_state = Arc::new(HealthState {
-        checks: vec![
+    let api_state = Arc::new(ApiState {
+        config: Arc::clone(&config_arc),
+        config_store: config_store.unwrap_or_else(|| {
+            // Create a dummy config store with a placeholder pool
+            // The API will return errors if no DB is configured
+            ConfigStore::new(sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap())
+        }),
+        config_tx,
+        start_time: Utc::now(),
+        health_checks: vec![
             (
                 "websocket",
                 Box::new({
@@ -183,12 +236,11 @@ async fn main() -> Result<()> {
                 }),
             ),
         ],
-        start_time: Utc::now(),
     });
     let health_port = settings.monitor.health_port;
     tokio::spawn(async move {
-        if let Err(e) = pa_monitor::health::start_server(health_port, health_state).await {
-            tracing::error!(error = %e, "Health server failed");
+        if let Err(e) = pa_monitor::api::start_server(health_port, api_state).await {
+            tracing::error!(error = %e, "API server failed");
         }
     });
 
@@ -969,6 +1021,55 @@ async fn main() -> Result<()> {
                     make_balance_fn(Arc::clone(&ctx.usdc_balance)),
                 );
                 strategies.push(Box::new(crypto));
+            }
+
+            if enabled_strategies.contains(&"smart_money".to_string()) {
+                let sm_cache = market_data.cache().clone();
+                let rm_pos_sm = Arc::clone(&ctx.risk_manager_impl);
+                let rm_held_sm = Arc::clone(&ctx.risk_manager_impl);
+
+                // Build token_to_condition map from discovered markets
+                let sm_markets_snapshot = shared_markets.read().await;
+                let sm_token_to_cid: Arc<std::sync::RwLock<std::collections::HashMap<alloy::primitives::U256, alloy::primitives::B256>>> =
+                    Arc::new(std::sync::RwLock::new(
+                        sm_markets_snapshot.iter()
+                            .flat_map(|m| m.tokens.iter().map(|t| (t.token_id, m.condition_id)))
+                            .collect()
+                    ));
+
+                // Markets lookup shared with strategy
+                let sm_markets: Arc<std::sync::RwLock<std::collections::HashMap<alloy::primitives::B256, pa_core::types::MarketInfo>>> =
+                    Arc::new(std::sync::RwLock::new(
+                        sm_markets_snapshot.iter().map(|m| (m.condition_id, m.clone())).collect()
+                    ));
+                drop(sm_markets_snapshot);
+
+                // Create WalletTracker
+                let tracker = pa_market_data::wallet_tracker::WalletTracker::new(
+                    settings.smart_money.clone(),
+                    Arc::clone(&sm_token_to_cid),
+                );
+                let sm_signals = tracker.signals_ref();
+
+                let smart_money = pa_strategy::smart_money::SmartMoneyStrategy::new(
+                    settings.smart_money.clone(),
+                    dec!(0.00),
+                    Box::new(move |token_id| sm_cache.get(&token_id)),
+                    make_capital_fn(Arc::clone(&ctx.usdc_balance)),
+                    Box::new(move |tid: alloy::primitives::U256| rm_pos_sm.get_position_size(&tid)),
+                    Box::new(move || rm_held_sm.positions_by_strategy(pa_core::types::StrategyType::SmartMoney)),
+                    make_balance_fn(Arc::clone(&ctx.usdc_balance)),
+                    sm_signals,
+                    Arc::clone(&sm_markets),
+                );
+                strategies.push(Box::new(smart_money));
+
+                // Spawn WalletTracker background task
+                let tracker_cancel = cancel.clone();
+                let sm_rpc_url = settings.chain.rpc_url.clone();
+                tokio::spawn(async move {
+                    tracker.run(tracker_cancel, &sm_rpc_url).await;
+                });
             }
 
             if !strategies.is_empty() {
