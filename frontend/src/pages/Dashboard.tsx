@@ -1,82 +1,178 @@
-import { useEffect, useState } from "react";
-import { fetchHealth, fetchStatus, type HealthResponse, type StatusResponse } from "../api";
+import { useCallback } from "react";
+import { usePolling } from "../hooks/usePolling";
+import { parseMetrics } from "../lib/metrics";
+import {
+  fetchHealth,
+  fetchStatus,
+  fetchMetrics,
+  type HealthResponse,
+  type StatusResponse,
+} from "../api";
+
+interface DashboardData {
+  health: HealthResponse;
+  status: StatusResponse;
+  metrics: Map<string, number>;
+}
+
+async function fetchAll(): Promise<DashboardData> {
+  const [health, status, metricsText] = await Promise.all([
+    fetchHealth(),
+    fetchStatus(),
+    fetchMetrics(),
+  ]);
+  return { health, status, metrics: parseMetrics(metricsText) };
+}
+
+function m(metrics: Map<string, number>, key: string): number {
+  return metrics.get(key) ?? 0;
+}
+
+function formatUptime(secs: number): string {
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  const min = Math.floor((secs % 3600) / 60);
+  if (d > 0) return `${d}天 ${h}小时`;
+  if (h > 0) return `${h}小时 ${min}分钟`;
+  return `${min}分钟`;
+}
 
 export default function Dashboard() {
-  const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [status, setStatus] = useState<StatusResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const fetcher = useCallback(() => fetchAll(), []);
+  const { data, error, loading } = usePolling(fetcher, 10000);
 
-  const refresh = async () => {
-    try {
-      const [h, s] = await Promise.all([fetchHealth(), fetchStatus()]);
-      setHealth(h);
-      setStatus(s);
-      setError(null);
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, 10000);
-    return () => clearInterval(id);
-  }, []);
-
-  if (error) {
+  if (loading && !data) {
     return (
-      <div className="alert alert-error">
-        <span>无法连接机器人 API: {error}</span>
+      <div className="flex justify-center items-center h-64">
+        <span className="loading loading-spinner loading-lg" />
       </div>
     );
   }
 
-  if (!health || !status) {
-    return <span className="loading loading-spinner loading-lg" />;
+  if (error && !data) {
+    return (
+      <div className="alert alert-error">
+        <span>无法连接后端: {error}</span>
+      </div>
+    );
   }
 
-  const uptimeHours = Math.floor(status.uptime_seconds / 3600);
-  const uptimeMinutes = Math.floor((status.uptime_seconds % 3600) / 60);
+  if (!data) return null;
+
+  const { health, status, metrics } = data;
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-6">概览</h1>
+    <div className="space-y-6">
+      <h1 className="text-2xl font-bold">仪表板</h1>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        {/* Status card */}
-        <div className="stat bg-base-100 shadow-sm rounded-box">
-          <div className="stat-title">运行状态</div>
-          <div className={`stat-value text-lg ${health.status === "healthy" ? "text-success" : "text-warning"}`}>
-            {health.status === "healthy" ? "正常" : health.status}
-          </div>
-          <div className="stat-desc">
-            运行时间: {uptimeHours}小时 {uptimeMinutes}分钟
-          </div>
-        </div>
+      {/* Row 1: Status */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <StatCard
+          label="健康状态"
+          value={health.status}
+          badge={health.status === "healthy" ? "badge-success" : "badge-warning"}
+        />
+        <StatCard label="运行时间" value={formatUptime(health.uptime_seconds)} />
+        <StatCard label="策略数量" value={String(status.enabled_strategies.length)} />
+      </div>
 
-        {/* Strategies card */}
-        <div className="stat bg-base-100 shadow-sm rounded-box">
-          <div className="stat-title">活跃策略</div>
-          <div className="stat-value text-lg">{status.enabled_strategies.length}</div>
-          <div className="stat-desc">
-            {status.enabled_strategies.join(", ") || "无"}
-          </div>
-        </div>
+      {/* Row 2: Key Metrics */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <MetricCard
+          label="已实现 PnL"
+          value={m(metrics, "realized_pnl_usd").toFixed(2)}
+          unit="USD"
+          color={m(metrics, "realized_pnl_usd") >= 0 ? "text-success" : "text-error"}
+        />
+        <MetricCard
+          label="USDC 余额"
+          value={m(metrics, "usdc_balance").toFixed(2)}
+          unit="USD"
+        />
+        <MetricCard
+          label="总敞口"
+          value={m(metrics, "total_exposure_usd").toFixed(2)}
+          unit="USD"
+        />
+        <MetricCard
+          label="熔断器"
+          value={m(metrics, "circuit_breaker_active") > 0 ? "已触发" : "正常"}
+          color={m(metrics, "circuit_breaker_active") > 0 ? "text-error" : "text-success"}
+        />
+      </div>
 
-        {/* Scan interval card */}
-        <div className="stat bg-base-100 shadow-sm rounded-box">
-          <div className="stat-title">扫描间隔</div>
-          <div className="stat-value text-lg">{status.scan_interval_ms}ms</div>
-          <div className="stat-desc">
-            流动性奖励: {status.lr_enabled ? "已启用" : "已禁用"} | 事件日历: {status.event_calendar_enabled ? "已启用" : "已禁用"}
+      {/* Row 3: Activity */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <MetricCard label="机会检测" value={String(m(metrics, "opportunities_detected_total"))} />
+        <MetricCard label="执行次数" value={String(m(metrics, "executions_total"))} />
+        <MetricCard
+          label="执行错误"
+          value={String(m(metrics, "execution_errors_total"))}
+          color={m(metrics, "execution_errors_total") > 0 ? "text-warning" : ""}
+        />
+        <MetricCard label="退出交易" value={String(m(metrics, "exit_trades_total"))} />
+      </div>
+
+      {/* Row 4: Infrastructure */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <MetricCard label="WS 订阅" value={String(m(metrics, "active_ws_subscriptions"))} />
+        <MetricCard label="监控市场" value={String(m(metrics, "monitored_markets"))} />
+        <MetricCard label="WS 重连" value={String(m(metrics, "ws_reconnect_total"))} />
+      </div>
+
+      {/* Row 5: LR Metrics */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <MetricCard label="LR 挂单" value={String(m(metrics, "lr_orders_placed_total"))} />
+        <MetricCard label="LR 取消" value={String(m(metrics, "lr_orders_cancelled_total"))} />
+        <MetricCard label="LR 活跃市场" value={String(m(metrics, "lr_active_markets"))} />
+        <MetricCard label="LR 成交" value={String(m(metrics, "lr_fills_detected_total"))} />
+      </div>
+
+      {/* Row 6: Strategy table */}
+      <div className="card bg-base-200 shadow-sm">
+        <div className="card-body p-4">
+          <h2 className="card-title text-base">启用策略</h2>
+          <div className="overflow-x-auto">
+            <table className="table table-sm">
+              <thead>
+                <tr>
+                  <th>策略</th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                {status.enabled_strategies.map((s) => (
+                  <tr key={s}>
+                    <td>{s}</td>
+                    <td><span className="badge badge-success badge-sm">启用</span></td>
+                  </tr>
+                ))}
+                <tr>
+                  <td>流动性奖励 (LR)</td>
+                  <td>
+                    <span className={`badge badge-sm ${status.lr_enabled ? "badge-success" : "badge-ghost"}`}>
+                      {status.lr_enabled ? "启用" : "禁用"}
+                    </span>
+                  </td>
+                </tr>
+                <tr>
+                  <td>事件日历</td>
+                  <td>
+                    <span className={`badge badge-sm ${status.event_calendar_enabled ? "badge-success" : "badge-ghost"}`}>
+                      {status.event_calendar_enabled ? "启用" : "禁用"}
+                    </span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
 
-      {/* Health checks */}
-      <div className="card bg-base-100 shadow-sm">
-        <div className="card-body">
-          <h2 className="card-title">健康检查</h2>
+      {/* Row 7: Health checks */}
+      <div className="card bg-base-200 shadow-sm">
+        <div className="card-body p-4">
+          <h2 className="card-title text-base">健康检查</h2>
           <div className="overflow-x-auto">
             <table className="table table-sm">
               <thead>
@@ -88,10 +184,10 @@ export default function Dashboard() {
               <tbody>
                 {Object.entries(health.checks).map(([name, val]) => (
                   <tr key={name}>
-                    <td className="font-mono">{name}</td>
+                    <td>{name}</td>
                     <td>
-                      <span className={`badge ${val === "ok" ? "badge-success" : "badge-error"}`}>
-                        {val === "ok" ? "正常" : val}
+                      <span className={`badge badge-sm ${val === "ok" ? "badge-success" : "badge-error"}`}>
+                        {val}
                       </span>
                     </td>
                   </tr>
@@ -100,6 +196,51 @@ export default function Dashboard() {
             </table>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function StatCard({
+  label,
+  value,
+  badge,
+}: {
+  label: string;
+  value: string;
+  badge?: string;
+}) {
+  return (
+    <div className="stat bg-base-200 rounded-box p-4">
+      <div className="stat-title text-xs">{label}</div>
+      <div className="stat-value text-lg">
+        {badge ? (
+          <span className={`badge ${badge}`}>{value}</span>
+        ) : (
+          value
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({
+  label,
+  value,
+  unit,
+  color,
+}: {
+  label: string;
+  value: string;
+  unit?: string;
+  color?: string;
+}) {
+  return (
+    <div className="stat bg-base-200 rounded-box p-4">
+      <div className="stat-title text-xs">{label}</div>
+      <div className={`stat-value text-lg ${color ?? ""}`}>
+        {value}
+        {unit && <span className="text-sm font-normal opacity-60 ml-1">{unit}</span>}
       </div>
     </div>
   );

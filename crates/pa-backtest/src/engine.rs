@@ -73,9 +73,9 @@ impl BacktestEngine {
             Arc::new(RwLock::new(HashMap::new()));
 
         // Step 4: Build strategies
-        // Note: All directional strategies (weather, crypto, convergence) require live API
+        // Note: All directional strategies (weather, crypto) require live API
         // calls and cannot meaningfully replay from DB snapshots.
-        // Only directional strategies are used (weather, crypto, convergence).
+        // Only directional strategies are used (weather, crypto).
         let strategies: Vec<Box<dyn Strategy>> = Vec::new();
 
         // Step 5: Build risk manager and simulator

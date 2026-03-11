@@ -645,9 +645,9 @@ pub fn parse_weather_event_title(title: &str) -> Option<(WeatherMetric, String)>
     Some((metric, location))
 }
 
-// ──── Open-Meteo Client ────
+// ──── NOAA Client ────
 
-/// Weather forecast data from Open-Meteo API.
+/// Weather forecast data (API-agnostic interface).
 #[derive(Debug, Clone)]
 pub struct ForecastData {
     pub values: Vec<f64>,
@@ -656,147 +656,169 @@ pub struct ForecastData {
     pub std_dev: f64,
     /// Single-day value when a specific target date was requested.
     pub target_value: Option<f64>,
-    /// Cross-model standard deviation from ensemble forecasting.
-    /// Zero when ensemble is disabled or only one model responded.
+    /// Cross-model standard deviation (always 0.0 for NOAA — single model).
     pub model_spread: f64,
 }
 
-/// Open-Meteo geocoding API response.
+/// Hardcoded US city coordinates for NOAA lookup (NOAA has no geocoding API).
+const US_CITY_COORDS: &[(&str, f64, f64)] = &[
+    ("New York", 40.7128, -74.0060),
+    ("NYC", 40.7128, -74.0060),
+    ("Chicago", 41.8781, -87.6298),
+    ("Los Angeles", 34.0522, -118.2437),
+    ("LA", 34.0522, -118.2437),
+    ("Houston", 29.7604, -95.3698),
+    ("Phoenix", 33.4484, -112.0740),
+    ("Miami", 25.7617, -80.1918),
+    ("Philadelphia", 39.9526, -75.1652),
+    ("San Antonio", 29.4241, -98.4936),
+    ("San Diego", 32.7157, -117.1611),
+    ("Dallas", 32.7767, -96.7970),
+    ("Austin", 30.2672, -97.7431),
+    ("San Francisco", 37.7749, -122.4194),
+    ("Seattle", 47.6062, -122.3321),
+    ("Denver", 39.7392, -104.9903),
+    ("Nashville", 36.1627, -86.7816),
+    ("Portland", 45.5152, -122.6784),
+    ("Las Vegas", 36.1699, -115.1398),
+    ("Atlanta", 33.7490, -84.3880),
+    ("Minneapolis", 44.9778, -93.2650),
+    ("Tampa", 27.9506, -82.4572),
+    ("New Orleans", 29.9511, -90.0715),
+    ("Cleveland", 41.4993, -81.6944),
+];
+
+/// Cached NOAA grid point (office, gridX, gridY). Grid points never change.
+#[derive(Debug, Clone)]
+struct CachedGridPoint {
+    office: String,
+    grid_x: u32,
+    grid_y: u32,
+}
+
+/// NOAA /points response.
 #[derive(Debug, Deserialize)]
-struct GeocodeResponse {
-    results: Option<Vec<GeocodeResult>>,
+struct PointsResponse {
+    properties: PointsProperties,
 }
 
 #[derive(Debug, Deserialize)]
-struct GeocodeResult {
-    latitude: f64,
-    longitude: f64,
+#[serde(rename_all = "camelCase")]
+struct PointsProperties {
+    grid_id: String,
+    grid_x: u32,
+    grid_y: u32,
 }
 
-/// Open-Meteo forecast API response.
+/// NOAA /gridpoints response.
 #[derive(Debug, Deserialize)]
-struct ForecastResponse {
-    daily: Option<DailyData>,
+struct GridpointsResponse {
+    properties: GridpointsProperties,
 }
 
 #[derive(Debug, Deserialize)]
-struct DailyData {
+#[serde(rename_all = "camelCase")]
+struct GridpointsProperties {
     #[serde(default)]
-    time: Vec<String>,
+    max_temperature: Option<NoaaTimeSeries>,
     #[serde(default)]
-    temperature_2m_max: Vec<f64>,
+    min_temperature: Option<NoaaTimeSeries>,
     #[serde(default)]
-    temperature_2m_min: Vec<f64>,
+    temperature: Option<NoaaTimeSeries>,
     #[serde(default)]
-    temperature_2m_mean: Vec<f64>,
+    quantitative_precipitation: Option<NoaaTimeSeries>,
     #[serde(default)]
-    rain_sum: Vec<f64>,
+    snowfall_amount: Option<NoaaTimeSeries>,
     #[serde(default)]
-    snowfall_sum: Vec<f64>,
-    #[serde(default)]
-    wind_speed_10m_max: Vec<f64>,
+    wind_speed: Option<NoaaTimeSeries>,
 }
 
-/// Fetch weather forecasts from Open-Meteo API (free, no API key).
-pub struct OpenMeteoClient {
+/// NOAA time series container.
+#[derive(Debug, Deserialize)]
+struct NoaaTimeSeries {
+    values: Vec<NoaaTimeValue>,
+}
+
+/// Single NOAA time series value.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NoaaTimeValue {
+    valid_time: String,
+    value: Option<f64>,
+}
+
+/// Parse ISO 8601 date from NOAA validTime format: "2026-03-10T06:00:00+00:00/PT6H"
+fn parse_noaa_date(valid_time: &str) -> Option<NaiveDate> {
+    // Take the date portion before 'T'
+    let date_str = valid_time.split('T').next()?;
+    NaiveDate::parse_from_str(date_str, "%Y-%m-%d").ok()
+}
+
+/// Convert km/h to mph.
+fn kmh_to_mph(kmh: f64) -> f64 {
+    kmh * 0.621371
+}
+
+/// Convert mm to inches.
+fn mm_to_inches(mm: f64) -> f64 {
+    mm / 25.4
+}
+
+/// Fetch weather forecasts from the NOAA API (US-only, free, no API key).
+pub struct NoaaClient {
     http: reqwest::Client,
+    grid_cache: Arc<Mutex<HashMap<String, CachedGridPoint>>>,
 }
 
-impl Default for OpenMeteoClient {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl OpenMeteoClient {
-    pub fn new() -> Self {
+impl NoaaClient {
+    pub fn new(user_agent: &str) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .user_agent(user_agent)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            http,
+            grid_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Geocode a location name to (latitude, longitude) with retry.
-    pub async fn geocode(&self, location: &str) -> anyhow::Result<(f64, f64)> {
-        let http = &self.http;
-        let result = with_retry(2, || async {
-            let resp: GeocodeResponse = http
-                .get("https://geocoding-api.open-meteo.com/v1/search")
-                .query(&[("name", location), ("count", "1")])
-                .send()
-                .await?
-                .json()
-                .await?;
-            Ok(resp)
-        })
-        .await?;
-
-        let geo = result
-            .results
-            .and_then(|r| r.into_iter().next())
-            .ok_or_else(|| anyhow::anyhow!("Location not found: {}", location))?;
-
-        Ok((geo.latitude, geo.longitude))
+    /// Look up US city coordinates from the hardcoded table.
+    /// Returns `Err` for non-US cities (NOAA only covers the US).
+    pub fn geocode(location: &str) -> anyhow::Result<(f64, f64)> {
+        let loc_lower = location.to_lowercase();
+        for &(name, lat, lon) in US_CITY_COORDS {
+            if loc_lower == name.to_lowercase() {
+                return Ok((lat, lon));
+            }
+        }
+        Err(anyhow::anyhow!("City not in US lookup table: {}", location))
     }
 
-    /// Fetch daily weather forecast for the given coordinates.
-    ///
-    /// When `target_date` is `Some`, requests a single-day forecast for that date.
-    /// When `None`, fetches a 14-day forecast window.
-    ///
-    /// `precipitation_unit` should be `"mm"` or `"inch"`.
-    pub async fn forecast(
-        &self,
-        lat: f64,
-        lon: f64,
-        metric: WeatherMetric,
-        target_date: Option<NaiveDate>,
-        precipitation_unit: &str,
-    ) -> anyhow::Result<ForecastData> {
-        let daily_param = match metric {
-            WeatherMetric::TemperatureMax => "temperature_2m_max",
-            WeatherMetric::TemperatureMin => "temperature_2m_min",
-            WeatherMetric::TemperatureAvg => "temperature_2m_mean",
-            WeatherMetric::Rainfall => "rain_sum",
-            WeatherMetric::Snowfall => "snowfall_sum",
-            WeatherMetric::WindSpeed => "wind_speed_10m_max",
-        };
+    /// Resolve lat/lon to NOAA grid point (office, gridX, gridY).
+    /// Results are cached permanently (grid points don't change).
+    async fn resolve_grid(&self, lat: f64, lon: f64) -> anyhow::Result<(String, u32, u32)> {
+        let cache_key = format!("{:.4},{:.4}", lat, lon);
 
-        let mut params: Vec<(&str, String)> = vec![
-            ("latitude", lat.to_string()),
-            ("longitude", lon.to_string()),
-            ("daily", daily_param.to_string()),
-            ("temperature_unit", "fahrenheit".to_string()),
-        ];
-
-        // Add precipitation unit for rain/snow metrics
-        if matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
-            params.push(("precipitation_unit", precipitation_unit.to_string()));
+        // Check cache
+        {
+            let cache = self.grid_cache.lock().unwrap();
+            if let Some(entry) = cache.get(&cache_key) {
+                return Ok((entry.office.clone(), entry.grid_x, entry.grid_y));
+            }
         }
 
-        // Add wind speed unit — Open-Meteo default is km/h, Polymarket uses mph
-        if matches!(metric, WeatherMetric::WindSpeed) {
-            params.push(("wind_speed_unit", "mph".to_string()));
-        }
-
-        if let Some(date) = target_date {
-            let date_str = date.format("%Y-%m-%d").to_string();
-            params.push(("start_date", date_str.clone()));
-            params.push(("end_date", date_str));
-        } else {
-            params.push(("forecast_days", "14".to_string()));
-        }
-
+        // Fetch from NOAA
+        let url = format!("https://api.weather.gov/points/{:.4},{:.4}", lat, lon);
         let http = &self.http;
-        let params_clone = params.clone();
-        let resp: ForecastResponse = with_retry(2, || {
-            let p = params_clone.clone();
+        let url_clone = url.clone();
+        let resp: PointsResponse = with_retry(2, || {
+            let u = url_clone.clone();
+            let h = http.clone();
             async move {
-                let r: ForecastResponse = http
-                    .get("https://api.open-meteo.com/v1/forecast")
-                    .query(&p)
+                let r: PointsResponse = h
+                    .get(&u)
+                    .header("Accept", "application/geo+json")
                     .send()
                     .await?
                     .json()
@@ -806,49 +828,133 @@ impl OpenMeteoClient {
         })
         .await?;
 
-        let daily = resp
-            .daily
-            .ok_or_else(|| anyhow::anyhow!("No daily data in forecast response"))?;
+        let office = resp.properties.grid_id;
+        let grid_x = resp.properties.grid_x;
+        let grid_y = resp.properties.grid_y;
 
-        let (values, dates) = match metric {
-            WeatherMetric::TemperatureMax => (daily.temperature_2m_max, daily.time),
-            WeatherMetric::TemperatureMin => (daily.temperature_2m_min, daily.time),
-            WeatherMetric::TemperatureAvg => (daily.temperature_2m_mean, daily.time),
-            WeatherMetric::Rainfall => (daily.rain_sum, daily.time),
-            WeatherMetric::Snowfall => (daily.snowfall_sum, daily.time),
-            WeatherMetric::WindSpeed => (daily.wind_speed_10m_max, daily.time),
+        // Cache the result
+        {
+            let mut cache = self.grid_cache.lock().unwrap();
+            cache.insert(cache_key, CachedGridPoint {
+                office: office.clone(),
+                grid_x,
+                grid_y,
+            });
+        }
+
+        Ok((office, grid_x, grid_y))
+    }
+
+    /// Fetch daily weather forecast from NOAA gridpoints API.
+    ///
+    /// NOAA returns SI units; this function converts to US units:
+    /// - Temperature: °C → °F
+    /// - Wind speed: km/h → mph
+    /// - Precipitation/snow: mm → inches
+    pub async fn forecast(
+        &self,
+        lat: f64,
+        lon: f64,
+        metric: WeatherMetric,
+        target_date: Option<NaiveDate>,
+        _precipitation_unit: &str,
+    ) -> anyhow::Result<ForecastData> {
+        let (office, grid_x, grid_y) = self.resolve_grid(lat, lon).await?;
+        let url = format!(
+            "https://api.weather.gov/gridpoints/{}/{},{}",
+            office, grid_x, grid_y
+        );
+
+        let http = &self.http;
+        let url_clone = url.clone();
+        let resp: GridpointsResponse = with_retry(2, || {
+            let u = url_clone.clone();
+            let h = http.clone();
+            async move {
+                let r: GridpointsResponse = h
+                    .get(&u)
+                    .header("Accept", "application/geo+json")
+                    .send()
+                    .await?
+                    .json()
+                    .await?;
+                Ok(r)
+            }
+        })
+        .await?;
+
+        // Select the appropriate time series
+        let series = match metric {
+            WeatherMetric::TemperatureMax => resp.properties.max_temperature,
+            WeatherMetric::TemperatureMin => resp.properties.min_temperature,
+            WeatherMetric::TemperatureAvg => resp.properties.temperature,
+            WeatherMetric::Rainfall => resp.properties.quantitative_precipitation,
+            WeatherMetric::Snowfall => resp.properties.snowfall_amount,
+            WeatherMetric::WindSpeed => resp.properties.wind_speed,
         };
 
-        if values.is_empty() {
-            return Err(anyhow::anyhow!("Empty forecast data"));
+        let series = series.ok_or_else(|| {
+            anyhow::anyhow!("NOAA response missing data for metric {:?}", metric)
+        })?;
+
+        // Group values by date, applying unit conversions
+        let is_temp = is_temperature_metric(metric);
+        let is_precip = matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall);
+        let is_wind = matches!(metric, WeatherMetric::WindSpeed);
+
+        let mut daily_values: HashMap<NaiveDate, Vec<f64>> = HashMap::new();
+        for tv in &series.values {
+            let Some(raw_val) = tv.value else { continue };
+            let Some(date) = parse_noaa_date(&tv.valid_time) else { continue };
+
+            // Convert SI → US units
+            let val = if is_temp {
+                celsius_to_fahrenheit(raw_val)
+            } else if is_wind {
+                kmh_to_mph(raw_val)
+            } else if is_precip {
+                mm_to_inches(raw_val)
+            } else {
+                raw_val
+            };
+
+            daily_values.entry(date).or_default().push(val);
         }
 
-        // Validate temperature is in expected Fahrenheit range.
-        // Open-Meteo should respect temperature_unit=fahrenheit param.
-        // Log a warning if values fall outside normal F range for investigation.
-        if matches!(
-            metric,
-            WeatherMetric::TemperatureMax | WeatherMetric::TemperatureMin | WeatherMetric::TemperatureAvg
-        ) {
-            for &v in &values {
-                if v < -60.0 || v > 140.0 {
-                    tracing::warn!(
-                        value = v, metric = ?metric,
-                        "Forecast temperature out of Fahrenheit range [-60, 140], possible unit mismatch"
-                    );
-                }
-            }
+        if daily_values.is_empty() {
+            return Err(anyhow::anyhow!("No forecast data from NOAA"));
         }
+
+        // Aggregate per day: temperature → max/min/mean, precip → sum, wind → max
+        let mut sorted_dates: Vec<NaiveDate> = daily_values.keys().copied().collect();
+        sorted_dates.sort();
+
+        let mut values = Vec::new();
+        let mut dates = Vec::new();
+        for date in &sorted_dates {
+            let day_vals = &daily_values[date];
+            let agg = match metric {
+                WeatherMetric::TemperatureMax => day_vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                WeatherMetric::TemperatureMin => day_vals.iter().copied().fold(f64::INFINITY, f64::min),
+                WeatherMetric::TemperatureAvg => day_vals.iter().sum::<f64>() / day_vals.len() as f64,
+                WeatherMetric::Rainfall | WeatherMetric::Snowfall => day_vals.iter().sum::<f64>(),
+                WeatherMetric::WindSpeed => day_vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            };
+            values.push(agg);
+            dates.push(date.format("%Y-%m-%d").to_string());
+        }
+
+        // If a target date is requested, filter to that day
+        let target_value = if let Some(td) = target_date {
+            let idx = sorted_dates.iter().position(|d| *d == td);
+            idx.map(|i| values[i])
+        } else {
+            None
+        };
 
         let mean = values.iter().sum::<f64>() / values.len() as f64;
         let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
         let std_dev = variance.sqrt();
-
-        let target_value = if target_date.is_some() {
-            Some(values[0])
-        } else {
-            None
-        };
 
         Ok(ForecastData {
             values,
@@ -856,256 +962,21 @@ impl OpenMeteoClient {
             mean,
             std_dev,
             target_value,
-            model_spread: 0.0,
+            model_spread: 0.0, // NOAA is a single model
         })
     }
 
-    /// Fetch forecasts from multiple models and compute ensemble mean + model spread.
-    ///
-    /// Queries each model in parallel (via `tokio::spawn`). Models that fail are skipped.
-    /// Returns `None` if no model succeeds.
-    pub async fn forecast_ensemble(
-        &self,
-        lat: f64,
-        lon: f64,
-        metric: WeatherMetric,
-        target_date: Option<NaiveDate>,
-        precipitation_unit: &str,
-        model_names: &[String],
-    ) -> Option<ForecastData> {
-        if model_names.is_empty() {
-            return None;
-        }
-
-        let daily_param = match metric {
-            WeatherMetric::TemperatureMax => "temperature_2m_max",
-            WeatherMetric::TemperatureMin => "temperature_2m_min",
-            WeatherMetric::TemperatureAvg => "temperature_2m_mean",
-            WeatherMetric::Rainfall => "rain_sum",
-            WeatherMetric::Snowfall => "snowfall_sum",
-            WeatherMetric::WindSpeed => "wind_speed_10m_max",
-        };
-
-        // Build per-model futures
-        let mut handles = Vec::new();
-        for model_name in model_names {
-            let http = self.http.clone();
-            let model = model_name.clone();
-            let precip_unit = precipitation_unit.to_string();
-            let daily = daily_param.to_string();
-
-            let mut params: Vec<(&str, String)> = vec![
-                ("latitude", lat.to_string()),
-                ("longitude", lon.to_string()),
-                ("daily", daily),
-                ("temperature_unit", "fahrenheit".to_string()),
-            ];
-
-            if matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
-                params.push(("precipitation_unit", precip_unit));
-            }
-            if matches!(metric, WeatherMetric::WindSpeed) {
-                params.push(("wind_speed_unit", "mph".to_string()));
-            }
-            if let Some(date) = target_date {
-                let date_str = date.format("%Y-%m-%d").to_string();
-                params.push(("start_date", date_str.clone()));
-                params.push(("end_date", date_str));
-            } else {
-                params.push(("forecast_days", "14".to_string()));
-            }
-
-            // Convert to owned pairs for the spawned task
-            let owned_params: Vec<(String, String)> = params
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
-                .collect();
-
-            let handle = tokio::spawn(async move {
-                let url = format!("https://api.open-meteo.com/v1/forecast?models={}", model);
-                let result: anyhow::Result<ForecastResponse> = with_retry(1, || {
-                    let p = owned_params.clone();
-                    let u = url.clone();
-                    let h = http.clone();
-                    async move {
-                        let r: ForecastResponse = h
-                            .get(&u)
-                            .query(&p)
-                            .send()
-                            .await?
-                            .json()
-                            .await?;
-                        Ok(r)
-                    }
-                })
-                .await;
-                (model, result)
-            });
-            handles.push(handle);
-        }
-
-        // Collect results
-        let mut model_means: Vec<f64> = Vec::new();
-        let mut best_forecast: Option<ForecastData> = None;
-
-        for handle in handles {
-            if let Ok((model_name, Ok(resp))) = handle.await {
-                if let Some(daily) = resp.daily {
-                    let values = match metric {
-                        WeatherMetric::TemperatureMax => daily.temperature_2m_max,
-                        WeatherMetric::TemperatureMin => daily.temperature_2m_min,
-                        WeatherMetric::TemperatureAvg => daily.temperature_2m_mean,
-                        WeatherMetric::Rainfall => daily.rain_sum,
-                        WeatherMetric::Snowfall => daily.snowfall_sum,
-                        WeatherMetric::WindSpeed => daily.wind_speed_10m_max,
-                    };
-
-                    if values.is_empty() {
-                        continue;
-                    }
-
-                    let mean = values.iter().sum::<f64>() / values.len() as f64;
-                    let target_val = if target_date.is_some() {
-                        Some(values[0])
-                    } else {
-                        None
-                    };
-                    model_means.push(target_val.unwrap_or(mean));
-
-                    if best_forecast.is_none() {
-                        let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
-                            / values.len() as f64;
-                        best_forecast = Some(ForecastData {
-                            values,
-                            dates: daily.time,
-                            mean,
-                            std_dev: variance.sqrt(),
-                            target_value: target_val,
-                            model_spread: 0.0,
-                        });
-                    }
-
-                    tracing::debug!(
-                        model = %model_name,
-                        mean = mean,
-                        target_value = ?target_val,
-                        "Ensemble model response"
-                    );
-                }
-            }
-        }
-
-        if model_means.is_empty() {
-            return None;
-        }
-
-        let ensemble_mean = model_means.iter().sum::<f64>() / model_means.len() as f64;
-        let model_spread = if model_means.len() > 1 {
-            let var = model_means
-                .iter()
-                .map(|v| (v - ensemble_mean).powi(2))
-                .sum::<f64>()
-                / (model_means.len() - 1) as f64; // sample variance (N-1)
-            var.sqrt()
-        } else {
-            0.0
-        };
-
-        // Update the best forecast with ensemble aggregates
-        let mut forecast = best_forecast?;
-        if forecast.target_value.is_some() {
-            forecast.target_value = Some(ensemble_mean);
-        } else {
-            forecast.mean = ensemble_mean;
-        }
-        forecast.model_spread = model_spread;
-
-        tracing::debug!(
-            n_models = model_means.len(),
-            ensemble_mean = ensemble_mean,
-            model_spread = model_spread,
-            "Ensemble forecast computed"
-        );
-
-        Some(forecast)
-    }
-
-    /// Fetch historical (observed) weather data for a specific past date.
-    ///
-    /// Uses the Open-Meteo Archive API which provides historical data from 1940 onwards.
-    /// Returns the actual observed value for the given date.
-    ///
-    /// `precipitation_unit` should be `"mm"` or `"inch"`.
+    /// NOAA doesn't have a convenient historical API.
+    /// Returns Err so stale liquidity detection gracefully skips.
     pub async fn fetch_historical(
         &self,
-        lat: f64,
-        lon: f64,
-        metric: WeatherMetric,
-        target_date: NaiveDate,
-        precipitation_unit: &str,
+        _lat: f64,
+        _lon: f64,
+        _metric: WeatherMetric,
+        _target_date: NaiveDate,
+        _precipitation_unit: &str,
     ) -> anyhow::Result<f64> {
-        let daily_param = match metric {
-            WeatherMetric::TemperatureMax => "temperature_2m_max",
-            WeatherMetric::TemperatureMin => "temperature_2m_min",
-            WeatherMetric::TemperatureAvg => "temperature_2m_mean",
-            WeatherMetric::Rainfall => "rain_sum",
-            WeatherMetric::Snowfall => "snowfall_sum",
-            WeatherMetric::WindSpeed => "wind_speed_10m_max",
-        };
-
-        let date_str = target_date.format("%Y-%m-%d").to_string();
-        
-        let mut params: Vec<(&str, String)> = vec![
-            ("latitude", lat.to_string()),
-            ("longitude", lon.to_string()),
-            ("daily", daily_param.to_string()),
-            ("start_date", date_str.clone()),
-            ("end_date", date_str.clone()),
-            ("temperature_unit", "fahrenheit".to_string()),
-        ];
-
-        if matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
-            params.push(("precipitation_unit", precipitation_unit.to_string()));
-        }
-        if matches!(metric, WeatherMetric::WindSpeed) {
-            params.push(("wind_speed_unit", "mph".to_string()));
-        }
-
-        let http = &self.http;
-        let params_clone = params.clone();
-        let resp: ForecastResponse = with_retry(2, || {
-            let p = params_clone.clone();
-            async move {
-                let r: ForecastResponse = http
-                    .get("https://archive-api.open-meteo.com/v1/archive")
-                    .query(&p)
-                    .send()
-                    .await?
-                    .json()
-                    .await?;
-                Ok(r)
-            }
-        })
-        .await?;
-
-        let daily = resp
-            .daily
-            .ok_or_else(|| anyhow::anyhow!("No daily data in historical response"))?;
-
-        let values = match metric {
-            WeatherMetric::TemperatureMax => daily.temperature_2m_max,
-            WeatherMetric::TemperatureMin => daily.temperature_2m_min,
-            WeatherMetric::TemperatureAvg => daily.temperature_2m_mean,
-            WeatherMetric::Rainfall => daily.rain_sum,
-            WeatherMetric::Snowfall => daily.snowfall_sum,
-            WeatherMetric::WindSpeed => daily.wind_speed_10m_max,
-        };
-
-        if values.is_empty() {
-            return Err(anyhow::anyhow!("Empty historical data for {}", date_str));
-        }
-
-        Ok(values[0])
+        Err(anyhow::anyhow!("NOAA historical API not available"))
     }
 }
 
@@ -1371,7 +1242,7 @@ struct CachedForecast {
 
 pub struct WeatherAlphaStrategy {
     config: WeatherConfig,
-    meteo: OpenMeteoClient,
+    noaa: NoaaClient,
     profit_calc: ProfitCalculator,
     get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
     /// Returns available capital (balance - exposure) for position sizing.
@@ -1400,9 +1271,10 @@ impl WeatherAlphaStrategy {
         get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
         get_balance: Box<dyn Fn() -> Decimal + Send + Sync>,
     ) -> Self {
+        let noaa = NoaaClient::new(&config.noaa_user_agent);
         Self {
             config,
-            meteo: OpenMeteoClient::new(),
+            noaa,
             profit_calc: ProfitCalculator::new(gas_cost_usd),
             get_orderbook,
             get_available_capital,
@@ -1434,67 +1306,28 @@ impl WeatherAlphaStrategy {
         hasher.finish()
     }
 
-    /// Check if a market is in "sweep mode" - near settlement with aggressive parameters.
+    /// Check if a location is in the target cities list.
     ///
-    /// Sweep mode is enabled when:
-    /// 1. The config has sweep_mode_enabled = true
-    /// 2. The market's target_date is within sweep_hours_before of settlement
-    fn is_in_sweep_mode(&self, target_date: Option<NaiveDate>) -> bool {
-        if !self.config.sweep_mode_enabled {
-            return false;
+    /// When target_cities is non-empty, only markets in these cities are scanned.
+    /// Supports city name aliases (NYC → New York, LA → Los Angeles).
+    fn is_target_city(&self, location: &str) -> bool {
+        if self.config.target_cities.is_empty() {
+            return true; // No filter, all cities pass
         }
-        let Some(date) = target_date else {
-            return false;
-        };
-        let today = Local::now().date_naive();
-        let days_until = date.signed_duration_since(today).num_days();
-        // Convert hours to days (ceiling to be conservative)
-        let sweep_days = (self.config.sweep_hours_before as f64 / 24.0).ceil() as i64;
-        days_until >= 0 && days_until <= sweep_days
-    }
-
-    /// Check if a location is in the priority cities list.
-    ///
-    /// Priority cities (London, NYC, Seoul, etc.) account for 73% of weather market volume
-    /// and get preferential treatment in scanning order.
-    fn is_priority_city(&self, location: &str) -> bool {
         let loc_lower = location.to_lowercase();
-        self.config.priority_cities.iter().any(|city| {
-            // Check both full city name and common abbreviations
+        self.config.target_cities.iter().any(|city| {
             let city_lower = city.to_lowercase();
             loc_lower.contains(&city_lower) || {
-                // Special case: NYC -> New York
+                // Alias matching
                 if city_lower == "new york" {
                     loc_lower.contains("nyc") || loc_lower.contains("new york")
                 } else if city_lower == "los angeles" {
-                    loc_lower.contains("la ") || loc_lower.contains("los angeles")
+                    loc_lower.contains("la ") || loc_lower == "la" || loc_lower.contains("los angeles")
                 } else {
                     false
                 }
             }
         })
-    }
-
-    /// Get the effective edge threshold for a market.
-    ///
-    /// Returns sweep_min_edge_bps if in sweep mode, otherwise min_edge_bps.
-    fn effective_edge_bps(&self, target_date: Option<NaiveDate>) -> u32 {
-        if self.is_in_sweep_mode(target_date) {
-            self.config.sweep_min_edge_bps
-        } else {
-            self.config.min_edge_bps
-        }
-    }
-
-    /// Get the effective size multiplier for a market.
-    ///
-    /// Returns sweep_size_multiplier if in sweep mode, otherwise 1.0.
-    fn effective_size_multiplier(&self, target_date: Option<NaiveDate>) -> Decimal {
-        if self.is_in_sweep_mode(target_date) {
-            self.config.sweep_size_multiplier
-        } else {
-            Decimal::ONE
-        }
     }
 
     // ──── Stale Liquidity Detection ────
@@ -1535,7 +1368,7 @@ impl WeatherAlphaStrategy {
             }
 
             // Geocode the location
-            let coords = match self.meteo.geocode(&parsed.location).await {
+            let coords = match NoaaClient::geocode(&parsed.location) {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::debug!(location = %parsed.location, error = %e, "Stale check: geocode failed");
@@ -1551,7 +1384,7 @@ impl WeatherAlphaStrategy {
             };
 
             // Fetch actual historical data
-            let actual_value = match self.meteo.fetch_historical(
+            let actual_value = match self.noaa.fetch_historical(
                 coords.0,
                 coords.1,
                 parsed.metric,
@@ -1886,8 +1719,8 @@ impl WeatherAlphaStrategy {
             }
         }
 
-        // Fetch from API
-        let coords = match self.meteo.geocode(&parsed.location).await {
+        // Geocode via lookup table
+        let coords = match NoaaClient::geocode(&parsed.location) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(
@@ -1899,52 +1732,21 @@ impl WeatherAlphaStrategy {
             }
         };
 
-        // Try ensemble if enabled, fallback to single model
-        let forecast = if self.config.ensemble_enabled && !self.config.ensemble_models.is_empty() {
-            match self
-                .meteo
-                .forecast_ensemble(
-                    coords.0,
-                    coords.1,
-                    parsed.metric,
-                    target_date,
-                    precipitation_unit,
-                    &self.config.ensemble_models,
-                )
-                .await
-            {
-                Some(f) => f,
-                None => {
-                    tracing::warn!("Ensemble forecast failed, falling back to single model");
-                    match self
-                        .meteo
-                        .forecast(coords.0, coords.1, parsed.metric, target_date, precipitation_unit)
-                        .await
-                    {
-                        Ok(f) => f,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Single model fallback also failed");
-                            return None;
-                        }
-                    }
-                }
-            }
-        } else {
-            match self
-                .meteo
-                .forecast(coords.0, coords.1, parsed.metric, target_date, precipitation_unit)
-                .await
-            {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::warn!(
-                        location = %parsed.location,
-                        metric = ?parsed.metric,
-                        error = %e,
-                        "Failed to fetch forecast"
-                    );
-                    return None;
-                }
+        // Fetch from NOAA
+        let forecast = match self
+            .noaa
+            .forecast(coords.0, coords.1, parsed.metric, target_date, precipitation_unit)
+            .await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(
+                    location = %parsed.location,
+                    metric = ?parsed.metric,
+                    error = %e,
+                    "Failed to fetch forecast from NOAA"
+                );
+                return None;
             }
         };
 
@@ -2082,12 +1884,13 @@ impl WeatherAlphaStrategy {
         let no_model_prob = Decimal::ONE - model_prob_dec;
 
         // Compute edge on both sides and pick the larger one
-        let yes_edge = if model_prob_dec > yes_ask {
+        // Only consider sides where the ask price is below max_entry_price
+        let yes_edge = if model_prob_dec > yes_ask && yes_ask <= self.config.max_entry_price {
             Some(model_prob_dec - yes_ask)
         } else {
             None
         };
-        let no_edge = if no_model_prob > no_ask {
+        let no_edge = if no_model_prob > no_ask && no_ask <= self.config.max_entry_price {
             Some(no_model_prob - no_ask)
         } else {
             None
@@ -2111,41 +1914,16 @@ impl WeatherAlphaStrategy {
             use rust_decimal::prelude::ToPrimitive;
             (edge * dec!(10000)).to_u32().unwrap_or(0)
         };
-        if edge_bps < self.effective_edge_bps(target_date) {
+        if edge_bps < self.config.min_edge_bps {
             return None;
         }
 
-        // Dynamic position cap: fraction of current wallet balance
-        // Apply sweep size multiplier if near settlement
-        let sweep_multiplier = self.effective_size_multiplier(target_date);
-        let effective_max = (self.get_balance)() * self.config.max_position_pct * sweep_multiplier;
-
-        // Position sizing via Kelly criterion: f* = edge / (1 - price)
-        // Guard against extreme prices where denominator approaches zero
-        let kelly_raw = if ask_price > Decimal::ZERO && ask_price < dec!(0.99) {
-            (edge / (Decimal::ONE - ask_price)).min(Decimal::TWO) // cap at 200%
-        } else {
-            Decimal::ZERO
-        };
-        let kelly_size = kelly_raw * self.config.kelly_fraction * effective_max;
+        // Fixed position sizing: max_position_usdc per trade, position-aware
+        let max_usdc = self.config.max_position_usdc;
         let available = (self.get_available_capital)();
-
-        // Position-aware sizing (convert shares to USDC cost for correct unit comparison)
         let existing_cost = (self.get_position)(token_id) * ask_price;
-        let remaining = (effective_max - existing_cost).max(Decimal::ZERO);
-        let size = kelly_size.min(remaining).min(available);
-
-        // Ensure size meets CLOB minimum cost ($1.00).
-        // Only bump up when kelly_raw >= 0.04 (meaningful conviction).
-        // If kelly_raw is tiny, the edge is noise — don't force a $1 bet.
-        let size = if size > Decimal::ZERO && ask_price > Decimal::ZERO && kelly_raw >= dec!(0.04) {
-            let min_cost_size = (Decimal::ONE / ask_price).ceil();
-            size.max(min_cost_size)
-        } else {
-            size
-        };
-        // Cap again after bump-up: never exceed available capital or remaining room
-        let size = size.min(remaining).min(available);
+        let remaining = (max_usdc - existing_cost).max(Decimal::ZERO);
+        let size = max_usdc.min(remaining).min(available);
 
         // After capping, verify we still meet CLOB minimum ($1.00 cost).
         // E.g. at price $0.019, min_cost_size=53 but available may only allow 2 shares.
@@ -2230,7 +2008,7 @@ impl WeatherAlphaStrategy {
         }
 
         // Fetch from API
-        let coords = match self.meteo.geocode(location).await {
+        let coords = match NoaaClient::geocode(location) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(location = %location, error = %e, "Failed to geocode for NegRisk weather");
@@ -2238,47 +2016,16 @@ impl WeatherAlphaStrategy {
             }
         };
 
-        // Try ensemble if enabled, fallback to single model
-        let forecast = if self.config.ensemble_enabled && !self.config.ensemble_models.is_empty() {
-            match self
-                .meteo
-                .forecast_ensemble(
-                    coords.0,
-                    coords.1,
-                    metric,
-                    target_date,
-                    precipitation_unit,
-                    &self.config.ensemble_models,
-                )
-                .await
-            {
-                Some(f) => f,
-                None => {
-                    tracing::warn!("Ensemble forecast failed for NegRisk, falling back to single model");
-                    match self
-                        .meteo
-                        .forecast(coords.0, coords.1, metric, target_date, precipitation_unit)
-                        .await
-                    {
-                        Ok(f) => f,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "Single model fallback also failed for NegRisk");
-                            return None;
-                        }
-                    }
-                }
-            }
-        } else {
-            match self
-                .meteo
-                .forecast(coords.0, coords.1, metric, target_date, precipitation_unit)
-                .await
-            {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::warn!(location = %location, metric = ?metric, error = %e, "Failed to fetch forecast for NegRisk weather");
-                    return None;
-                }
+        // Fetch from NOAA
+        let forecast = match self
+            .noaa
+            .forecast(coords.0, coords.1, metric, target_date, precipitation_unit)
+            .await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(location = %location, metric = ?metric, error = %e, "Failed to fetch forecast from NOAA for NegRisk weather");
+                return None;
             }
         };
 
@@ -2456,12 +2203,12 @@ impl WeatherAlphaStrategy {
                 continue;
             }
 
-            // YES side check
+            // YES side check: only if ask price is below max_entry_price
             if let Some(yes_book) = yes_book
                 && let Some(yes_ask_level) = yes_book.best_ask()
             {
                 let yes_ask = yes_ask_level.price;
-                if model_prob > yes_ask {
+                if model_prob > yes_ask && yes_ask <= self.config.max_entry_price {
                     let edge = model_prob - yes_ask;
                     if edge > best_edge {
                         best_edge = edge;
@@ -2477,7 +2224,7 @@ impl WeatherAlphaStrategy {
                 && let Some(no_ask_level) = no_book.best_ask()
             {
                 let no_ask = no_ask_level.price;
-                if no_model_prob > no_ask {
+                if no_model_prob > no_ask && no_ask <= self.config.max_entry_price {
                     let edge = no_model_prob - no_ask;
                     if edge > best_edge {
                         best_edge = edge;
@@ -2495,40 +2242,16 @@ impl WeatherAlphaStrategy {
             use rust_decimal::prelude::ToPrimitive;
             (edge * dec!(10000)).to_u32().unwrap_or(0)
         };
-        if edge_bps < self.effective_edge_bps(target_date) {
+        if edge_bps < self.config.min_edge_bps {
             return None;
         }
 
-        // Dynamic position cap: fraction of current wallet balance
-        // Apply sweep size multiplier if near settlement
-        let sweep_multiplier = self.effective_size_multiplier(target_date);
-        let effective_max = (self.get_balance)() * self.config.max_position_pct * sweep_multiplier;
-
-        // Kelly criterion position sizing
-        let kelly_raw = if ask_price > Decimal::ZERO && ask_price < dec!(0.99) {
-            (edge / (Decimal::ONE - ask_price)).min(Decimal::TWO)
-        } else {
-            Decimal::ZERO
-        };
-        let kelly_size = kelly_raw * self.config.kelly_fraction * effective_max;
+        // Fixed position sizing: max_position_usdc per trade, position-aware
+        let max_usdc = self.config.max_position_usdc;
         let available = (self.get_available_capital)();
-
-        // Position-aware sizing (convert shares to USDC cost for correct unit comparison)
         let existing_cost = (self.get_position)(token_id) * ask_price;
-        let remaining = (effective_max - existing_cost).max(Decimal::ZERO);
-        let size = kelly_size.min(remaining).min(available);
-
-        // Ensure size meets CLOB minimum cost ($1.00).
-        // Only bump up when kelly_raw >= 0.04 (meaningful conviction).
-        // If kelly_raw is tiny, the edge is noise — don't force a $1 bet.
-        let size = if size > Decimal::ZERO && ask_price > Decimal::ZERO && kelly_raw >= dec!(0.04) {
-            let min_cost_size = (Decimal::ONE / ask_price).ceil();
-            size.max(min_cost_size)
-        } else {
-            size
-        };
-        // Cap again after bump-up: never exceed available capital or remaining room
-        let size = size.min(remaining).min(available);
+        let remaining = (max_usdc - existing_cost).max(Decimal::ZERO);
+        let size = max_usdc.min(remaining).min(available);
 
         // After capping, verify we still meet CLOB minimum ($1.00 cost).
         // E.g. at price $0.019, min_cost_size=53 but available may only allow 2 shares.
@@ -2618,6 +2341,18 @@ impl WeatherAlphaStrategy {
                     continue;
                 }
             };
+
+            // Profit-take exit: sell when price rises above profit_take_threshold
+            if best_bid >= self.config.profit_take_threshold {
+                tracing::debug!(
+                    token_id = %token_id,
+                    best_bid = %best_bid,
+                    threshold = %self.config.profit_take_threshold,
+                    "[EXIT] Profit take — weather"
+                );
+                exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
+                continue;
+            }
 
             // Capital efficiency exit: bid >= threshold
             if best_bid >= self.config.capital_efficiency_threshold {
@@ -2868,9 +2603,8 @@ impl Strategy for WeatherAlphaStrategy {
         let mut binary_weather = 0u32;
         let mut neg_risk_weather = 0u32;
 
-        // 1. Collect and sort binary weather markets by city priority
-        // Priority cities (London, NYC, Seoul, etc.) are scanned first
-        let mut binary_candidates: Vec<(usize, &MarketInfo, WeatherQuestion)> = Vec::new();
+        // 1. Collect binary weather markets, filtered by target cities
+        let mut binary_candidates: Vec<(&MarketInfo, WeatherQuestion)> = Vec::new();
         for market in markets {
             if !market.active || market.neg_risk {
                 continue;
@@ -2881,25 +2615,28 @@ impl Strategy for WeatherAlphaStrategy {
                 None => continue, // Not a weather market
             };
 
+            // Filter by target cities
+            if !self.is_target_city(&parsed.location) {
+                continue;
+            }
+
             binary_weather += 1;
-            // Priority score: 0 for non-priority cities, 1 for priority cities
-            let priority_score = if self.is_priority_city(&parsed.location) { 1 } else { 0 };
-            binary_candidates.push((priority_score, market, parsed));
+            binary_candidates.push((market, parsed));
         }
 
-        // Sort by priority score (descending) so priority cities are scanned first
-        binary_candidates.sort_by(|a, b| b.0.cmp(&a.0));
-
-        // Scan sorted binary weather markets
-        for (_, market, parsed) in binary_candidates {
+        // Scan binary weather markets
+        for (market, parsed) in binary_candidates {
             if let Some(opp) = self.detect_weather_opportunity(market, &parsed).await {
                 opportunities.push(opp);
             }
         }
 
-        // 2. Scan NegRisk weather events
+        // 2. Scan NegRisk weather events (filtered by target cities)
         for event in &self.neg_risk_events {
             if let Some((metric, location)) = parse_weather_event_title(&event.title) {
+                if !self.is_target_city(&location) {
+                    continue;
+                }
                 neg_risk_weather += 1;
                 if let Some(opp) = self.detect_neg_risk_weather(event, metric, &location).await {
                     opportunities.push(opp);
@@ -2931,6 +2668,9 @@ impl Strategy for WeatherAlphaStrategy {
         let mut surround_count = 0u32;
         for event in &self.neg_risk_events {
             if let Some((metric, location)) = parse_weather_event_title(&event.title) {
+                if !self.is_target_city(&location) {
+                    continue;
+                }
                 let opps = self.detect_neg_risk_surround(event, metric, &location).await;
                 if !opps.is_empty() {
                     surround_count += opps.len() as u32;
@@ -3121,15 +2861,13 @@ mod tests {
             exit_buffer_bps: 50,
             capital_efficiency_threshold: dec!(0.98),
             dynamic_sigma: false,
-            ensemble_enabled: false,
-            ensemble_models: vec![],
             forecast_change_detection: false,
             forecast_change_threshold: 0.5,
-            sweep_mode_enabled: false,
-            sweep_hours_before: 12,
-            sweep_min_edge_bps: 200,
-            sweep_size_multiplier: dec!(1.5),
-            priority_cities: vec![],
+            max_entry_price: dec!(0.15),
+            profit_take_threshold: dec!(0.45),
+            max_position_usdc: dec!(2),
+            noaa_user_agent: "test".to_string(),
+            target_cities: vec![],
         };
 
         let profit_calc = ProfitCalculator::new(Decimal::ZERO);
@@ -4011,15 +3749,13 @@ mod tests {
             exit_buffer_bps: 50,
             capital_efficiency_threshold: dec!(0.98),
             dynamic_sigma: false,
-            ensemble_enabled: false,
-            ensemble_models: vec![],
             forecast_change_detection: false,
             forecast_change_threshold: 0.5,
-            sweep_mode_enabled: false,
-            sweep_hours_before: 12,
-            sweep_min_edge_bps: 200,
-            sweep_size_multiplier: dec!(1.5),
-            priority_cities: vec![],
+            max_entry_price: Decimal::ONE, // No price ceiling in test helper
+            profit_take_threshold: dec!(0.45),
+            max_position_usdc: dec!(100), // Large cap for test helper
+            noaa_user_agent: "test".to_string(),
+            target_cities: vec![],
         };
         let books = Arc::new(books);
         WeatherAlphaStrategy::new(
@@ -4178,15 +3914,13 @@ mod tests {
             exit_buffer_bps: 50,
             capital_efficiency_threshold: dec!(0.98),
             dynamic_sigma: false,
-            ensemble_enabled: false,
-            ensemble_models: vec![],
             forecast_change_detection: true,   // ENABLED
             forecast_change_threshold: 0.5,
-            sweep_mode_enabled: false,
-            sweep_hours_before: 12,
-            sweep_min_edge_bps: 200,
-            sweep_size_multiplier: dec!(1.5),
-            priority_cities: vec![],
+            max_entry_price: dec!(0.15),
+            profit_take_threshold: dec!(0.45),
+            max_position_usdc: dec!(2),
+            noaa_user_agent: "test".to_string(),
+            target_cities: vec![],
         };
         let held = vec![(token_id, dec!(50), dec!(0.30))];
         let held_clone = held.clone();
@@ -4326,7 +4060,8 @@ mod tests {
         let strategy = make_weather_strategy(books, held);
 
         // Pre-populate cache with strong forecast (110°F for "exceed 100°F")
-        let cache_key = WeatherAlphaStrategy::location_hash("London", WeatherMetric::TemperatureMax, None);
+        let question = "Will the temperature in NYC exceed 100°F on March 5?";
+        let cache_key = WeatherAlphaStrategy::question_hash(question);
         {
             let mut cache = strategy.forecast_cache.lock().unwrap();
             cache.insert(cache_key, CachedForecast {
@@ -4344,10 +4079,10 @@ mod tests {
             });
         }
 
-        let market = make_weather_market( "Will the temperature in London exceed 100°F on March 5?");
+        let market = make_weather_market(question);
         let parsed = WeatherQuestion {
             metric: WeatherMetric::TemperatureMax,
-            location: "London".to_string(),
+            location: "NYC".to_string(),
             threshold: 100.0,
             comparison: Comparison::Above,
         };
@@ -4379,7 +4114,8 @@ mod tests {
         let held = vec![];
         let strategy = make_weather_strategy(books, held);
 
-        let cache_key = WeatherAlphaStrategy::location_hash("London", WeatherMetric::TemperatureMax, None);
+        let question = "Will the temperature in NYC exceed 100°F on March 5?";
+        let cache_key = WeatherAlphaStrategy::question_hash(question);
         {
             let mut cache = strategy.forecast_cache.lock().unwrap();
             cache.insert(cache_key, CachedForecast {
@@ -4397,10 +4133,10 @@ mod tests {
             });
         }
 
-        let market = make_weather_market( "Will the temperature in London exceed 100°F on March 5?");
+        let market = make_weather_market(question);
         let parsed = WeatherQuestion {
             metric: WeatherMetric::TemperatureMax,
-            location: "London".to_string(),
+            location: "NYC".to_string(),
             threshold: 100.0,
             comparison: Comparison::Above,
         };
@@ -4488,5 +4224,335 @@ mod tests {
         // 0.26 < 0.52 - 0.005 = 0.515 → EXIT must fire
         assert_eq!(exits.len(), 1, "Celsius NegRisk exit should fire with correct conversion");
         assert!(exits[0].question.starts_with("[EXIT]"));
+    }
+
+    // ──── NOAA Client Tests ────
+
+    #[test]
+    fn test_geocode_known_city() {
+        let (lat, lon) = NoaaClient::geocode("New York").unwrap();
+        assert!((lat - 40.7128).abs() < 0.01);
+        assert!((lon - (-74.0060)).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_geocode_known_city_case_insensitive() {
+        let (lat, _) = NoaaClient::geocode("chicago").unwrap();
+        assert!((lat - 41.8781).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_geocode_unknown_city() {
+        assert!(NoaaClient::geocode("London").is_err());
+        assert!(NoaaClient::geocode("Tokyo").is_err());
+        assert!(NoaaClient::geocode("Unknown City").is_err());
+    }
+
+    #[test]
+    fn test_parse_noaa_valid_date() {
+        let date = parse_noaa_date("2026-03-10T06:00:00+00:00/PT6H").unwrap();
+        assert_eq!(date, NaiveDate::from_ymd_opt(2026, 3, 10).unwrap());
+    }
+
+    #[test]
+    fn test_parse_noaa_date_no_duration() {
+        let date = parse_noaa_date("2026-01-15T12:00:00+00:00").unwrap();
+        assert_eq!(date, NaiveDate::from_ymd_opt(2026, 1, 15).unwrap());
+    }
+
+    #[test]
+    fn test_parse_noaa_invalid_date() {
+        assert!(parse_noaa_date("not-a-date").is_none());
+        assert!(parse_noaa_date("").is_none());
+    }
+
+    #[test]
+    fn test_kmh_to_mph() {
+        assert!((kmh_to_mph(100.0) - 62.1371).abs() < 0.01);
+        assert!((kmh_to_mph(0.0) - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_mm_to_inches() {
+        assert!((mm_to_inches(25.4) - 1.0).abs() < 0.001);
+        assert!((mm_to_inches(0.0) - 0.0).abs() < 0.001);
+    }
+
+    // ──── Price Ceiling Tests ────
+
+    #[tokio::test]
+    async fn test_price_ceiling_rejects_expensive() {
+        // Token priced at 0.20, max_entry_price=0.15 → should reject
+        let token_id = U256::from(1u64);
+        let mut books = HashMap::new();
+        books.insert(token_id, make_weather_book(token_id, dec!(0.20)));
+        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.80)));
+
+        let held = vec![];
+        let books_arc = Arc::new(books);
+        let config = WeatherConfig {
+            min_edge_bps: 500,
+            max_spread_bps: 5000,
+            max_position_pct: dec!(0.50),
+            kelly_fraction: dec!(0.25),
+            forecast_error: ForecastErrorConfig::default(),
+            refresh_interval_secs: 3600,
+            exit_buffer_bps: 50,
+            capital_efficiency_threshold: dec!(0.98),
+            dynamic_sigma: false,
+            forecast_change_detection: false,
+            forecast_change_threshold: 0.5,
+            max_entry_price: dec!(0.15),  // Only buy below 15 cents
+            profit_take_threshold: dec!(0.45),
+            max_position_usdc: dec!(2),
+            noaa_user_agent: "test".to_string(),
+            target_cities: vec![],
+        };
+        let strategy = WeatherAlphaStrategy::new(
+            config,
+            Decimal::ZERO,
+            Box::new(move |tid| books_arc.get(&tid).cloned()),
+            Box::new(|| Decimal::MAX),
+            Box::new(|_| Decimal::ZERO),
+            vec![],
+            Box::new(move || held.clone()),
+            Box::new(|| dec!(200)),
+        );
+
+        // Pre-populate cache: model says 80% (strong edge over 0.20 ask)
+        let question = "Will the temperature in NYC exceed 50°F on March 5?";
+        let cache_key = WeatherAlphaStrategy::question_hash(question);
+        {
+            let mut cache = strategy.forecast_cache.lock().unwrap();
+            cache.insert(cache_key, CachedForecast {
+                forecast: ForecastData {
+                    values: vec![80.0],
+                    dates: vec!["2026-03-05".into()],
+                    mean: 80.0,
+                    std_dev: 3.0,
+                    target_value: Some(80.0),
+                    model_spread: 0.0,
+                },
+                fetched_at: Instant::now(),
+                previous_mean: None,
+                is_fresh_signal: true,
+            });
+        }
+
+        let market = make_weather_market(question);
+        let parsed = parse_weather_question(question).unwrap();
+        let result = strategy.detect_weather_opportunity(&market, &parsed).await;
+        assert!(result.is_none(), "Token at 0.20 should be rejected (max_entry_price=0.15)");
+    }
+
+    #[tokio::test]
+    async fn test_price_ceiling_accepts_cheap() {
+        // Token priced at 0.10, max_entry_price=0.15 → should accept
+        let token_id = U256::from(1u64);
+        let mut books = HashMap::new();
+        books.insert(token_id, make_weather_book(token_id, dec!(0.10)));
+        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.90)));
+
+        let held = vec![];
+        let books_arc = Arc::new(books);
+        let config = WeatherConfig {
+            min_edge_bps: 500,
+            max_spread_bps: 5000,
+            max_position_pct: dec!(0.50),
+            kelly_fraction: dec!(0.25),
+            forecast_error: ForecastErrorConfig::default(),
+            refresh_interval_secs: 3600,
+            exit_buffer_bps: 50,
+            capital_efficiency_threshold: dec!(0.98),
+            dynamic_sigma: false,
+            forecast_change_detection: false,
+            forecast_change_threshold: 0.5,
+            max_entry_price: dec!(0.15),  // Only buy below 15 cents
+            profit_take_threshold: dec!(0.45),
+            max_position_usdc: dec!(100),
+            noaa_user_agent: "test".to_string(),
+            target_cities: vec![],
+        };
+        let strategy = WeatherAlphaStrategy::new(
+            config,
+            Decimal::ZERO,
+            Box::new(move |tid| books_arc.get(&tid).cloned()),
+            Box::new(|| Decimal::MAX),
+            Box::new(|_| Decimal::ZERO),
+            vec![],
+            Box::new(move || held.clone()),
+            Box::new(|| dec!(200)),
+        );
+
+        // Pre-populate cache: model says 80% (strong edge over 0.10 ask)
+        let question = "Will the temperature in NYC exceed 50°F on March 5?";
+        let cache_key = WeatherAlphaStrategy::question_hash(question);
+        {
+            let mut cache = strategy.forecast_cache.lock().unwrap();
+            cache.insert(cache_key, CachedForecast {
+                forecast: ForecastData {
+                    values: vec![80.0],
+                    dates: vec!["2026-03-05".into()],
+                    mean: 80.0,
+                    std_dev: 3.0,
+                    target_value: Some(80.0),
+                    model_spread: 0.0,
+                },
+                fetched_at: Instant::now(),
+                previous_mean: None,
+                is_fresh_signal: true,
+            });
+        }
+
+        let market = make_weather_market(question);
+        let parsed = parse_weather_question(question).unwrap();
+        let result = strategy.detect_weather_opportunity(&market, &parsed).await;
+        assert!(result.is_some(), "Token at 0.10 should be accepted (max_entry_price=0.15)");
+    }
+
+    // ──── Profit-Take Exit Tests ────
+
+    #[tokio::test]
+    async fn test_profit_take_exit() {
+        // Bought YES at 0.10, best_bid rises to 0.50 (> profit_take_threshold=0.45)
+        let token_id = U256::from(1u64);
+        let mut books = HashMap::new();
+        let mut book = make_weather_book(token_id, dec!(0.50));
+        book.bids.clear();
+        book.bids.push(PriceLevel { price: dec!(0.50), size: dec!(100) });
+        books.insert(token_id, book);
+        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.50)));
+
+        let held = vec![(token_id, dec!(20), dec!(0.10))]; // bought at 0.10
+        let strategy = make_weather_strategy(books, held);
+
+        let market = make_weather_market("Will the temperature in NYC exceed 100F this summer?");
+        let exits = strategy.scan_exits(&[market]).await;
+        // best_bid 0.50 >= profit_take_threshold 0.45 → should trigger
+        assert_eq!(exits.len(), 1, "Profit-take exit should fire when best_bid >= 0.45");
+        assert!(exits[0].question.contains("[EXIT]"));
+    }
+
+    #[tokio::test]
+    async fn test_profit_take_below_threshold() {
+        // Bought YES at 0.10, best_bid at 0.40 (< profit_take_threshold=0.45)
+        let token_id = U256::from(1u64);
+        let mut books = HashMap::new();
+        let mut book = make_weather_book(token_id, dec!(0.50));
+        book.bids.clear();
+        book.bids.push(PriceLevel { price: dec!(0.40), size: dec!(100) });
+        books.insert(token_id, book);
+        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.60)));
+
+        let held = vec![(token_id, dec!(20), dec!(0.10))]; // bought at 0.10
+        let strategy = make_weather_strategy(books, held);
+
+        // Pre-populate cache so model reversal doesn't fire
+        let question = "Will the temperature in NYC exceed 100F this summer?";
+        let cache_key = WeatherAlphaStrategy::question_hash(question);
+        {
+            let mut cache = strategy.forecast_cache.lock().unwrap();
+            cache.insert(cache_key, CachedForecast {
+                forecast: ForecastData {
+                    values: vec![110.0],
+                    dates: vec!["2026-07-01".into()],
+                    mean: 110.0,
+                    std_dev: 3.0,
+                    target_value: Some(110.0),
+                    model_spread: 0.0,
+                },
+                fetched_at: Instant::now(),
+                previous_mean: None,
+                is_fresh_signal: true,
+            });
+        }
+
+        let market = make_weather_market(question);
+        let exits = strategy.scan_exits(&[market]).await;
+        // best_bid 0.40 < profit_take_threshold 0.45 → should NOT trigger profit-take
+        // model_prob ≈ 1.0 (forecast 110 >> threshold 100), best_bid 0.40 → no model reversal
+        // avg_cost 0.10, best_bid 0.40 → not a deep loss
+        assert_eq!(exits.len(), 0, "Should not exit when best_bid < profit_take_threshold");
+    }
+
+    // ──── Target City Filter Tests ────
+
+    #[test]
+    fn test_target_city_filter_us_cities() {
+        let config = WeatherConfig {
+            target_cities: vec!["New York".to_string(), "Chicago".to_string()],
+            ..Default::default()
+        };
+        let strategy = WeatherAlphaStrategy::new(
+            config,
+            Decimal::ZERO,
+            Box::new(|_| None),
+            Box::new(|| Decimal::ZERO),
+            Box::new(|_| Decimal::ZERO),
+            vec![],
+            Box::new(|| vec![]),
+            Box::new(|| Decimal::ZERO),
+        );
+
+        assert!(strategy.is_target_city("New York"));
+        assert!(strategy.is_target_city("NYC")); // alias
+        assert!(strategy.is_target_city("Chicago"));
+        assert!(!strategy.is_target_city("London"));
+        assert!(!strategy.is_target_city("Miami"));
+    }
+
+    #[test]
+    fn test_target_city_filter_empty_allows_all() {
+        let config = WeatherConfig {
+            target_cities: vec![],
+            ..Default::default()
+        };
+        let strategy = WeatherAlphaStrategy::new(
+            config,
+            Decimal::ZERO,
+            Box::new(|_| None),
+            Box::new(|| Decimal::ZERO),
+            Box::new(|_| Decimal::ZERO),
+            vec![],
+            Box::new(|| vec![]),
+            Box::new(|| Decimal::ZERO),
+        );
+
+        assert!(strategy.is_target_city("New York"));
+        assert!(strategy.is_target_city("London"));
+        assert!(strategy.is_target_city("Anywhere"));
+    }
+
+    // ──── Fixed Sizing Tests ────
+
+    #[test]
+    fn test_fixed_sizing_caps_at_max() {
+        // max_position_usdc = $2, no existing position → size = $2
+        let max_usdc = dec!(2);
+        let existing_cost = Decimal::ZERO;
+        let available = dec!(1000);
+        let remaining = (max_usdc - existing_cost).max(Decimal::ZERO);
+        let size = max_usdc.min(remaining).min(available);
+        assert_eq!(size, dec!(2));
+    }
+
+    #[test]
+    fn test_fixed_sizing_position_aware() {
+        // max_position_usdc = $2, existing $1.50 → remaining $0.50
+        let max_usdc = dec!(2);
+        let existing_cost = dec!(1.5);
+        let available = dec!(1000);
+        let remaining = (max_usdc - existing_cost).max(Decimal::ZERO);
+        let size = max_usdc.min(remaining).min(available);
+        assert_eq!(size, dec!(0.5));
+    }
+
+    #[test]
+    fn test_fixed_sizing_at_max_skips() {
+        // max_position_usdc = $2, existing $2 → remaining $0
+        let max_usdc = dec!(2);
+        let existing_cost = dec!(2);
+        let remaining = (max_usdc - existing_cost).max(Decimal::ZERO);
+        assert_eq!(remaining, Decimal::ZERO);
     }
 }

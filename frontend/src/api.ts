@@ -1,4 +1,15 @@
-const API_BASE = "";
+// Dev mode: relative paths go through Vite proxy → backend
+// Production: served by Axum, relative paths hit the same origin
+const BASE = "";
+
+// --- Types ---
+
+export interface HealthResponse {
+  status: string;
+  service: string;
+  uptime_seconds: number;
+  checks: Record<string, string>;
+}
 
 export interface StatusResponse {
   uptime_seconds: number;
@@ -9,89 +20,110 @@ export interface StatusResponse {
   event_calendar_enabled: boolean;
 }
 
-export interface HealthResponse {
-  status: string;
-  service: string;
-  uptime_seconds: number;
-  checks: Record<string, string>;
-}
-
 export interface HistoryEntry {
   version: number;
-  data: Record<string, unknown>;
+  data: unknown;
   changed_by: string;
   created_at: string;
-}
-
-export async function fetchConfig(): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_BASE}/api/config`);
-  if (!res.ok) throw new Error(`Failed to fetch config: ${res.status}`);
-  return res.json();
-}
-
-export async function fetchSection(
-  section: string
-): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_BASE}/api/config/${section}`);
-  if (!res.ok) throw new Error(`Failed to fetch section: ${res.status}`);
-  return res.json();
-}
-
-export async function updateSection(
-  section: string,
-  data: Record<string, unknown>
-): Promise<{ section: string; version: number; status: string }> {
-  const res = await fetch(`${API_BASE}/api/config/${section}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  const body = await res.json();
-  if (!res.ok)
-    throw new Error(body.error || `Failed to update section: ${res.status}`);
-  return body;
-}
-
-export async function fetchHistory(section: string): Promise<HistoryEntry[]> {
-  const res = await fetch(`${API_BASE}/api/config/history/${section}`);
-  if (!res.ok) throw new Error(`Failed to fetch history: ${res.status}`);
-  return res.json();
-}
-
-export async function fetchStatus(): Promise<StatusResponse> {
-  const res = await fetch(`${API_BASE}/api/status`);
-  if (!res.ok) throw new Error(`Failed to fetch status: ${res.status}`);
-  return res.json();
-}
-
-export async function fetchHealth(): Promise<HealthResponse> {
-  const res = await fetch(`${API_BASE}/health`);
-  if (!res.ok) throw new Error(`Failed to fetch health: ${res.status}`);
-  return res.json();
 }
 
 export interface LrMarketStatus {
   condition_id: string;
   question: string;
-  daily_rate: number;
+  daily_rate: string;
   outstanding_orders: number;
-  yes_bid: number | null;
-  yes_ask: number | null;
-  no_bid: number | null;
-  no_ask: number | null;
+  yes_bid: string | null;
+  yes_ask: string | null;
+  no_bid: string | null;
+  no_ask: string | null;
 }
 
 export interface LrRuntimeStatus {
   active_markets: LrMarketStatus[];
-  total_exposure: number;
-  cached_balance: number;
+  total_exposure: string;
+  cached_balance: string;
   market_mode: string;
   last_refresh: string | null;
-  error?: string;
 }
 
-export async function fetchLRStatus(): Promise<LrRuntimeStatus> {
-  const res = await fetch(`${API_BASE}/api/lr/status`);
-  if (!res.ok) throw new Error(`Failed to fetch LR status: ${res.status}`);
+export interface UpdateResult {
+  section: string;
+  version: number;
+  status: string;
+  persisted: boolean;
+}
+
+export interface PositionEntry {
+  token_id: string;
+  size: string;
+  avg_cost: string;
+  cost_basis: string;
+  strategy: string | null;
+  condition_id: string | null;
+  question: string | null;
+  outcome: string | null;
+  current_price: string | null;
+  unrealized_pnl: string | null;
+}
+
+// --- API functions ---
+
+async function get<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`);
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`${res.status}: ${body}`);
+  }
   return res.json();
+}
+
+export function fetchHealth(): Promise<HealthResponse> {
+  return get("/health");
+}
+
+export function fetchStatus(): Promise<StatusResponse> {
+  return get("/api/status");
+}
+
+export function fetchConfig(): Promise<Record<string, unknown>> {
+  return get("/api/config");
+}
+
+export function fetchSection(section: string): Promise<Record<string, unknown>> {
+  return get(`/api/config/${section}`);
+}
+
+export async function updateSection(
+  section: string,
+  data: unknown,
+): Promise<UpdateResult> {
+  const res = await fetch(`${BASE}/api/config/${section}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`${res.status}: ${body}`);
+  }
+  return res.json();
+}
+
+export function fetchHistory(section: string): Promise<HistoryEntry[]> {
+  return get(`/api/config/history/${section}`);
+}
+
+export function fetchLRStatus(): Promise<LrRuntimeStatus> {
+  return get("/api/lr/status");
+}
+
+export function fetchPositions(strategy?: string): Promise<PositionEntry[]> {
+  const q = strategy ? `?strategy=${encodeURIComponent(strategy)}` : "";
+  return get(`/api/positions${q}`);
+}
+
+export async function fetchMetrics(): Promise<string> {
+  const res = await fetch(`${BASE}/metrics`);
+  if (!res.ok) throw new Error(`metrics: ${res.status}`);
+  return res.text();
 }

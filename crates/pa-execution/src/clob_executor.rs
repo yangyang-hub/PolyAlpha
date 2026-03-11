@@ -646,7 +646,7 @@ mod tests {
 
     #[test]
     fn test_cost_precision_2dp_prices() {
-        // Common convergence prices
+        // High-confidence prices (near 0 or 1)
         assert_valid_cost(dec!(0.95), dec!(20.00));
         assert_valid_cost(dec!(0.95), dec!(22.67));
         assert_valid_cost(dec!(0.97), dec!(22.67));

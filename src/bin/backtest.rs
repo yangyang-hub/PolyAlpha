@@ -148,7 +148,7 @@ async fn main() -> Result<()> {
 
 fn default_strategy_config() -> pa_core::config::StrategyConfig {
     pa_core::config::StrategyConfig {
-        enabled: vec!["weather".into(), "convergence".into(), "crypto".into()],
+        enabled: vec!["weather".into(), "crypto".into()],
         scan_interval_ms: 1000,
         min_spread_bps: 50,
         min_profit_usdc: dec!(0.50),

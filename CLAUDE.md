@@ -9,13 +9,13 @@ Polymarket 量化方向性交易机器人（Rust）。通过实时订单簿监�
 - **语言**: Rust Edition 2024, MSRV 1.88.0
 - **工具链**: rustc 1.93.0, cargo 1.93.0
 - **代码量**: ~19500 行 Rust + 前端 SPA
-- **测试**: 217 个（全部通过）
+- **测试**: 234 个（全部通过）
 
 ## 常用命令
 
 ```bash
 cargo check --workspace          # 编译检查
-cargo test --workspace           # 运行全部 217 个测试
+cargo test --workspace           # 运行全部 234 个测试
 cargo build --release            # 构建 release
 cargo run --release              # 运行机器人
 cargo run --bin backtest -- --from "2025-01-01T00:00:00" --to "2025-01-31T23:59:59"  # 回测
@@ -29,7 +29,7 @@ cd frontend && npm run dev       # 前端开发服务器（Vite proxy → localh
 polyalpha (root binary)       # src/main.rs — 主入口, src/bin/backtest.rs — 回测CLI
 ├── pa-core                   # 核心类型、traits、配置、错误
 ├── pa-market-data            # Gamma API + WebSocket + OrderBookCache + EventCalendar + DataAPI + WalletTracker
-├── pa-strategy               # Weather / Convergence / CryptoAlpha / LiquidityRewards / SmartMoney 策略 + StrategyEngine
+├── pa-strategy               # Weather / CryptoAlpha / LiquidityRewards / SmartMoney 策略 + StrategyEngine
 ├── pa-execution              # ClobExecutor + CtfExecutor + HybridOrchestrator + SafeRedeemer
 ├── pa-risk                   # RiskManagerImpl (仓位/损失限制/熔断器)
 ├── pa-storage                # PostgreSQL Repository (sqlx) + ConfigStore
@@ -54,7 +54,7 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 | Trait | 方法 | 实现 |
 |-------|------|------|
 | `MarketDataFeed` | subscribe, unsubscribe, get_orderbook, discover_markets | `MarketDataService` |
-| `Strategy` | name, strategy_type, scan | `WeatherAlphaStrategy`, `ResolutionConvergenceStrategy`, `CryptoAlphaStrategy`, `SmartMoneyStrategy` |
+| `Strategy` | name, strategy_type, scan | `WeatherAlphaStrategy`, `CryptoAlphaStrategy`, `SmartMoneyStrategy` |
 | `Executor` | execute, cancel_all | `HybridOrchestrator`, `TradeSimulator` |
 | `RiskManager` | check_pre_trade, update_position, is_circuit_broken, reset_daily | `RiskManagerImpl` |
 
@@ -71,7 +71,7 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 | `TradingOpportunity` | 检测到的交易机会（含 ExecutionPlan） |
 | `ExecutionPlan` | 枚举: DirectionalBuy（唯一变体） |
 | `ExecutionResult` | 执行结果（profit, fees, gas, status） |
-| `StrategyType` | 枚举: Weather / ResolutionConvergence / CryptoAlpha / LiquidityRewards / SmartMoney |
+| `StrategyType` | 枚举: Weather / CryptoAlpha / LiquidityRewards / SmartMoney |
 | `NegRiskEvent` | NegRisk 事件（title + 多个 MarketInfo，用于天气/加密多结果市场） |
 | `BinaryEventGroup` | 二元事件分组（title + 多个独立 MarketInfo，非 NegRisk） |
 | `EventCategory` | 枚举: Macro / Crypto / Political / Sports |
@@ -91,17 +91,15 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 2. `config/{RUN_MODE}.toml`
 3. `config/default.toml`
 
-关键结构: `Settings { chain, clob, gamma, strategy, risk, database, monitor, market_filter, weather, convergence, crypto_alpha, event_calendar, liquidity_rewards, smart_money, accounts }`
+关键结构: `Settings { chain, clob, gamma, strategy, risk, database, monitor, market_filter, weather, crypto_alpha, event_calendar, liquidity_rewards, smart_money, accounts }`
 
 所有配置结构体 derive `Serialize` + `Deserialize`，支持通过 REST API 热更新。`Settings::redacted()` 返回隐藏敏感字段（RPC URL、私钥、API Key）的副本。
 
 `MarketFilterConfig` fields: `ws_max_instruments(500)`, `market_refresh_interval_secs(1800)`
 
-`WeatherConfig` fields: `min_edge_bps`, `max_position_usdc`, `kelly_fraction`, `forecast_error: ForecastErrorConfig`, `refresh_interval_secs`, `dynamic_sigma(true)`, `ensemble_enabled(false)`, `ensemble_models(["gfs_seamless","ecmwf_ifs025","icon_seamless"])`, `forecast_change_detection(false)`, `forecast_change_threshold(0.5)`, `exit_buffer_bps(50)`, `capital_efficiency_threshold(0.98)`
+`WeatherConfig` fields: `min_edge_bps`, `max_spread_bps`, `max_position_pct`, `max_position_usdc(2.0)`, `kelly_fraction`, `forecast_error: ForecastErrorConfig`, `refresh_interval_secs(120)`, `dynamic_sigma(true)`, `forecast_change_detection(true)`, `forecast_change_threshold(0.5)`, `exit_buffer_bps(50)`, `capital_efficiency_threshold(0.98)`, `max_entry_price(0.15)`, `profit_take_threshold(0.45)`, `noaa_user_agent("PolyAlpha/1.0")`, `target_cities(["New York","Chicago","Los Angeles","Houston","Phoenix","Miami"])`
 
 `ForecastErrorConfig` — 每指标预报误差σ: `temperature_sigma_f(3.0°F)`, `precipitation_sigma_in(0.3in)`, `snowfall_sigma_in(2.0in)`, `wind_sigma_mph(5.0mph)`
-
-`ConvergenceConfig` fields: `min_price_threshold(0.93)`, `max_days_to_resolution(7)`, `max_position_usdc(100)`, `kelly_fraction(0.25)`, `time_decay_boost(true)`, `time_decay_rate(0.03)`, `exit_buffer_bps(50)`, `capital_efficiency_threshold(0.98)`
 
 `CryptoAlphaConfig` fields: `min_edge_bps(500, config default 100)`, `max_position_usdc(100)`, `kelly_fraction(0.25)`, `refresh_interval_secs(300)`, `coingecko_api_key("")`, `exit_buffer_bps(50)`, `capital_efficiency_threshold(0.98)`, `drift_decay(0.0)`
 
@@ -129,9 +127,10 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 1. 通过关键词匹配识别天气相关市场（temperature, rainfall, snowfall, wind）
 2. 解析目标日期（"on Feb 14"、"today"、"tomorrow"、"2/14"）→ 单日预报
 3. 检测降水单位（"mm" vs "inch"，默认 inch）
-4. 调用 Open-Meteo API（免费，无需 API Key，10s超时+指数退避重试）获取天气预报
+4. 调用 NOAA API（api.weather.gov，免费，需 User-Agent header，10s超时+指数退避重试）获取天气预报
 5. 使用分布CDF模型将预报转换为事件概率（温度→正态, 降水→对数正态, 风速→Weibull）
-6. 比较模型概率与市场价格，检查YES和NO两侧，取更大edge的一方买入
+6. 价格过滤: 只买价格低于 `max_entry_price`（默认 $0.15）的 token
+7. 比较模型概率与市场价格，检查YES和NO两侧，取更大edge的一方买入
 
 **NegRisk 多结果模式** — 区间分布问题（如 "Highest temperature in NYC?"）：
 1. 通过 `NegRiskEvent.title` 识别天气事件
@@ -144,8 +143,7 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 - 动态 sigma: `dynamic_sigma=true` 时 `sigma = base × √(max(1, days_to_event))`
 - 日期特定: `sigma = sqrt(forecast_error² + model_spread²)`
 - 多日模式: `sigma = sqrt(std_dev² + forecast_error² + model_spread²)`
-- 多模型 ensemble: `ensemble_enabled=true` 时并行查询 GFS/ECMWF/ICON，取均值 + 模型分歧(model_spread)
-- 预报变化检测: `forecast_change_detection=true` 时仅在 `|new - old| > threshold × sigma` 时交易
+- 预报变化检测: `forecast_change_detection=true`（默认开启）时仅在 `|new - old| > threshold × sigma` 时交易
 
 **分布模型（CDF）**:
 - 温度: 正态分布 `normal_cdf(z)`
@@ -153,26 +151,17 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 - 风速: Weibull分布 `weibull_cdf(t, mean, sigma)` (k=2, Rayleigh)
 
 **共通逻辑**：
-- 仓位控制: Kelly criterion（quarter Kelly）+ max_position_usdc 上限 + position-aware sizing（减去已有仓位）
+- 仓位控制: 固定上限 `max_position_usdc`（默认 $2）+ position-aware sizing（减去已有仓位成本）
+- 入场过滤: `max_entry_price`（默认 0.15）— 只买低价 token（高赔率）
+- 止盈退出: `profit_take_threshold`（默认 0.45）— 价格涨到阈值以上自动卖出
+- 目标城市: `target_cities` 过滤，仅扫描配置的美国城市（支持别名: NYC→New York, LA→Los Angeles）
 - 执行: CLOB FOK 单边买入（`DirectionalBuy`），无链上操作
-- API: HTTP 10s timeout + 指数退避重试（500ms, 1s, 2s）
+- API: NOAA 两步查询 — `/points/{lat},{lon}` 获取网格点 → `/gridpoints/{office}/{x},{y}` 获取预报
+- 单位转换: NOAA 返回 SI 单位（°C, km/h, mm）→ 自动转换为美制（°F, mph, inches）
+- 网格点缓存: `Arc<Mutex<HashMap>>` 永久缓存（同一城市只查一次）
+- 城市坐标: 硬编码 24 个美国城市（含别名），无 geocoding API 调用
 - 缓存: 带TTL驱逐的forecast cache
 - 启用: 在 `strategy.enabled` 中添加 `"weather"`
-
-### Resolution Convergence 策略（方向性）
-
-买入接近到期的市场中价格已收敛至0或1附近的token。到期越近，结果越确定，token价格趋向最终赔付值。
-
-**逻辑**:
-1. 过滤: `end_date` 存在且在 `max_days_to_resolution` 内（默认7天），未过期
-2. 过滤: 二元市场（2个token），非NegRisk，活跃
-3. 获取YES/NO order book，提取best ask price
-4. 选择高于 `min_price_threshold`（默认0.93）的一方（两边都符合则选更高价）
-5. 模型概率: `time_decay_boost=true` 时 `model_prob = 1.0 - (days_remaining / max_days) * 0.03`
-6. Edge = model_prob - ask_price，Kelly sizing + position-aware cap
-7. `ProfitCalculator::directional_buy_profit()` 盈利检查
-8. 执行: CLOB FOK 单边买入（`DirectionalBuy`），无链上操作
-9. 启用: 在 `strategy.enabled` 中添加 `"convergence"`
 
 ### Crypto Alpha 策略（方向性）
 
@@ -347,7 +336,7 @@ Polymarket CLOB 要求 maker_amount (USDC cost) 最多 2dp 精度，且最低可
 
 ### 模型反转退出
 
-- 各方向性策略（Weather/Crypto/Convergence/SmartMoney）内置 `scan_exits()`
+- 各方向性策略（Weather/Crypto/SmartMoney）内置 `scan_exits()`
 - 退出条件: (1) model_prob < best_bid - exit_buffer_bps (模型反转), (2) best_bid >= capital_efficiency_threshold (资金效率)
 - 退出使用 `DirectionalBuy { side: Sell }`
 - 退出订单绕过风控积累检查（仅受熔断器限制）
@@ -368,7 +357,7 @@ Polymarket CLOB 要求 maker_amount (USDC cost) 最多 2dp 精度，且最低可
 ### Data API 加载
 
 - 启动时从 Polymarket Data API 加载持仓（无需 PostgreSQL）
-- 策略标签推断: weather → crypto → convergence（需匹配价格阈值）
+- 策略标签推断: weather → crypto
 - 未发现的市场（过期/关闭）通过 `fetch_position_markets()` 补充
 - 持仓 token 加入 WS 订阅优先列表
 
@@ -497,7 +486,7 @@ Grafana 仪表盘: PnL, Exposure gauge, Circuit breaker, Market stats, Opportuni
 
 注: `ExecutionPlan` 当前仅有 `DirectionalBuy` 变体，适用于所有方向性策略。若新策略需要新的执行方式，还需修改 `pa-execution/src/orchestrator.rs` 和 `pa-backtest/src/simulator.rs`。
 
-## 测试分布（217 个）
+## 测试分布（234 个）
 
 | Crate | 数量 | 覆盖 |
 |-------|------|------|
@@ -506,7 +495,7 @@ Grafana 仪表盘: PnL, Exposure gauge, Circuit breaker, Market stats, Opportuni
 | pa-execution | 11 | Gas 估算(1), cost precision(5), GCD(1), min_cost_adjusted_size(4) |
 | pa-market-data | 24 | OrderBook 排序(1), EventCalendar(12), GammaFeed(4: binary group), WalletTracker(7) |
 | pa-risk | 9 | PositionTracker(3), RiskManager(5), exit_bypass(1) |
-| pa-strategy | 157 | ProfitCalculator(6), Weather(79), Convergence(14), CryptoAlpha(30), LiquidityRewards(9), SmartMoney(5) |
+| pa-strategy | 174 | ProfitCalculator(6), Weather(96), CryptoAlpha(30), LiquidityRewards(23), SmartMoney(5) |
 
 ## Polygon 合约地址
 
@@ -537,8 +526,7 @@ Chain ID: 137, ~2s blocks, ~$0.01 gas, ERC-1155 approval required for CTF ops.
 | `crates/pa-market-data/src/event_calendar.rs` | EventCalendarService: Finnhub/CoinMarketCal/Static providers + 关键词匹配 + 仓位乘数 |
 | `crates/pa-market-data/src/wallet_tracker.rs` | WalletTracker: Data API 轮询 + on-chain Transfer 监控 + 自动发现 |
 | `crates/pa-strategy/src/engine.rs` | StrategyEngine: 事件驱动+定时扫描+冷却+深度验证+预算追踪+止损安全网 |
-| `crates/pa-strategy/src/weather.rs` | Weather Alpha: 问题解析 + Open-Meteo客户端 + 概率模型 + 退出扫描 |
-| `crates/pa-strategy/src/convergence.rs` | Resolution Convergence: 到期收敛策略 + detect_convergence() + 退出扫描 |
+| `crates/pa-strategy/src/weather.rs` | Weather Alpha: 问题解析 + NOAA客户端 + 概率模型 + 退出扫描 |
 | `crates/pa-strategy/src/crypto_alpha.rs` | Crypto Alpha: 资产映射 + 问题解析 + Binance/CoinGecko/Deribit客户端 + GBM模型 + 退出扫描 |
 | `crates/pa-strategy/src/liquidity_rewards.rs` | Liquidity Rewards: 流动性奖励做市后台任务 + fill检测 + depth level报价 |
 | `crates/pa-strategy/src/smart_money.rs` | Smart Money: 信号聚合 + 比例sizing + 退出扫描 |

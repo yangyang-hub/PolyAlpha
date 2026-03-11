@@ -63,6 +63,16 @@ impl PositionTracker {
                 strategy_type,
                 condition_id,
             });
+
+        // Remove zero-size entries to keep the map clean
+        if !is_buy {
+            if let Some(entry) = self.positions.get(&token_id) {
+                if entry.size <= Decimal::ZERO {
+                    drop(entry);
+                    self.positions.remove(&token_id);
+                }
+            }
+        }
     }
 
     /// Get total exposure across all positions.
@@ -162,11 +172,8 @@ impl PositionTracker {
                 })
                 .or_insert(PositionEntry { size, avg_cost, strategy_type, condition_id });
         } else {
-            // Zero out the position
-            if let Some(mut entry) = self.positions.get_mut(&token_id) {
-                entry.size = Decimal::ZERO;
-                entry.avg_cost = Decimal::ZERO;
-            }
+            // Remove the position entirely
+            self.positions.remove(&token_id);
         }
     }
 
@@ -241,8 +248,6 @@ mod tests {
         assert_eq!(tracker.exposure_by_strategy(StrategyType::Weather), dec!(42));
         // CryptoAlpha exposure = 100*0.50 = 50
         assert_eq!(tracker.exposure_by_strategy(StrategyType::CryptoAlpha), dec!(50));
-        // Convergence = 0 (no positions)
-        assert_eq!(tracker.exposure_by_strategy(StrategyType::ResolutionConvergence), dec!(0));
     }
 
     #[test]
@@ -262,6 +267,5 @@ mod tests {
 
         assert_eq!(tracker.market_count_by_strategy(StrategyType::Weather), 2);
         assert_eq!(tracker.market_count_by_strategy(StrategyType::CryptoAlpha), 1);
-        assert_eq!(tracker.market_count_by_strategy(StrategyType::ResolutionConvergence), 0);
     }
 }

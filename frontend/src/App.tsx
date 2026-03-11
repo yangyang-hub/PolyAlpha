@@ -1,23 +1,23 @@
 import { Routes, Route } from "react-router-dom";
 import Layout from "./components/Layout";
 import Dashboard from "./pages/Dashboard";
-import StrategyConfig from "./pages/StrategyConfig";
-import RiskConfig from "./pages/RiskConfig";
-import MarketConfig from "./pages/MarketConfig";
-import MonitorConfig from "./pages/MonitorConfig";
-import LRMarkets from "./pages/LRMarkets";
+import WeatherStrategy from "./pages/WeatherStrategy";
+import SmartMoney from "./pages/SmartMoney";
+import LRRewards from "./pages/LRRewards";
+import CryptoMarkets from "./pages/CryptoMarkets";
+import Configuration from "./pages/Configuration";
 
 export default function App() {
   return (
-    <Layout>
-      <Routes>
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/strategy" element={<StrategyConfig />} />
-        <Route path="/risk" element={<RiskConfig />} />
-        <Route path="/market" element={<MarketConfig />} />
-        <Route path="/monitor" element={<MonitorConfig />} />
-        <Route path="/lr" element={<LRMarkets />} />
-      </Routes>
-    </Layout>
+    <Routes>
+      <Route element={<Layout />}>
+        <Route index element={<Dashboard />} />
+        <Route path="weather" element={<WeatherStrategy />} />
+        <Route path="smart-money" element={<SmartMoney />} />
+        <Route path="lr" element={<LRRewards />} />
+        <Route path="crypto" element={<CryptoMarkets />} />
+        <Route path="config" element={<Configuration />} />
+      </Route>
+    </Routes>
   );
 }

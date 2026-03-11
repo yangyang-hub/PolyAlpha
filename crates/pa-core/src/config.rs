@@ -16,8 +16,6 @@ pub struct Settings {
     #[serde(default)]
     pub weather: WeatherConfig,
     #[serde(default)]
-    pub convergence: ConvergenceConfig,
-    #[serde(default)]
     pub crypto_alpha: CryptoAlphaConfig,
     #[serde(default)]
     pub event_calendar: EventCalendarConfig,
@@ -178,67 +176,47 @@ pub struct WeatherConfig {
     /// Scale forecast error sigma by sqrt(days_to_event). More distant forecasts get wider sigma.
     #[serde(default = "default_true")]
     pub dynamic_sigma: bool,
-    /// Enable multi-model ensemble forecasting (GFS + ECMWF + ICON).
-    #[serde(default)]
-    pub ensemble_enabled: bool,
-    /// Open-Meteo model names to query when ensemble is enabled.
-    #[serde(default = "default_ensemble_models")]
-    pub ensemble_models: Vec<String>,
     /// Only trade when the forecast has changed significantly since last check.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub forecast_change_detection: bool,
     /// Forecast change threshold in multiples of sigma. Trade only when
     /// |new_forecast - previous_forecast| > threshold * sigma.
     #[serde(default = "default_forecast_change_threshold")]
     pub forecast_change_threshold: f64,
-    /// Enable "Sweep Mode" - aggressive scanning near settlement.
-    /// When enabled, markets within `sweep_hours_before` of settlement use
-    /// lower edge requirements and more aggressive position sizing.
-    #[serde(default)]
-    pub sweep_mode_enabled: bool,
-    /// Hours before settlement when sweep mode becomes active.
-    /// Default: 12 hours (markets entering this window get sweep treatment).
-    #[serde(default = "default_sweep_hours_before")]
-    pub sweep_hours_before: u64,
-    /// Edge threshold (in basis points) for sweep mode. Lower than normal min_edge_bps.
-    /// Default: 200 (2%) vs normal 500 (5%).
-    #[serde(default = "default_sweep_min_edge_bps")]
-    pub sweep_min_edge_bps: u32,
-    /// Position size multiplier for sweep mode. Can be higher since
-    /// outcome is more certain near settlement.
-    #[serde(default = "default_sweep_size_multiplier")]
-    pub sweep_size_multiplier: Decimal,
-    /// High-priority cities for trading (London, NYC, Seoul have 73% of volume).
-    /// Markets in these cities get priority in scanning and WS subscriptions.
-    #[serde(default)]
-    pub priority_cities: Vec<String>,
+    /// Maximum entry price — only buy tokens priced below this (low-price strategy).
+    #[serde(default = "default_max_entry_price")]
+    pub max_entry_price: Decimal,
+    /// Profit-take threshold — sell when best_bid rises above this price.
+    #[serde(default = "default_profit_take_threshold")]
+    pub profit_take_threshold: Decimal,
+    /// Maximum position size in USDC per trade.
+    #[serde(default = "default_weather_max_position_usdc")]
+    pub max_position_usdc: Decimal,
+    /// NOAA API requires a User-Agent header identifying the application.
+    #[serde(default = "default_noaa_user_agent")]
+    pub noaa_user_agent: String,
+    /// Target US cities for weather scanning. Only markets in these cities are scanned.
+    #[serde(default = "default_target_cities")]
+    pub target_cities: Vec<String>,
 }
 
 fn default_exit_buffer_bps() -> u32 { 50 }
 fn default_capital_efficiency_threshold() -> Decimal { Decimal::new(98, 2) } // 0.98
 fn default_max_spread_bps() -> u32 { 1200 } // 12% max spread
 fn default_true() -> bool { true }
-fn default_ensemble_models() -> Vec<String> {
-    vec![
-        "gfs_seamless".to_string(),
-        "ecmwf_ifs025".to_string(),
-        "icon_seamless".to_string(),
-    ]
-}
 fn default_forecast_change_threshold() -> f64 { 0.5 }
-fn default_sweep_hours_before() -> u64 { 12 }
-fn default_sweep_min_edge_bps() -> u32 { 200 }
-fn default_sweep_size_multiplier() -> Decimal { Decimal::new(15, 2) } // 1.5x
-fn default_priority_cities() -> Vec<String> {
+fn default_max_entry_price() -> Decimal { Decimal::new(15, 2) } // 0.15
+fn default_profit_take_threshold() -> Decimal { Decimal::new(45, 2) } // 0.45
+fn default_weather_max_position_usdc() -> Decimal { Decimal::new(2, 0) } // $2
+fn default_noaa_user_agent() -> String { "PolyAlpha/1.0".to_string() }
+fn default_target_cities() -> Vec<String> {
     vec![
-        "London".to_string(),
         "New York".to_string(),
-        "Seoul".to_string(),
-        "Paris".to_string(),
-        "Tokyo".to_string(),
-        "Singapore".to_string(),
-        "Dubai".to_string(),
-        "Sydney".to_string(),
+        "Chicago".to_string(),
+        "Los Angeles".to_string(),
+        "Houston".to_string(),
+        "Phoenix".to_string(),
+        "Miami".to_string(),
     ]
 }
 
@@ -250,19 +228,17 @@ impl Default for WeatherConfig {
             max_position_pct: Decimal::new(50, 2), // 0.50 = 50% of balance
             kelly_fraction: Decimal::new(25, 2), // 0.25 (quarter Kelly)
             forecast_error: ForecastErrorConfig::default(),
-            refresh_interval_secs: 3600,
+            refresh_interval_secs: 120,
             exit_buffer_bps: default_exit_buffer_bps(),
             capital_efficiency_threshold: default_capital_efficiency_threshold(),
             dynamic_sigma: default_true(),
-            ensemble_enabled: false,
-            ensemble_models: default_ensemble_models(),
-            forecast_change_detection: false,
+            forecast_change_detection: true,
             forecast_change_threshold: default_forecast_change_threshold(),
-            sweep_mode_enabled: false,
-            sweep_hours_before: default_sweep_hours_before(),
-            sweep_min_edge_bps: default_sweep_min_edge_bps(),
-            sweep_size_multiplier: default_sweep_size_multiplier(),
-            priority_cities: default_priority_cities(),
+            max_entry_price: default_max_entry_price(),
+            profit_take_threshold: default_profit_take_threshold(),
+            max_position_usdc: default_weather_max_position_usdc(),
+            noaa_user_agent: default_noaa_user_agent(),
+            target_cities: default_target_cities(),
         }
     }
 }
@@ -293,64 +269,6 @@ impl Default for ForecastErrorConfig {
             precipitation_sigma_in: default_precip_sigma(),
             snowfall_sigma_in: default_snow_sigma(),
             wind_sigma_mph: default_wind_sigma(),
-        }
-    }
-}
-
-/// Configuration for the Resolution Convergence strategy.
-///
-/// Targets tokens priced near 0 or 1 in markets approaching resolution,
-/// where outcomes become increasingly certain.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct ConvergenceConfig {
-    /// Minimum token price to consider (e.g. 0.93 = 93% implied certainty).
-    #[serde(default = "default_min_price_threshold")]
-    pub min_price_threshold: Decimal,
-    /// Maximum days until resolution to consider a market.
-    #[serde(default = "default_max_days_to_resolution")]
-    pub max_days_to_resolution: u32,
-    /// Maximum position size as a fraction of wallet balance (0.0-1.0).
-    #[serde(default = "default_conv_max_position_pct")]
-    pub max_position_pct: Decimal,
-    /// Kelly fraction cap (0.0-1.0).
-    #[serde(default = "default_conv_kelly")]
-    pub kelly_fraction: Decimal,
-    /// Confidence boost: higher model probability for markets closer to resolution.
-    #[serde(default = "default_time_decay_boost")]
-    pub time_decay_boost: bool,
-    /// Time-decay rate: how much to discount from perfect certainty at max_days.
-    /// model_prob = 1.0 - time_decay_rate * (days_remaining / max_days)
-    /// Higher values = less confident at max_days, lower values = more aggressive.
-    /// Break-even analysis: for price P, fee ≈ 2%×P, so need edge > 200 bps.
-    /// Default 0.03 gives max 300 bps edge at max_days (97% confidence).
-    #[serde(default = "default_time_decay_rate")]
-    pub time_decay_rate: f64,
-    /// Exit buffer in basis points. Sell when model_prob < best_bid - exit_buffer.
-    #[serde(default = "default_exit_buffer_bps")]
-    pub exit_buffer_bps: u32,
-    /// Sell when best_bid >= this threshold (capital efficiency exit).
-    #[serde(default = "default_capital_efficiency_threshold")]
-    pub capital_efficiency_threshold: Decimal,
-}
-
-fn default_min_price_threshold() -> Decimal { Decimal::new(93, 2) }
-fn default_max_days_to_resolution() -> u32 { 7 }
-fn default_conv_max_position_pct() -> Decimal { Decimal::new(50, 2) } // 0.50
-fn default_conv_kelly() -> Decimal { Decimal::new(25, 2) }
-fn default_time_decay_boost() -> bool { true }
-fn default_time_decay_rate() -> f64 { 0.03 }
-
-impl Default for ConvergenceConfig {
-    fn default() -> Self {
-        Self {
-            min_price_threshold: default_min_price_threshold(),
-            max_days_to_resolution: default_max_days_to_resolution(),
-            max_position_pct: default_conv_max_position_pct(),
-            kelly_fraction: default_conv_kelly(),
-            time_decay_boost: default_time_decay_boost(),
-            time_decay_rate: default_time_decay_rate(),
-            exit_buffer_bps: default_exit_buffer_bps(),
-            capital_efficiency_threshold: default_capital_efficiency_threshold(),
         }
     }
 }

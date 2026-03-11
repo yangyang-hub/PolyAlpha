@@ -20,7 +20,7 @@ proxy_wallet = "xxxx"
 host = "https://gamma-api.polymarket.com"
 
 [strategy]
-# enabled = ["weather", "convergence", "crypto"]
+# enabled = ["weather", "crypto"]
 enabled = ["weather", "crypto"]
 scan_interval_ms = 100
 min_spread_bps = 200
@@ -62,37 +62,23 @@ min_edge_bps = 1200
 max_spread_bps = 1200
 max_position_pct = 0.50
 kelly_fraction = 0.25
-refresh_interval_secs = 3600
+refresh_interval_secs = 120          # Every 2 minutes
 exit_buffer_bps = 50
 capital_efficiency_threshold = 0.98
 dynamic_sigma = true
-ensemble_enabled = false
-ensemble_models = ["gfs_seamless", "ecmwf_ifs025", "icon_seamless"]
-forecast_change_detection = false
+forecast_change_detection = true     # Trend detection enabled
 forecast_change_threshold = 0.5
-# Sweep Mode: aggressive scanning near settlement
-sweep_mode_enabled = false
-sweep_hours_before = 12  # Enter sweep mode 12 hours before settlement
-sweep_min_edge_bps = 200  # Lower edge threshold in sweep mode (2% vs 12%)
-sweep_size_multiplier = 1.5  # 1.5x position size in sweep mode
-# Priority cities for trading (London, NYC, Seoul = 73% of volume)
-priority_cities = ["London", "New York", "Seoul", "Paris", "Tokyo", "Singapore", "Dubai", "Sydney"]
+max_entry_price = 0.15               # Only buy tokens priced below 15 cents
+profit_take_threshold = 0.45         # Sell when price rises above 45 cents
+max_position_usdc = 2.0              # Max $2 per trade
+noaa_user_agent = "PolyAlpha/1.0"
+target_cities = ["New York", "Chicago", "Los Angeles", "Houston", "Phoenix", "Miami"]
 
 [weather.forecast_error]
 temperature_sigma_f = 3.0
 precipitation_sigma_in = 0.3
 snowfall_sigma_in = 2.0
 wind_sigma_mph = 5.0
-
-[convergence]
-min_price_threshold = 0.80
-max_days_to_resolution = 14
-max_position_pct = 0.50
-kelly_fraction = 0.25
-time_decay_boost = true
-time_decay_rate = 0.05
-exit_buffer_bps = 50
-capital_efficiency_threshold = 0.98
 
 [crypto_alpha]
 min_edge_bps = 300

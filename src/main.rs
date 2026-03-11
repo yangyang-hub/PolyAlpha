@@ -51,7 +51,7 @@ struct AccountContext {
     executor: Arc<dyn pa_core::traits::Executor>,
     risk_manager_impl: Arc<RiskManagerImpl>,
     risk_manager: Arc<dyn pa_core::traits::RiskManager>,
-    usdc_balance: Arc<std::sync::RwLock<Decimal>>,
+    usdc_balance: Arc<ArcSwap<Decimal>>,
     proxy_addr: alloy::primitives::Address,
     private_key: String,
     signature_type: u8,
@@ -127,7 +127,7 @@ async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("info,polymarket_client_sdk::serde_helpers=error")
+            EnvFilter::new("info,polymarket_client_sdk=warn,polymarket_client_sdk::serde_helpers=error")
         }))
         .with(fmt::layer().with_target(true).with_thread_ids(true))
         .init();
@@ -217,13 +217,11 @@ async fn main() -> Result<()> {
     let ws_connected = market_data.ws_feed_ws_connected().await;
     let lr_runtime_status: Arc<tokio::sync::RwLock<pa_monitor::api::LrRuntimeStatus>> =
         Arc::new(tokio::sync::RwLock::new(pa_monitor::api::LrRuntimeStatus::default()));
+    let shared_positions: Arc<tokio::sync::RwLock<Vec<pa_monitor::api::PositionApiEntry>>> =
+        Arc::new(tokio::sync::RwLock::new(Vec::new()));
     let api_state = Arc::new(ApiState {
         config: Arc::clone(&config_arc),
-        config_store: config_store.unwrap_or_else(|| {
-            // Create a dummy config store with a placeholder pool
-            // The API will return errors if no DB is configured
-            ConfigStore::new(sqlx::PgPool::connect_lazy("postgres://localhost/dummy").unwrap())
-        }),
+        config_store,
         config_tx,
         start_time: Utc::now(),
         health_checks: vec![
@@ -236,12 +234,21 @@ async fn main() -> Result<()> {
             ),
         ],
         lr_status: Some(Arc::clone(&lr_runtime_status)),
+        positions: Arc::clone(&shared_positions),
     });
     let health_port = settings.monitor.health_port;
-    tokio::spawn(async move {
-        if let Err(e) = pa_monitor::api::start_server(health_port, api_state).await {
-            tracing::error!(error = %e, "API server failed");
-        }
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("api-server")
+            .build()
+            .expect("Failed to build API runtime");
+        rt.block_on(async move {
+            if let Err(e) = pa_monitor::api::start_server(health_port, api_state).await {
+                tracing::error!(error = %e, "API server failed");
+            }
+        });
     });
 
     // --- Discover markets (with retry) ---
@@ -302,7 +309,7 @@ async fn main() -> Result<()> {
     let shared_markets = Arc::new(tokio::sync::RwLock::new(markets));
 
     // --- Seed OrderBookCache with gamma best_bid/best_ask ---
-    // Directional strategies (crypto, weather, convergence) need order book prices to
+    // Directional strategies (crypto, weather) need order book prices to
     // detect edges. The WS subscription can only hold 500 instruments (~250 markets),
     // but we discover 500+ markets. By seeding the cache with gamma API best_bid/best_ask,
     // ALL markets have baseline price data for strategy evaluation.
@@ -473,11 +480,11 @@ async fn main() -> Result<()> {
         };
 
         // Query initial USDC balance
-        let usdc_balance: Arc<std::sync::RwLock<Decimal>> =
-            Arc::new(std::sync::RwLock::new(Decimal::ZERO));
+        let usdc_balance: Arc<ArcSwap<Decimal>> =
+            Arc::new(ArcSwap::from_pointee(Decimal::ZERO));
         match executor.get_balance().await {
             Ok(bal) => {
-                *usdc_balance.write().unwrap() = bal;
+                usdc_balance.store(Arc::new(bal));
                 tracing::info!(
                     account = %acct_config.name,
                     balance_usdc = %bal,
@@ -628,6 +635,18 @@ async fn main() -> Result<()> {
         "All accounts initialized"
     );
 
+    // Populate initial positions snapshot for API
+    {
+        let markets_snapshot = shared_markets.read().await;
+        let api_cache = market_data.cache().clone();
+        let entries = build_position_snapshot(&account_contexts, &markets_snapshot, &api_cache);
+        let count = entries.len();
+        *shared_positions.write().await = entries;
+        if count > 0 {
+            tracing::info!(positions = count, "API positions snapshot populated");
+        }
+    }
+
     // --- Spawn per-account tasks ---
     let mut engine_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
@@ -649,7 +668,7 @@ async fn main() -> Result<()> {
                         _ = interval.tick() => {
                             match bal_executor.get_balance().await {
                                 Ok(bal) => {
-                                    let prev = *bal_state.read().unwrap();
+                                    let prev = **bal_state.load();
                                     if bal != prev {
                                         tracing::info!(
                                             account = %name,
@@ -658,7 +677,7 @@ async fn main() -> Result<()> {
                                             "USDC balance updated"
                                         );
                                     }
-                                    *bal_state.write().unwrap() = bal;
+                                    bal_state.store(Arc::new(bal));
                                 }
                                 Err(e) => {
                                     tracing::debug!(
@@ -682,17 +701,17 @@ async fn main() -> Result<()> {
             .collect();
 
         if !enabled_strategies.is_empty() {
-            let make_capital_fn = |bal: Arc<std::sync::RwLock<Decimal>>|
+            let make_capital_fn = |bal: Arc<ArcSwap<Decimal>>|
              -> Box<dyn Fn() -> Decimal + Send + Sync> {
                 Box::new(move || {
-                    let balance = *bal.read().unwrap();
+                    let balance = **bal.load();
                     balance.max(Decimal::ZERO)
                 })
             };
 
-            let make_balance_fn = |bal: Arc<std::sync::RwLock<Decimal>>|
+            let make_balance_fn = |bal: Arc<ArcSwap<Decimal>>|
              -> Box<dyn Fn() -> Decimal + Send + Sync> {
-                Box::new(move || *bal.read().unwrap())
+                Box::new(move || **bal.load())
             };
 
             let mut strategies: Vec<Box<dyn pa_core::traits::Strategy>> = Vec::new();
@@ -712,22 +731,6 @@ async fn main() -> Result<()> {
                     make_balance_fn(Arc::clone(&ctx.usdc_balance)),
                 );
                 strategies.push(Box::new(weather_strategy));
-            }
-
-            if enabled_strategies.contains(&"convergence".to_string()) {
-                let conv_cache = market_data.cache().clone();
-                let rm_pos_conv = Arc::clone(&ctx.risk_manager_impl);
-                let rm_held_conv = Arc::clone(&ctx.risk_manager_impl);
-                let convergence = pa_strategy::convergence::ResolutionConvergenceStrategy::new(
-                    settings.convergence.clone(),
-                    dec!(0.00),
-                    Box::new(move |token_id| conv_cache.get(&token_id)),
-                    make_capital_fn(Arc::clone(&ctx.usdc_balance)),
-                    Box::new(move |tid: alloy::primitives::U256| rm_pos_conv.get_position_size(&tid)),
-                    Box::new(move || rm_held_conv.positions_by_strategy(pa_core::types::StrategyType::ResolutionConvergence)),
-                    make_balance_fn(Arc::clone(&ctx.usdc_balance)),
-                );
-                strategies.push(Box::new(convergence));
             }
 
             if enabled_strategies.contains(&"crypto".to_string()) {
@@ -1833,6 +1836,77 @@ async fn main() -> Result<()> {
         );
     } // end per-account loop
 
+    // --- Periodic API position snapshot refresh (every 30s) ---
+    {
+        let snap_risk_managers: Vec<Arc<RiskManagerImpl>> = account_contexts.iter()
+            .map(|ctx| Arc::clone(&ctx.risk_manager_impl))
+            .collect();
+        let snap_markets = Arc::clone(&shared_markets);
+        let snap_cache = market_data.cache().clone();
+        let snap_positions = Arc::clone(&shared_positions);
+        let snap_cancel = cancel.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            interval.tick().await; // skip immediate tick (already populated)
+            loop {
+                tokio::select! {
+                    _ = snap_cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        let markets_snapshot = snap_markets.read().await;
+                        // Build a temporary AccountContext-like view for the helper
+                        let entries: Vec<pa_monitor::api::PositionApiEntry> = {
+                            let mut all = Vec::new();
+                            for rm in &snap_risk_managers {
+                                for (token_id, pe) in rm.snapshot_positions() {
+                                    if pe.size < dec!(0.1) {
+                                        continue;
+                                    }
+                                    let (question, outcome, _cid) = markets_snapshot.iter()
+                                        .find_map(|m| {
+                                            m.tokens.iter().find(|t| t.token_id == token_id).map(|t| {
+                                                let o = match t.outcome {
+                                                    pa_core::types::Outcome::Yes => "YES",
+                                                    pa_core::types::Outcome::No => "NO",
+                                                };
+                                                (m.question.as_str(), o, m.condition_id)
+                                            })
+                                        })
+                                        .unwrap_or(("", "", alloy::primitives::B256::ZERO));
+
+                                    let current_price = snap_cache.get(&token_id)
+                                        .and_then(|ob| ob.bids.first().map(|b| b.price));
+                                    let unrealized_pnl = current_price.map(|p| pe.size * (p - pe.avg_cost));
+
+                                    let strategy_name = pe.strategy_type.map(|st| match st {
+                                        pa_core::types::StrategyType::Weather => "weather",
+                                        pa_core::types::StrategyType::CryptoAlpha => "crypto_alpha",
+                                        pa_core::types::StrategyType::LiquidityRewards => "liquidity_rewards",
+                                        pa_core::types::StrategyType::SmartMoney => "smart_money",
+                                    });
+
+                                    all.push(pa_monitor::api::PositionApiEntry {
+                                        token_id: format!("{:#x}", token_id),
+                                        size: pe.size,
+                                        avg_cost: pe.avg_cost,
+                                        cost_basis: pe.size * pe.avg_cost,
+                                        strategy: strategy_name.map(|s| s.to_string()),
+                                        condition_id: pe.condition_id.map(|c| format!("{:#x}", c)),
+                                        question: if question.is_empty() { None } else { Some(question.to_string()) },
+                                        outcome: if outcome.is_empty() { None } else { Some(outcome.to_string()) },
+                                        current_price,
+                                        unrealized_pnl,
+                                    });
+                                }
+                            }
+                            all
+                        };
+                        *snap_positions.write().await = entries;
+                    }
+                }
+            }
+        });
+    }
+
     // --- Periodic market refresh background task (shared across accounts) ---
     let refresh_interval = settings.market_filter.market_refresh_interval_secs;
     if refresh_interval > 0 {
@@ -2118,6 +2192,65 @@ async fn lr_quote_one_market(
 ///
 /// Uses `gamma_best_bid/ask` when available, falls back to `outcome_prices`.
 /// Returns true if the market was seeded, false otherwise.
+/// Build a snapshot of all positions across all accounts for the API.
+fn build_position_snapshot(
+    account_contexts: &[AccountContext],
+    markets: &[pa_core::types::MarketInfo],
+    cache: &pa_market_data::cache::OrderBookCache,
+) -> Vec<pa_monitor::api::PositionApiEntry> {
+    use std::collections::HashMap;
+
+    // Build token_id → (question, outcome, condition_id) lookup
+    let mut token_map: HashMap<alloy::primitives::U256, (&str, &str, alloy::primitives::B256)> = HashMap::new();
+    for m in markets {
+        for t in &m.tokens {
+            let outcome = match t.outcome {
+                pa_core::types::Outcome::Yes => "YES",
+                pa_core::types::Outcome::No => "NO",
+            };
+            token_map.insert(t.token_id, (&m.question, outcome, m.condition_id));
+        }
+    }
+
+    let mut entries = Vec::new();
+    for ctx in account_contexts {
+        for (token_id, pe) in ctx.risk_manager_impl.snapshot_positions() {
+            if pe.size < dec!(0.1) {
+                continue;
+            }
+            let (question, outcome, _cid) = token_map.get(&token_id)
+                .copied()
+                .unwrap_or(("", "", alloy::primitives::B256::ZERO));
+
+            let current_price = cache.get(&token_id)
+                .and_then(|ob| ob.bids.first().map(|b| b.price));
+
+            let unrealized_pnl = current_price.map(|p| pe.size * (p - pe.avg_cost));
+
+            let strategy_name = pe.strategy_type.map(|st| match st {
+                pa_core::types::StrategyType::Weather => "weather",
+                pa_core::types::StrategyType::CryptoAlpha => "crypto_alpha",
+                pa_core::types::StrategyType::LiquidityRewards => "liquidity_rewards",
+                pa_core::types::StrategyType::SmartMoney => "smart_money",
+            });
+
+            entries.push(pa_monitor::api::PositionApiEntry {
+                token_id: format!("{:#x}", token_id),
+                size: pe.size,
+                avg_cost: pe.avg_cost,
+                cost_basis: pe.size * pe.avg_cost,
+                strategy: strategy_name.map(|s| s.to_string()),
+                condition_id: pe.condition_id.map(|c| format!("{:#x}", c)),
+                question: if question.is_empty() { None } else { Some(question.to_string()) },
+                outcome: if outcome.is_empty() { None } else { Some(outcome.to_string()) },
+                current_price,
+                unrealized_pnl,
+            });
+        }
+    }
+    entries
+}
+
 fn seed_market_cache(cache: &pa_market_data::cache::OrderBookCache, m: &pa_core::types::MarketInfo) -> bool {
     if m.tokens.len() < 2 {
         return false;
@@ -2251,7 +2384,7 @@ fn build_ws_token_list(
 
 /// Infer strategy_type for a loaded position by matching its token_id against discovered markets.
 ///
-/// Checks weather → crypto → convergence in order. Returns None if no match found.
+/// Checks weather → crypto in order. Returns None if no match found.
 fn infer_strategy_type(
     token_id: alloy::primitives::U256,
     markets: &[pa_core::types::MarketInfo],
@@ -2289,20 +2422,6 @@ fn infer_strategy_type(
         // Crypto binary market
         if pa_strategy::crypto_alpha::parse_crypto_question(&market.question).is_some() {
             return Some(StrategyType::CryptoAlpha);
-        }
-
-        // Convergence: non-NegRisk binary market with end_date AND
-        // outcome price near 0 or 1 (convergence only buys tokens priced > 0.90).
-        // Without the price check, ALL markets with end_date get tagged as convergence,
-        // preventing proper exit scanning by the real owning strategy.
-        if !market.neg_risk && market.end_date.is_some() && market.tokens.len() == 2 {
-            let looks_converging = market.outcome_prices.as_ref()
-                .and_then(|p| p.first())
-                .map(|&yp| yp >= dec!(0.90) || yp <= dec!(0.10))
-                .unwrap_or(false);
-            if looks_converging {
-                return Some(StrategyType::ResolutionConvergence);
-            }
         }
     }
 

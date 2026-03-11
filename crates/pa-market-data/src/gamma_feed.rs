@@ -63,13 +63,13 @@ impl GammaFeed {
     /// Two discovery modes based on enabled strategies:
     /// - **Directional-only** (weather, crypto): Uses `/public-search` API for targeted keyword
     ///   search — returns relevant markets in 2-5 requests instead of paginating all ~500 events.
-    /// - **General strategies** (convergence, liquidity_rewards): Falls back to
+    /// - **General strategies** (liquidity_rewards): Falls back to
     ///   full `/events` pagination since these need broad market coverage.
     pub async fn discover_markets(&self) -> anyhow::Result<Vec<MarketInfo>> {
         tracing::info!("Discovering markets from Gamma API");
 
         // Check which discovery mode to use
-        let general_strategies = ["convergence", "liquidity_rewards"];
+        let general_strategies = ["liquidity_rewards"];
         let needs_full_scan = self.enabled_strategies.is_empty()
             || self.enabled_strategies.iter().any(|s| general_strategies.contains(&s.as_str()));
 
@@ -268,7 +268,7 @@ impl GammaFeed {
 
     /// Discover markets via full pagination of `/events` endpoint.
     ///
-    /// Used when general strategies (convergence, LR, etc.) need broad market coverage.
+    /// Used when general strategies (LR, etc.) need broad market coverage.
     async fn discover_via_pagination(&self) -> anyhow::Result<Vec<MarketInfo>> {
         tracing::info!("Discovering markets via full events pagination");
 

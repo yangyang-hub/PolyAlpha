@@ -132,11 +132,6 @@ impl ConfigStore {
                     base.weather = serde_json::from_value::<WeatherConfig>(data.clone())
                         .context("invalid weather override")?;
                 }
-                "convergence" => {
-                    base.convergence =
-                        serde_json::from_value::<ConvergenceConfig>(data.clone())
-                            .context("invalid convergence override")?;
-                }
                 "crypto_alpha" => {
                     base.crypto_alpha =
                         serde_json::from_value::<CryptoAlphaConfig>(data.clone())
@@ -157,26 +152,6 @@ impl ConfigStore {
                         serde_json::from_value::<SmartMoneyConfig>(data.clone())
                             .context("invalid smart_money override")?;
                 }
-                "monitor" => {
-                    base.monitor = serde_json::from_value::<MonitorConfig>(data.clone())
-                        .context("invalid monitor override")?;
-                }
-                "chain" => {
-                    base.chain = serde_json::from_value::<ChainConfig>(data.clone())
-                        .context("invalid chain override")?;
-                }
-                "clob" => {
-                    base.clob = serde_json::from_value::<ClobConfig>(data.clone())
-                        .context("invalid clob override")?;
-                }
-                "gamma" => {
-                    base.gamma = serde_json::from_value::<GammaConfig>(data.clone())
-                        .context("invalid gamma override")?;
-                }
-                "database" => {
-                    base.database = serde_json::from_value::<DatabaseConfig>(data.clone())
-                        .context("invalid database override")?;
-                }
                 other => {
                     tracing::warn!(section = other, "Unknown config section in DB, skipping");
                 }
@@ -195,16 +170,10 @@ pub fn validate_section(section: &str, data: &Value) -> Result<()> {
         "risk" => { let _ = serde_json::from_value::<RiskConfig>(data.clone())?; }
         "market_filter" => { let _ = serde_json::from_value::<MarketFilterConfig>(data.clone())?; }
         "weather" => { let _ = serde_json::from_value::<WeatherConfig>(data.clone())?; }
-        "convergence" => { let _ = serde_json::from_value::<ConvergenceConfig>(data.clone())?; }
         "crypto_alpha" => { let _ = serde_json::from_value::<CryptoAlphaConfig>(data.clone())?; }
         "event_calendar" => { let _ = serde_json::from_value::<EventCalendarConfig>(data.clone())?; }
         "liquidity_rewards" => { let _ = serde_json::from_value::<LiquidityRewardsConfig>(data.clone())?; }
         "smart_money" => { let _ = serde_json::from_value::<SmartMoneyConfig>(data.clone())?; }
-        "monitor" => { let _ = serde_json::from_value::<MonitorConfig>(data.clone())?; }
-        "chain" => { let _ = serde_json::from_value::<ChainConfig>(data.clone())?; }
-        "clob" => { let _ = serde_json::from_value::<ClobConfig>(data.clone())?; }
-        "gamma" => { let _ = serde_json::from_value::<GammaConfig>(data.clone())?; }
-        "database" => { let _ = serde_json::from_value::<DatabaseConfig>(data.clone())?; }
         _ => return Err(anyhow!("Unknown config section: {}", section)),
     }
     Ok(())
@@ -217,16 +186,10 @@ pub fn extract_section(settings: &pa_core::config::Settings, section: &str) -> R
         "risk" => Ok(serde_json::to_value(&settings.risk)?),
         "market_filter" => Ok(serde_json::to_value(&settings.market_filter)?),
         "weather" => Ok(serde_json::to_value(&settings.weather)?),
-        "convergence" => Ok(serde_json::to_value(&settings.convergence)?),
         "crypto_alpha" => Ok(serde_json::to_value(&settings.crypto_alpha)?),
         "event_calendar" => Ok(serde_json::to_value(&settings.event_calendar)?),
         "liquidity_rewards" => Ok(serde_json::to_value(&settings.liquidity_rewards)?),
         "smart_money" => Ok(serde_json::to_value(&settings.smart_money)?),
-        "monitor" => Ok(serde_json::to_value(&settings.monitor)?),
-        "chain" => Ok(serde_json::to_value(&settings.chain)?),
-        "clob" => Ok(serde_json::to_value(&settings.clob)?),
-        "gamma" => Ok(serde_json::to_value(&settings.gamma)?),
-        "database" => Ok(serde_json::to_value(&settings.database)?),
         _ => Err(anyhow!("Unknown config section: {}", section)),
     }
 }

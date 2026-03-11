@@ -1,128 +1,250 @@
-import { useState, useCallback } from "react";
+import { useState } from "react";
 import { updateSection } from "../api";
 
 interface Props {
+  title: string;
   section: string;
   data: Record<string, unknown>;
   onSaved?: () => void;
+  onHistory?: () => void;
 }
 
-export default function ConfigSection({ section, data, onSaved }: Props) {
-  const [formData, setFormData] = useState<Record<string, unknown>>(data);
+/** Per-section, per-field Chinese descriptions. */
+const FIELD_HINTS: Record<string, Record<string, string>> = {
+  strategy: {
+    enabled: "启用的策略列表，如 weather, crypto, smart_money",
+    scan_interval_ms: "策略扫描间隔（毫秒）",
+    min_spread_bps: "最小买卖价差（基点），低于此值跳过",
+    min_profit_usdc: "最小预期利润（USDC），低于此值不执行",
+    max_trade_size_usdc: "单笔最大交易金额（USDC）",
+    order_type: "订单类型：FOK（立即全部成交）或 GTC（挂单）",
+    max_market_end_days: "只交易 N 天内到期的市场，留空不限",
+  },
+  risk: {
+    max_position_per_market: "单市场最大仓位（USDC）",
+    max_total_exposure: "所有仓位总敞口上限（USDC）",
+    max_daily_loss: "单日最大亏损（USDC），超过暂停交易",
+    circuit_breaker_loss: "熔断亏损阈值（USDC），触发后停止所有交易",
+    circuit_breaker_consecutive_losses: "连续亏损次数触发熔断",
+    max_slippage_bps: "最大滑点（基点）",
+    min_order_usdc: "最小订单金额（USDC），低于此值跳过",
+    min_profit_usdc: "最小利润要求（USDC）",
+    max_exposure_per_strategy: "单策略最大敞口（USDC）",
+    max_markets_per_strategy: "单策略最大持仓市场数",
+  },
+  market_filter: {
+    min_liquidity: "最小市场流动性（USDC）",
+    min_volume_24h: "最小 24h 交易量（USDC）",
+    max_markets: "最大发现市场数",
+    ws_max_instruments: "WebSocket 最大订阅数（建议 ≤ 500）",
+    market_refresh_interval_secs: "市场刷新间隔（秒），0 = 不刷新",
+  },
+  weather: {
+    min_edge_bps: "最小 edge（模型概率 - 市场价，基点）",
+    max_spread_bps: "最大买卖价差（基点），超过则跳过",
+    max_position_pct: "仓位占余额比例上限（0-1）",
+    max_position_usdc: "单笔最大仓位（USDC）",
+    kelly_fraction: "Kelly 公式分数上限（0-1）",
+    forecast_error: "预报误差参数（温度/降水/降雪/风速的 σ 值）",
+    refresh_interval_secs: "预报数据刷新间隔（秒）",
+    exit_buffer_bps: "模型反转退出缓冲（基点），模型概率 < 买一价 - 缓冲时卖出",
+    capital_efficiency_threshold: "资金效率退出阈值，买一价 ≥ 此值时卖出锁利",
+    dynamic_sigma: "动态 σ：根据预报天数放大误差 σ×√天数",
+    forecast_change_detection: "预报变化检测：仅在预报显著变化时交易",
+    forecast_change_threshold: "变化阈值：预报变化需超过此倍数的 σ",
+    max_entry_price: "最大入场价：只买低于此价的 token（高赔率策略）",
+    profit_take_threshold: "止盈价：价格涨到此值自动卖出",
+    noaa_user_agent: "NOAA API 的 User-Agent 头",
+    target_cities: "目标城市列表，只扫描这些城市的天气市场",
+  },
+  crypto_alpha: {
+    min_edge_bps: "最小 edge（GBM模型概率 - 市场价，基点）",
+    max_position_pct: "仓位占余额比例上限（0-1）",
+    kelly_fraction: "Kelly 公式分数上限（0-1）",
+    refresh_interval_secs: "价格数据刷新间隔（秒）",
+    coingecko_api_key: "CoinGecko Demo API Key（留空则禁用备用源）",
+    exit_buffer_bps: "模型反转退出缓冲（基点）",
+    capital_efficiency_threshold: "资金效率退出阈值（0-1）",
+    drift_decay: "漂移衰减：0=风险中性(Black-Scholes)，1=完全历史漂移",
+    max_spread_bps: "最大买卖价差（基点），超过则跳过",
+    max_position_usdc: "单笔最大仓位（USDC）",
+  },
+  event_calendar: {
+    enabled: "是否启用事件日历过滤",
+    finnhub_api_key: "Finnhub API Key（美国宏观经济事件）",
+    coinmarketcal_api_key: "CoinMarketCal API Key（加密货币事件）",
+    refresh_interval_secs: "事件数据刷新间隔（秒）",
+    pre_event_hours: "事件前 N 小时开始降低仓位",
+    post_event_hours: "事件后 N 小时恢复正常",
+    high_impact_multiplier: "高影响事件仓位乘数（0-1，如 0.25 = 降至 25%）",
+    medium_impact_multiplier: "中影响事件仓位乘数（0-1）",
+    low_impact_multiplier: "低影响事件仓位乘数（0-1）",
+    static_events: "手动配置的静态事件列表（JSON）",
+  },
+  liquidity_rewards: {
+    enabled: "是否启用流动性奖励做市",
+    max_markets: "同时报价的最大市场数",
+    max_position_per_market: "单市场最大仓位（USDC）",
+    max_total_exposure: "所有奖励市场总敞口上限（USDC）",
+    market_refresh_secs: "市场选择刷新间隔（秒）",
+    quote_refresh_secs: "报价刷新间隔（秒）",
+    spread_fraction: "使用奖励最大价差的比例（0-1，如 0.8 = 80%）",
+    min_order_size: "最小订单金额（USDC）",
+    inventory_skew_factor: "库存偏斜因子（0-1），持仓偏重时扩大价差",
+    min_daily_rate: "最低日奖励率（USDC），低于此值不参与",
+    requote_trigger_bps: "BBO 偏移触发重新报价的阈值（基点）",
+    requote_cooldown_secs: "重新报价冷却时间（秒）",
+    verify_scoring: "是否通过 CLOB API 验证订单计分",
+    quote_yes: "是否在 YES 侧报价",
+    quote_no: "是否在 NO 侧报价",
+    fill_check_secs: "成交检测间隔（秒），0 = 禁用",
+    order_depth_level: "报价深度层级，0=中间价，N=第 N 档",
+    cancel_depth_level: "撤单深度层级，订单到达此档时撤单重挂",
+    failed_cooldown_secs: "下单失败后冷却时间（秒）",
+    market_mode: "市场模式：auto（自动）/ manual（手动）/ hybrid（混合）",
+    manual_markets: "手动管理的市场列表（JSON）",
+    allow_neg_risk: "是否允许 NegRisk 多结果市场",
+  },
+  smart_money: {
+    wallets: "跟踪的钱包列表（JSON: address, label, weight）",
+    follow_ratio: "跟单比例（0-1，如 0.1 = 跟踪仓位的 10%）",
+    max_position_usdc: "单市场最大仓位（USDC）",
+    poll_interval_secs: "Data API 轮询间隔（秒）",
+    signal_ttl_secs: "信号有效期（秒），过期丢弃",
+    exit_buffer_bps: "退出缓冲（基点）",
+    capital_efficiency_threshold: "资金效率退出阈值（0-1）",
+    onchain_enabled: "是否启用链上 Transfer 事件监控",
+    onchain_poll_secs: "链上事件轮询间隔（秒）",
+    auto_discover_enabled: "是否自动发现高收益钱包",
+  },
+};
+
+export default function ConfigSection({ title, section, data, onSaved, onHistory }: Props) {
+  const [form, setForm] = useState<Record<string, unknown>>({ ...data });
   const [saving, setSaving] = useState(false);
-  const [toast, setToast] = useState<{ type: "success" | "error"; msg: string } | null>(null);
+  const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
 
-  const handleChange = useCallback((key: string, value: unknown) => {
-    setFormData((prev) => ({ ...prev, [key]: value }));
-  }, []);
+  const hints = FIELD_HINTS[section] ?? {};
 
-  const handleSave = async () => {
+  function showToast(msg: string, ok: boolean) {
+    setToast({ msg, ok });
+    setTimeout(() => setToast(null), 3000);
+  }
+
+  function setValue(key: string, raw: unknown) {
+    setForm((prev) => ({ ...prev, [key]: raw }));
+  }
+
+  async function handleSave() {
     setSaving(true);
-    setToast(null);
     try {
-      const res = await updateSection(section, formData);
-      setToast({ type: "success", msg: `已保存 v${res.version}` });
+      await updateSection(section, form);
+      showToast("保存成功", true);
       onSaved?.();
     } catch (e) {
-      setToast({ type: "error", msg: String(e) });
+      showToast(`保存失败: ${e instanceof Error ? e.message : e}`, false);
     } finally {
       setSaving(false);
     }
-  };
+  }
 
   return (
-    <div className="card bg-base-100 shadow-sm">
-      <div className="card-body">
-        <div className="grid gap-3 mt-2">
-          {Object.entries(formData).map(([key, value]) => (
-            <FieldInput
+    <div className="card bg-base-200 shadow-sm">
+      <div className="card-body p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="card-title text-base">{title}</h3>
+          <div className="flex gap-2">
+            {onHistory && (
+              <button className="btn btn-ghost btn-xs" onClick={onHistory}>
+                历史
+              </button>
+            )}
+            <button
+              className="btn btn-primary btn-xs"
+              onClick={handleSave}
+              disabled={saving}
+            >
+              {saving ? "保存中..." : "保存"}
+            </button>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {Object.entries(form).map(([key, value]) => (
+            <FieldEditor
               key={key}
-              label={key}
+              fieldKey={key}
               value={value}
-              onChange={(v) => handleChange(key, v)}
+              hint={hints[key]}
+              onChange={(v) => setValue(key, v)}
             />
           ))}
         </div>
-
-        {toast && (
-          <div className={`alert ${toast.type === "success" ? "alert-success" : "alert-error"} mt-3`}>
-            <span>{toast.msg}</span>
-          </div>
-        )}
-
-        <div className="card-actions justify-end mt-4">
-          <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-            {saving ? <span className="loading loading-spinner loading-sm" /> : "保存"}
-          </button>
-        </div>
       </div>
+      {toast && (
+        <div className="toast toast-end toast-bottom z-50">
+          <div className={`alert ${toast.ok ? "alert-success" : "alert-error"} text-sm py-2`}>
+            {toast.msg}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-function FieldInput({
-  label,
+function FieldEditor({
+  fieldKey,
   value,
+  hint,
   onChange,
 }: {
-  label: string;
+  fieldKey: string;
   value: unknown;
+  hint?: string;
   onChange: (v: unknown) => void;
 }) {
+  const label = fieldKey.replace(/_/g, " ");
+
   if (typeof value === "boolean") {
     return (
-      <label className="flex items-center gap-3 cursor-pointer">
-        <span className="label-text font-mono text-sm flex-1">{label}</span>
+      <label className="flex items-center gap-2 cursor-pointer" title={hint}>
         <input
           type="checkbox"
-          className="toggle toggle-primary"
+          className="toggle toggle-primary toggle-sm"
           checked={value}
           onChange={(e) => onChange(e.target.checked)}
         />
+        <span className="text-sm">{label}</span>
+        {hint && <span className="text-xs opacity-40 truncate max-w-48" title={hint}>{hint}</span>}
       </label>
     );
   }
 
   if (typeof value === "number") {
     return (
-      <label className="form-control w-full">
-        <div className="label">
-          <span className="label-text font-mono text-sm">{label}</span>
-        </div>
+      <label className="form-control">
+        <span className="label-text text-xs opacity-70">{label}</span>
+        {hint && <span className="label-text-alt text-xs opacity-40">{hint}</span>}
         <input
           type="number"
           className="input input-bordered input-sm w-full"
           value={value}
           step="any"
-          onChange={(e) => onChange(Number(e.target.value))}
-        />
-      </label>
-    );
-  }
-
-  if (typeof value === "string") {
-    return (
-      <label className="form-control w-full">
-        <div className="label">
-          <span className="label-text font-mono text-sm">{label}</span>
-        </div>
-        <input
-          type="text"
-          className="input input-bordered input-sm w-full"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(e) => {
+            const n = parseFloat(e.target.value);
+            onChange(isNaN(n) ? 0 : n);
+          }}
         />
       </label>
     );
   }
 
   if (Array.isArray(value)) {
-    if (value.every((v) => typeof v === "string")) {
+    const isStringArray = value.every((v) => typeof v === "string");
+    if (isStringArray) {
       return (
-        <label className="form-control w-full">
-          <div className="label">
-            <span className="label-text font-mono text-sm">{label}</span>
-          </div>
+        <label className="form-control sm:col-span-2">
+          <span className="label-text text-xs opacity-70">{label}</span>
+          {hint && <span className="label-text-alt text-xs opacity-40">{hint}</span>}
           <input
             type="text"
             className="input input-bordered input-sm w-full"
@@ -132,25 +254,40 @@ function FieldInput({
                 e.target.value
                   .split(",")
                   .map((s) => s.trim())
-                  .filter(Boolean)
+                  .filter(Boolean),
               )
             }
           />
-          <div className="label">
-            <span className="label-text-alt">逗号分隔</span>
-          </div>
+          <span className="label-text-alt text-xs opacity-50">逗号分隔</span>
         </label>
       );
     }
+    // Non-string arrays and objects → JSON textarea
+    return (
+      <label className="form-control sm:col-span-2">
+        <span className="label-text text-xs opacity-70">{label}</span>
+        {hint && <span className="label-text-alt text-xs opacity-40">{hint}</span>}
+        <textarea
+          className="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
+          rows={3}
+          value={JSON.stringify(value, null, 2)}
+          onChange={(e) => {
+            try {
+              onChange(JSON.parse(e.target.value));
+            } catch {
+              /* keep current value on invalid JSON */
+            }
+          }}
+        />
+      </label>
+    );
   }
 
-  // Nested objects or complex types: render as JSON textarea
   if (typeof value === "object" && value !== null) {
     return (
-      <label className="form-control w-full">
-        <div className="label">
-          <span className="label-text font-mono text-sm">{label}</span>
-        </div>
+      <label className="form-control sm:col-span-2">
+        <span className="label-text text-xs opacity-70">{label}</span>
+        {hint && <span className="label-text-alt text-xs opacity-40">{hint}</span>}
         <textarea
           className="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
           rows={4}
@@ -159,7 +296,7 @@ function FieldInput({
             try {
               onChange(JSON.parse(e.target.value));
             } catch {
-              // ignore parse errors while typing
+              /* keep current value on invalid JSON */
             }
           }}
         />
@@ -167,5 +304,17 @@ function FieldInput({
     );
   }
 
-  return null;
+  // String
+  return (
+    <label className="form-control">
+      <span className="label-text text-xs opacity-70">{label}</span>
+      {hint && <span className="label-text-alt text-xs opacity-40">{hint}</span>}
+      <input
+        type="text"
+        className="input input-bordered input-sm w-full"
+        value={String(value ?? "")}
+        onChange={(e) => onChange(e.target.value)}
+      />
+    </label>
+  );
 }

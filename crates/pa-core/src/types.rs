@@ -42,7 +42,7 @@ pub struct MarketInfo {
     /// For NegRisk markets, the parent event's title (used for weather detection).
     #[serde(default)]
     pub event_title: Option<String>,
-    /// Market resolution/end date (from Gamma API). Used by convergence strategy.
+    /// Market resolution/end date (from Gamma API).
     #[serde(default)]
     pub end_date: Option<DateTime<Utc>>,
     /// Market category hint (e.g. "crypto", "politics"). Used by event calendar filter.
@@ -272,8 +272,6 @@ pub struct TradingOpportunity {
 pub enum StrategyType {
     /// Weather forecast-based directional alpha
     Weather,
-    /// Resolution convergence: buy tokens near 0/1 as markets approach resolution
-    ResolutionConvergence,
     /// Crypto price-based directional alpha
     CryptoAlpha,
     /// Liquidity rewards market making
