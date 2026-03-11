@@ -76,21 +76,35 @@ export default function Dashboard() {
         <StatCard label="策略数量" value={String(status.enabled_strategies.length)} />
       </div>
 
-      {/* Row 2: Key Metrics */}
+      {/* Row 2: Portfolio */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard
-          label="已实现 PnL"
-          value={m(metrics, "realized_pnl_usd").toFixed(2)}
+          label="资产总值"
+          value={(m(metrics, "usdc_balance") + m(metrics, "positions_market_value_usd")).toFixed(2)}
           unit="USD"
-          color={m(metrics, "realized_pnl_usd") >= 0 ? "text-success" : "text-error"}
         />
         <MetricCard
-          label="USDC 余额"
+          label="可用余额"
           value={m(metrics, "usdc_balance").toFixed(2)}
           unit="USD"
         />
         <MetricCard
-          label="总敞口"
+          label="持仓市值"
+          value={m(metrics, "positions_market_value_usd").toFixed(2)}
+          unit="USD"
+        />
+        <MetricCard
+          label="已实现收益"
+          value={m(metrics, "realized_pnl_usd").toFixed(2)}
+          unit="USD"
+          color={m(metrics, "realized_pnl_usd") >= 0 ? "text-success" : "text-error"}
+        />
+      </div>
+
+      {/* Row 3: Risk */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <MetricCard
+          label="持仓成本"
           value={m(metrics, "total_exposure_usd").toFixed(2)}
           unit="USD"
         />
@@ -99,21 +113,22 @@ export default function Dashboard() {
           value={m(metrics, "circuit_breaker_active") > 0 ? "已触发" : "正常"}
           color={m(metrics, "circuit_breaker_active") > 0 ? "text-error" : "text-success"}
         />
-      </div>
-
-      {/* Row 3: Activity */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <MetricCard label="机会检测" value={String(m(metrics, "opportunities_detected_total"))} />
-        <MetricCard label="执行次数" value={String(m(metrics, "executions_total"))} />
         <MetricCard
           label="执行错误"
           value={String(m(metrics, "execution_errors_total"))}
           color={m(metrics, "execution_errors_total") > 0 ? "text-warning" : ""}
         />
-        <MetricCard label="退出交易" value={String(m(metrics, "exit_trades_total"))} />
       </div>
 
-      {/* Row 4: Infrastructure */}
+      {/* Row 4: Activity */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <MetricCard label="机会检测" value={String(m(metrics, "opportunities_detected_total"))} />
+        <MetricCard label="执行次数" value={String(m(metrics, "executions_total"))} />
+        <MetricCard label="退出交易" value={String(m(metrics, "exit_trades_total"))} />
+        <MetricCard label="WS 重连" value={String(m(metrics, "ws_reconnect_total"))} />
+      </div>
+
+      {/* Row 5: Infrastructure */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <MetricCard label="WS 订阅" value={String(m(metrics, "active_ws_subscriptions"))} />
         <MetricCard label="监控市场" value={String(m(metrics, "monitored_markets"))} />

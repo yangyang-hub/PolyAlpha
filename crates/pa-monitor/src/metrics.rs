@@ -131,6 +131,13 @@ pub static USDC_BALANCE: LazyLock<Gauge> = LazyLock::new(|| {
     gauge
 });
 
+/// Market value of all positions (sum of size × current_price).
+pub static POSITIONS_MARKET_VALUE: LazyLock<Gauge> = LazyLock::new(|| {
+    let gauge = Gauge::new("positions_market_value_usd", "Market value of all open positions").unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});
+
 /// Opportunities scaled down due to insufficient order book depth.
 pub static DEPTH_VALIDATION_SCALED: LazyLock<IntCounter> = LazyLock::new(|| {
     let counter = IntCounter::new(

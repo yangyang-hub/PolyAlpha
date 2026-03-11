@@ -1905,7 +1905,7 @@ async fn main() -> Result<()> {
                         };
                         *snap_positions.write().await = entries;
 
-                        // Update Prometheus gauges for balance & exposure
+                        // Update Prometheus gauges for balance, exposure & market value
                         use rust_decimal::prelude::ToPrimitive;
                         let total_bal: Decimal = snap_balances.iter()
                             .map(|b| **b.load())
@@ -1913,8 +1913,16 @@ async fn main() -> Result<()> {
                         let total_exp: Decimal = snap_risk_managers.iter()
                             .map(|rm| rm.total_exposure())
                             .sum();
+                        // Market value = Σ(size × current_price) for positions with live prices
+                        let market_value: Decimal = {
+                            let positions = snap_positions.read().await;
+                            positions.iter()
+                                .filter_map(|p| p.current_price.map(|cp| p.size * cp))
+                                .sum()
+                        };
                         pa_monitor::metrics::USDC_BALANCE.set(total_bal.to_f64().unwrap_or(0.0));
                         pa_monitor::metrics::TOTAL_EXPOSURE.set(total_exp.to_f64().unwrap_or(0.0));
+                        pa_monitor::metrics::POSITIONS_MARKET_VALUE.set(market_value.to_f64().unwrap_or(0.0));
                     }
                 }
             }

@@ -27,38 +27,41 @@ export default function WeatherStrategy() {
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">天气策略</h1>
 
-      {/* Account overview */}
-      {metrics && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          <div className="stat bg-base-200 rounded-box p-4">
-            <div className="stat-title text-xs">USDC 余额</div>
-            <div className="stat-value text-lg">
-              {(metrics.get("usdc_balance") ?? 0).toFixed(2)}
-              <span className="text-sm font-normal opacity-60 ml-1">USD</span>
+      {/* Portfolio overview */}
+      {metrics && (() => {
+        const cash = metrics.get("usdc_balance") ?? 0;
+        const posValue = metrics.get("positions_market_value_usd") ?? 0;
+        const portfolio = cash + posValue;
+        const pnl = metrics.get("realized_pnl_usd") ?? 0;
+        return (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <div className="stat bg-base-200 rounded-box p-4">
+              <div className="stat-title text-xs">资产总值</div>
+              <div className="stat-value text-lg">
+                ${portfolio.toFixed(2)}
+              </div>
+            </div>
+            <div className="stat bg-base-200 rounded-box p-4">
+              <div className="stat-title text-xs">可用余额</div>
+              <div className="stat-value text-lg">
+                ${cash.toFixed(2)}
+              </div>
+            </div>
+            <div className="stat bg-base-200 rounded-box p-4">
+              <div className="stat-title text-xs">持仓市值</div>
+              <div className="stat-value text-lg">
+                ${posValue.toFixed(2)}
+              </div>
+            </div>
+            <div className="stat bg-base-200 rounded-box p-4">
+              <div className="stat-title text-xs">已实现收益</div>
+              <div className={`stat-value text-lg ${pnl >= 0 ? "text-success" : "text-error"}`}>
+                ${pnl.toFixed(2)}
+              </div>
             </div>
           </div>
-          <div className="stat bg-base-200 rounded-box p-4">
-            <div className="stat-title text-xs">总敞口</div>
-            <div className="stat-value text-lg">
-              {(metrics.get("total_exposure_usd") ?? 0).toFixed(2)}
-              <span className="text-sm font-normal opacity-60 ml-1">USD</span>
-            </div>
-          </div>
-          <div className="stat bg-base-200 rounded-box p-4">
-            <div className="stat-title text-xs">已实现收益</div>
-            <div className={`stat-value text-lg ${(metrics.get("realized_pnl_usd") ?? 0) >= 0 ? "text-success" : "text-error"}`}>
-              {(metrics.get("realized_pnl_usd") ?? 0).toFixed(2)}
-              <span className="text-sm font-normal opacity-60 ml-1">USD</span>
-            </div>
-          </div>
-          <div className="stat bg-base-200 rounded-box p-4">
-            <div className="stat-title text-xs">熔断器</div>
-            <div className={`stat-value text-lg ${(metrics.get("circuit_breaker_active") ?? 0) > 0 ? "text-error" : "text-success"}`}>
-              {(metrics.get("circuit_breaker_active") ?? 0) > 0 ? "已触发" : "正常"}
-            </div>
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Strategy stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
