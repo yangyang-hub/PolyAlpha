@@ -1,6 +1,7 @@
 import { useCallback } from "react";
-import { fetchPositions, fetchSection, type PositionEntry } from "../api";
+import { fetchPositions, fetchSection, fetchMetrics, type PositionEntry } from "../api";
 import { usePolling } from "../hooks/usePolling";
+import { parseMetrics } from "../lib/metrics";
 
 interface Wallet {
   address: string;
@@ -11,9 +12,12 @@ interface Wallet {
 export default function SmartMoney() {
   const posFetcher = useCallback(() => fetchPositions("smart_money"), []);
   const configFetcher = useCallback(() => fetchSection("smart_money"), []);
+  const metricsFetcher = useCallback(() => fetchMetrics(), []);
   const { data: positions, loading: posLoading } = usePolling<PositionEntry[]>(posFetcher, 15000);
   const { data: config } = usePolling<Record<string, unknown>>(configFetcher, 60000);
+  const { data: metricsRaw } = usePolling<string>(metricsFetcher, 15000);
 
+  const metrics = metricsRaw ? parseMetrics(metricsRaw) : null;
   const wallets: Wallet[] = Array.isArray(config?.wallets) ? (config.wallets as Wallet[]) : [];
 
   const totalCost = (positions ?? []).reduce((s, p) => s + Number(p.cost_basis), 0);
@@ -31,6 +35,39 @@ export default function SmartMoney() {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">跟单交易</h1>
+
+      {/* Account overview */}
+      {metrics && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <div className="stat bg-base-200 rounded-box p-4">
+            <div className="stat-title text-xs">USDC 余额</div>
+            <div className="stat-value text-lg">
+              {(metrics.get("usdc_balance") ?? 0).toFixed(2)}
+              <span className="text-sm font-normal opacity-60 ml-1">USD</span>
+            </div>
+          </div>
+          <div className="stat bg-base-200 rounded-box p-4">
+            <div className="stat-title text-xs">总敞口</div>
+            <div className="stat-value text-lg">
+              {(metrics.get("total_exposure_usd") ?? 0).toFixed(2)}
+              <span className="text-sm font-normal opacity-60 ml-1">USD</span>
+            </div>
+          </div>
+          <div className="stat bg-base-200 rounded-box p-4">
+            <div className="stat-title text-xs">已实现收益</div>
+            <div className={`stat-value text-lg ${(metrics.get("realized_pnl_usd") ?? 0) >= 0 ? "text-success" : "text-error"}`}>
+              {(metrics.get("realized_pnl_usd") ?? 0).toFixed(2)}
+              <span className="text-sm font-normal opacity-60 ml-1">USD</span>
+            </div>
+          </div>
+          <div className="stat bg-base-200 rounded-box p-4">
+            <div className="stat-title text-xs">熔断器</div>
+            <div className={`stat-value text-lg ${(metrics.get("circuit_breaker_active") ?? 0) > 0 ? "text-error" : "text-success"}`}>
+              {(metrics.get("circuit_breaker_active") ?? 0) > 0 ? "已触发" : "正常"}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Summary stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">

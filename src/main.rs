@@ -1841,6 +1841,9 @@ async fn main() -> Result<()> {
         let snap_risk_managers: Vec<Arc<RiskManagerImpl>> = account_contexts.iter()
             .map(|ctx| Arc::clone(&ctx.risk_manager_impl))
             .collect();
+        let snap_balances: Vec<Arc<ArcSwap<Decimal>>> = account_contexts.iter()
+            .map(|ctx| Arc::clone(&ctx.usdc_balance))
+            .collect();
         let snap_markets = Arc::clone(&shared_markets);
         let snap_cache = market_data.cache().clone();
         let snap_positions = Arc::clone(&shared_positions);
@@ -1901,6 +1904,17 @@ async fn main() -> Result<()> {
                             all
                         };
                         *snap_positions.write().await = entries;
+
+                        // Update Prometheus gauges for balance & exposure
+                        use rust_decimal::prelude::ToPrimitive;
+                        let total_bal: Decimal = snap_balances.iter()
+                            .map(|b| **b.load())
+                            .sum();
+                        let total_exp: Decimal = snap_risk_managers.iter()
+                            .map(|rm| rm.total_exposure())
+                            .sum();
+                        pa_monitor::metrics::USDC_BALANCE.set(total_bal.to_f64().unwrap_or(0.0));
+                        pa_monitor::metrics::TOTAL_EXPOSURE.set(total_exp.to_f64().unwrap_or(0.0));
                     }
                 }
             }

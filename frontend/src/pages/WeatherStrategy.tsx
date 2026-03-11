@@ -27,7 +27,40 @@ export default function WeatherStrategy() {
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">天气策略</h1>
 
-      {/* Summary stats */}
+      {/* Account overview */}
+      {metrics && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <div className="stat bg-base-200 rounded-box p-4">
+            <div className="stat-title text-xs">USDC 余额</div>
+            <div className="stat-value text-lg">
+              {(metrics.get("usdc_balance") ?? 0).toFixed(2)}
+              <span className="text-sm font-normal opacity-60 ml-1">USD</span>
+            </div>
+          </div>
+          <div className="stat bg-base-200 rounded-box p-4">
+            <div className="stat-title text-xs">总敞口</div>
+            <div className="stat-value text-lg">
+              {(metrics.get("total_exposure_usd") ?? 0).toFixed(2)}
+              <span className="text-sm font-normal opacity-60 ml-1">USD</span>
+            </div>
+          </div>
+          <div className="stat bg-base-200 rounded-box p-4">
+            <div className="stat-title text-xs">已实现收益</div>
+            <div className={`stat-value text-lg ${(metrics.get("realized_pnl_usd") ?? 0) >= 0 ? "text-success" : "text-error"}`}>
+              {(metrics.get("realized_pnl_usd") ?? 0).toFixed(2)}
+              <span className="text-sm font-normal opacity-60 ml-1">USD</span>
+            </div>
+          </div>
+          <div className="stat bg-base-200 rounded-box p-4">
+            <div className="stat-title text-xs">熔断器</div>
+            <div className={`stat-value text-lg ${(metrics.get("circuit_breaker_active") ?? 0) > 0 ? "text-error" : "text-success"}`}>
+              {(metrics.get("circuit_breaker_active") ?? 0) > 0 ? "已触发" : "正常"}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Strategy stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <div className="stat bg-base-200 rounded-box p-4">
           <div className="stat-title text-xs">持仓数</div>
@@ -38,7 +71,7 @@ export default function WeatherStrategy() {
           <div className="stat-value text-lg">{marketCount}</div>
         </div>
         <div className="stat bg-base-200 rounded-box p-4">
-          <div className="stat-title text-xs">总成本</div>
+          <div className="stat-title text-xs">策略成本</div>
           <div className="stat-value text-lg">${totalCost.toFixed(2)}</div>
         </div>
         <div className="stat bg-base-200 rounded-box p-4">
@@ -49,7 +82,7 @@ export default function WeatherStrategy() {
         </div>
       </div>
 
-      {/* Metrics */}
+      {/* Activity metrics */}
       {metrics && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           <MetricCard label="机会检测" value={metrics.get("opportunities_detected_total")} />
