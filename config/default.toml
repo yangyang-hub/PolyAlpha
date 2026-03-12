@@ -42,7 +42,7 @@ max_exposure_per_strategy = 5000.0
 max_markets_per_strategy = 50
 
 [database]
-url = "postgresql://polyalpha:polyalpha@localhost:5432/polyalpha"
+url = ""
 max_connections = 10
 
 [monitor]

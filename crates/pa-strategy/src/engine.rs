@@ -70,6 +70,98 @@ pub struct StrategyEngine {
 }
 
 impl StrategyEngine {
+    fn cost_precision_step(price: Decimal) -> (u64, u64, u64) {
+        use rust_decimal::prelude::ToPrimitive;
+
+        let scale = price.scale();
+        let denom = 10u64.pow(scale);
+        let numer = (price * Decimal::from(denom)).round().to_u64().unwrap_or(1);
+        if numer == 0 {
+            return (1, 0, denom);
+        }
+        let g = gcd_u64(numer, denom);
+        let s_step = denom / g;
+        (s_step, numer, denom)
+    }
+
+    fn adjust_size_for_cost_precision(price: Decimal, size: Decimal) -> Decimal {
+        use rust_decimal::prelude::ToPrimitive;
+
+        let cost = price * size;
+        if cost == cost.round_dp(2) {
+            return size;
+        }
+
+        let (s_step, numer, _) = Self::cost_precision_step(price);
+        if numer == 0 {
+            return size;
+        }
+
+        let s_val = (size * Decimal::from(100u64)).round().to_u64().unwrap_or(0);
+        if s_step == 0 || s_val < s_step {
+            return Decimal::ZERO;
+        }
+
+        let s_rounded = (s_val / s_step) * s_step;
+        Decimal::new(s_rounded as i64, 2)
+    }
+
+    fn min_cost_adjusted_size(price: Decimal) -> Decimal {
+        if price <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+
+        let (s_step, numer, denom) = Self::cost_precision_step(price);
+        if numer == 0 || s_step == 0 {
+            return Decimal::ZERO;
+        }
+
+        let target = denom * 100;
+        let min_s = (target + numer - 1) / numer;
+        let s = ((min_s + s_step - 1) / s_step) * s_step;
+        if s > 5000 {
+            return Decimal::ZERO;
+        }
+
+        Decimal::new(s as i64, 2)
+    }
+
+    fn is_executable_directional_order(side: TradeSide, price: Decimal, size: Decimal) -> bool {
+        if price <= Decimal::ZERO || size <= Decimal::ZERO {
+            return false;
+        }
+
+        match side {
+            TradeSide::Buy => {
+                let requested_size = size.round_dp(2);
+                let mut adjusted = Self::adjust_size_for_cost_precision(price, requested_size);
+                if adjusted <= Decimal::ZERO {
+                    let min_size = Self::min_cost_adjusted_size(price);
+                    let max_cost = requested_size * price * Decimal::from(5u32);
+                    if min_size > Decimal::ZERO && min_size * price <= max_cost {
+                        adjusted = min_size;
+                    } else {
+                        return false;
+                    }
+                }
+
+                if price * adjusted < Decimal::ONE {
+                    let bumped = Self::min_cost_adjusted_size(price);
+                    if bumped > Decimal::ZERO && bumped <= requested_size.max(adjusted) {
+                        adjusted = bumped;
+                    }
+                }
+
+                price * adjusted >= Decimal::ONE
+            }
+            TradeSide::Sell => {
+                let requested_size = size.round_dp(2);
+                let adjusted = Self::adjust_size_for_cost_precision(price, requested_size);
+                adjusted > Decimal::ZERO
+            }
+        }
+    }
+
     fn strategy_metric_label(strategy: StrategyType) -> &'static str {
         match strategy {
             StrategyType::Weather => "weather",
@@ -213,6 +305,20 @@ impl StrategyEngine {
                             }
                         };
                         let _ = walk;
+                        if !Self::is_executable_directional_order(TradeSide::Buy, *price, *size) {
+                            tracing::debug!(
+                                id = %opp.id,
+                                token_id = %token_id,
+                                price = %price,
+                                size = %size,
+                                "Freshness rejected: buy order not executable after lot-size normalization"
+                            );
+                            pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+                            pa_monitor::metrics::EXECUTION_FRESHNESS_REJECTIONS
+                                .with_label_values(&[strategy_label, "buy_lot_size_invalid"])
+                                .inc();
+                            return None;
+                        }
                     }
                     TradeSide::Sell => {
                         let best_bid = match book.best_bid() {
@@ -260,6 +366,20 @@ impl StrategyEngine {
                         }
 
                         *price = best_bid;
+                        if !Self::is_executable_directional_order(TradeSide::Sell, *price, *size) {
+                            tracing::debug!(
+                                id = %opp.id,
+                                token_id = %token_id,
+                                price = %price,
+                                size = %size,
+                                "Freshness rejected: sell order not executable after lot-size normalization"
+                            );
+                            pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+                            pa_monitor::metrics::EXECUTION_FRESHNESS_REJECTIONS
+                                .with_label_values(&[strategy_label, "sell_lot_size_invalid"])
+                                .inc();
+                            return None;
+                        }
                     }
                 }
             }
@@ -1066,6 +1186,15 @@ fn scale_execution_plan_size(plan: &mut ExecutionPlan, multiplier: Decimal) {
     }
 }
 
+fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1235,5 +1364,27 @@ mod tests {
                 assert_eq!(size, dec!(3.25));
             }
         }
+    }
+
+    #[test]
+    fn test_validate_execution_freshness_rejects_tiny_buy_before_executor() {
+        let engine = make_engine(HashMap::from([(
+            U256::from(1u64),
+            make_book(U256::from(1u64), &[], &[(dec!(0.001), dec!(1000))]),
+        )]));
+
+        let opp = make_opp(TradeSide::Buy, dec!(0.001), dec!(5));
+        assert!(engine.validate_execution_freshness(&opp, &[]).is_none());
+    }
+
+    #[test]
+    fn test_validate_execution_freshness_rejects_tiny_sell_before_executor() {
+        let engine = make_engine(HashMap::from([(
+            U256::from(1u64),
+            make_book(U256::from(1u64), &[(dec!(0.999), dec!(10))], &[]),
+        )]));
+
+        let opp = make_opp(TradeSide::Sell, dec!(0.999), dec!(0.00966));
+        assert!(engine.validate_execution_freshness(&opp, &[]).is_none());
     }
 }

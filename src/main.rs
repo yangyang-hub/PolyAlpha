@@ -189,6 +189,7 @@ async fn main() -> Result<()> {
     // Merge per-account strategies into the global enabled list so runtime status,
     // discovery, and execution all observe the same effective strategy set.
     settings.merge_account_strategies_into_enabled();
+    let active_enabled_strategies = settings.active_account_enabled_strategies();
 
     // --- ArcSwap for hot-reloadable config ---
     let config_arc = Arc::new(ArcSwap::new(Arc::new(settings.clone())));
@@ -204,8 +205,11 @@ async fn main() -> Result<()> {
     let cancel = CancellationToken::new();
 
     // --- Initialize market data ---
+    let mut discovery_settings = settings.clone();
+    discovery_settings.strategy.enabled = active_enabled_strategies.clone();
     let market_data = Arc::new(
-        MarketDataService::new(&settings).context("Failed to initialize market data service")?,
+        MarketDataService::new(&discovery_settings)
+            .context("Failed to initialize market data service")?,
     );
     tracing::info!("Market data service initialized");
 
@@ -389,7 +393,7 @@ async fn main() -> Result<()> {
         let token_ids = build_ws_token_list(
             &markets_snapshot,
             &held_position_token_ids,
-            &settings.strategy.enabled,
+            &active_enabled_strategies,
             ws_max,
         );
 
@@ -2041,7 +2045,7 @@ async fn main() -> Result<()> {
         let refresh_market_data = Arc::clone(&market_data);
         let refresh_cache = market_data.cache().clone();
         let refresh_cancel = cancel.clone();
-        let refresh_enabled_strategies = settings.strategy.enabled.clone();
+        let refresh_enabled_strategies = active_enabled_strategies.clone();
         let refresh_ws_max = settings.market_filter.ws_max_instruments;
         // Collect all accounts' risk managers for held token aggregation
         let refresh_risk_managers: Vec<Arc<RiskManagerImpl>> = account_contexts

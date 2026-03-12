@@ -854,6 +854,42 @@ impl Settings {
         }
     }
 
+    /// Strategies that are both globally enabled and assigned to at least one account.
+    ///
+    /// Used by discovery/subscription code so the process doesn't scan markets for
+    /// strategies that no configured account can actually execute.
+    pub fn active_account_enabled_strategies(&self) -> Vec<String> {
+        let accounts = self.resolved_accounts();
+        if accounts.is_empty() {
+            return self.strategy.enabled.clone();
+        }
+
+        let mut active = Vec::new();
+        for strategy in &self.strategy.enabled {
+            if accounts
+                .iter()
+                .any(|account| account.strategies.iter().any(|assigned| assigned == strategy))
+                && !active.contains(strategy)
+            {
+                active.push(strategy.clone());
+            }
+        }
+
+        if self.liquidity_rewards.enabled
+            && accounts.iter().any(|account| {
+                account
+                    .strategies
+                    .iter()
+                    .any(|strategy| strategy == "liquidity_rewards")
+            })
+            && !active.iter().any(|strategy| strategy == "liquidity_rewards")
+        {
+            active.push("liquidity_rewards".to_string());
+        }
+
+        active
+    }
+
     /// Resolve the effective list of accounts.
     ///
     /// Priority (highest to lowest):

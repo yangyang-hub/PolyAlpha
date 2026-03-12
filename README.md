@@ -433,7 +433,7 @@ failed_cooldown_secs = 60
 | `POLYMARKET_PRIVATE_KEY` | 账户私钥环境变量示例，供 `[[accounts]]` / `PA_ACCOUNT_<N>_PRIVATE_KEY_ENV` 引用 | 按账户配置 |
 | `PA_ACCOUNT_1_NAME` | 第一个交易账户名；设置后启用 env 多账户配置 | 否 |
 | `PA_ACCOUNT_1_PRIVATE_KEY_ENV` | 第一个交易账户引用的私钥环境变量名，例如 `POLYMARKET_PRIVATE_KEY` | 按账户配置 |
-| `PA_DATABASE__URL` | PostgreSQL 连接字符串 | 仅回测 |
+| `PA_DATABASE__URL` | PostgreSQL 连接字符串；留空则禁用 ConfigStore/历史配置 | 可选 |
 | `PA_CHAIN__RPC_URL` | Polygon RPC 节点 URL | 否 |
 | `PA_CLOB__PROXY_WALLET` | GnosisSafe 代理钱包地址 | 推荐 |
 | `RUST_LOG` | 日志级别（info/debug/trace） | 否 |
