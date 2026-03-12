@@ -86,10 +86,10 @@ impl PositionLoader {
                     || error_chain.contains("invalid type")
                     || error_chain.contains("enddate")
                 {
-                    tracing::warn!(
+                    tracing::info!(
                         error = %e,
                         wallet = %self.wallet,
-                        "SDK position loading failed (likely empty endDate bug), falling back to raw HTTP"
+                        "Data API SDK hit known empty endDate bug, using raw HTTP fallback"
                     );
                     self.load_positions_fallback().await
                 } else {
@@ -241,10 +241,10 @@ impl PositionLoader {
                     || error_chain.contains("invalid type")
                     || error_chain.contains("enddate")
                 {
-                    tracing::warn!(
+                    tracing::info!(
                         error = %e,
                         wallet = %self.wallet,
-                        "SDK redeemable loading failed, falling back to raw HTTP"
+                        "Data API SDK redeemable path hit known empty endDate bug, using raw HTTP fallback"
                     );
                     self.find_redeemable_fallback().await
                 } else {

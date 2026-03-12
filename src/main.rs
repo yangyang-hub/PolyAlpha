@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             EnvFilter::new(
-                "info,polymarket_client_sdk=warn,polymarket_client_sdk::serde_helpers=error",
+                "info,polymarket_client_sdk=warn,polymarket_client_sdk::serde_helpers=off",
             )
         }))
         .with(fmt::layer().with_target(true).with_thread_ids(true))
