@@ -220,10 +220,8 @@ impl WalletTracker {
             };
 
             // Build new snapshot map
-            let new_map: HashMap<U256, WalletPosition> = new_positions
-                .into_iter()
-                .map(|p| (p.token_id, p))
-                .collect();
+            let new_map: HashMap<U256, WalletPosition> =
+                new_positions.into_iter().map(|p| (p.token_id, p)).collect();
 
             // Get old snapshot
             let old_map = {
@@ -232,12 +230,7 @@ impl WalletTracker {
             };
 
             // Diff and emit signals
-            let signals = diff_snapshots(
-                &old_map,
-                &new_map,
-                &wallet.address,
-                wallet.weight,
-            );
+            let signals = diff_snapshots(&old_map, &new_map, &wallet.address, wallet.weight);
 
             if !signals.is_empty() {
                 tracing::info!(
@@ -291,11 +284,7 @@ impl WalletTracker {
     // ──── On-chain Transfer Monitoring (raw JSON-RPC) ────
 
     /// Poll ConditionalTokens TransferSingle events via eth_getLogs JSON-RPC.
-    async fn poll_onchain_logs(
-        &self,
-        rpc_url: &str,
-        from_block: u64,
-    ) -> Result<u64> {
+    async fn poll_onchain_logs(&self, rpc_url: &str, from_block: u64) -> Result<u64> {
         // Get latest block number
         let latest = self.rpc_block_number(rpc_url).await?;
         if from_block >= latest {
@@ -312,13 +301,15 @@ impl WalletTracker {
         }
 
         // eth_getLogs with filter for TransferSingle events on ConditionalTokens
-        let logs = self.rpc_get_logs(
-            rpc_url,
-            CT_ADDRESS,
-            TRANSFER_SINGLE_TOPIC,
-            from_block + 1,
-            latest,
-        ).await?;
+        let logs = self
+            .rpc_get_logs(
+                rpc_url,
+                CT_ADDRESS,
+                TRANSFER_SINGLE_TOPIC,
+                from_block + 1,
+                latest,
+            )
+            .await?;
 
         let token_to_cid = self.token_to_condition.read().unwrap();
         let mut signal_count = 0usize;
@@ -350,8 +341,9 @@ impl WalletTracker {
                 Ok(id) => id,
                 Err(_) => continue,
             };
-            let value_u128 = u128::from_str_radix(&data_bytes[64..128].trim_start_matches('0').max("0"), 16)
-                .unwrap_or(0);
+            let value_u128 =
+                u128::from_str_radix(&data_bytes[64..128].trim_start_matches('0').max("0"), 16)
+                    .unwrap_or(0);
             let value = Decimal::from(value_u128);
 
             if value <= Decimal::ZERO {
@@ -415,12 +407,15 @@ impl WalletTracker {
             "params": [],
             "id": 1
         });
-        let resp: serde_json::Value = self.http_client
+        let resp: serde_json::Value = self
+            .http_client
             .post(rpc_url)
             .json(&body)
-            .send().await
+            .send()
+            .await
             .context("SmartMoney: eth_blockNumber request failed")?
-            .json().await
+            .json()
+            .await
             .context("SmartMoney: eth_blockNumber parse failed")?;
 
         let hex = resp["result"].as_str().unwrap_or("0x0");
@@ -448,12 +443,15 @@ impl WalletTracker {
             }],
             "id": 1
         });
-        let resp: serde_json::Value = self.http_client
+        let resp: serde_json::Value = self
+            .http_client
             .post(rpc_url)
             .json(&body)
-            .send().await
+            .send()
+            .await
             .context("SmartMoney: eth_getLogs request failed")?
-            .json().await
+            .json()
+            .await
             .context("SmartMoney: eth_getLogs parse failed")?;
 
         let logs = resp["result"].as_array().cloned().unwrap_or_default();
@@ -481,7 +479,11 @@ impl WalletTracker {
         signals.retain(|s| s.detected_at > cutoff);
         let pruned = before - signals.len();
         if pruned > 0 {
-            tracing::debug!(pruned, remaining = signals.len(), "SmartMoney: pruned stale signals");
+            tracing::debug!(
+                pruned,
+                remaining = signals.len(),
+                "SmartMoney: pruned stale signals"
+            );
         }
     }
 
@@ -544,10 +546,7 @@ impl WalletTracker {
 
     /// Fetch wallet profile stats from Polymarket Data API.
     async fn fetch_profile(&self, address: &str) -> Result<WalletProfile> {
-        let url = format!(
-            "https://data-api.polymarket.com/activity?user={}",
-            address
-        );
+        let url = format!("https://data-api.polymarket.com/activity?user={}", address);
 
         let resp = self
             .http_client
@@ -739,10 +738,7 @@ mod tests {
             signal_ttl_secs: 1, // 1 second TTL
             ..Default::default()
         };
-        let tracker = WalletTracker::new(
-            config,
-            Arc::new(RwLock::new(HashMap::new())),
-        );
+        let tracker = WalletTracker::new(config, Arc::new(RwLock::new(HashMap::new())));
 
         // Insert a stale signal
         {
@@ -776,29 +772,35 @@ mod tests {
 
     #[test]
     fn test_diff_multiple_tokens() {
-        let old = make_map(vec![
-            make_pos(1, dec!(100)),
-            make_pos(2, dec!(50)),
-        ]);
+        let old = make_map(vec![make_pos(1, dec!(100)), make_pos(2, dec!(50))]);
         let new = make_map(vec![
-            make_pos(1, dec!(150)),  // increased
+            make_pos(1, dec!(150)), // increased
             // token 2 gone → exit
-            make_pos(3, dec!(30)),   // new entry
+            make_pos(3, dec!(30)), // new entry
         ]);
 
         let signals = diff_snapshots(&old, &new, "0xabc", dec!(0.8));
 
         assert_eq!(signals.len(), 3);
 
-        let entry = signals.iter().find(|s| s.signal_type == SignalType::Entry).unwrap();
+        let entry = signals
+            .iter()
+            .find(|s| s.signal_type == SignalType::Entry)
+            .unwrap();
         assert_eq!(entry.token_id, U256::from(3u64));
         assert_eq!(entry.wallet_weight, dec!(0.8));
 
-        let increase = signals.iter().find(|s| s.signal_type == SignalType::Increase).unwrap();
+        let increase = signals
+            .iter()
+            .find(|s| s.signal_type == SignalType::Increase)
+            .unwrap();
         assert_eq!(increase.token_id, U256::from(1u64));
         assert_eq!(increase.delta, dec!(50));
 
-        let exit = signals.iter().find(|s| s.signal_type == SignalType::Exit).unwrap();
+        let exit = signals
+            .iter()
+            .find(|s| s.signal_type == SignalType::Exit)
+            .unwrap();
         assert_eq!(exit.token_id, U256::from(2u64));
         assert_eq!(exit.delta, dec!(50));
     }

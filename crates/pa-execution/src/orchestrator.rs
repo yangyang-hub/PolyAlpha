@@ -4,12 +4,12 @@ use chrono::Utc;
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
+use pa_core::Result;
 use pa_core::traits::Executor;
 use pa_core::types::{
-    TradingOpportunity, ExecutionPlan, ExecutionResult,
-    ExecutionStatus, TradeRecord, TradeSide, TxType,
+    ExecutionPlan, ExecutionResult, ExecutionStatus, TradeRecord, TradeSide, TradingOpportunity,
+    TxType,
 };
-use pa_core::Result;
 
 use crate::clob_executor::ClobExecutor;
 use crate::ctf_executor::CtfExecutor;

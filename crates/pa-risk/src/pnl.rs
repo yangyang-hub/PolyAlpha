@@ -1,6 +1,6 @@
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use std::sync::Mutex;
-use chrono::{DateTime, Utc};
 
 /// Tracks realized and unrealized PnL.
 pub struct PnlTracker {

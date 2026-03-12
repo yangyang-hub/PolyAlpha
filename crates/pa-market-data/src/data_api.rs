@@ -1,8 +1,8 @@
 use alloy::primitives::{Address, B256, U256};
 use anyhow::{Context, Result};
-use rust_decimal::Decimal;
 use polymarket_client_sdk::data::Client as DataApiClient;
 use polymarket_client_sdk::data::types::request::PositionsRequest;
+use rust_decimal::Decimal;
 
 /// A position loaded from the Polymarket Data API.
 pub struct ApiPosition {
@@ -113,7 +113,10 @@ impl PositionLoader {
                 .offset(offset)?
                 .build();
 
-            let page = self.client.positions(&req).await
+            let page = self
+                .client
+                .positions(&req)
+                .await
                 .context("Data API positions request failed")?;
 
             let page_len = page.len();
@@ -169,13 +172,13 @@ impl PositionLoader {
         loop {
             let url = format!(
                 "{}/positions?user={}&sizeThreshold=0&limit={}&offset={}",
-                self.api_base,
-                self.wallet,
-                limit,
-                offset
+                self.api_base, self.wallet, limit, offset
             );
 
-            let resp = client.get(&url).send().await
+            let resp = client
+                .get(&url)
+                .send()
+                .await
                 .context("Fallback HTTP request failed")?;
 
             if !resp.status().is_success() {
@@ -185,8 +188,8 @@ impl PositionLoader {
                 ));
             }
 
-            let raw: Vec<RawPosition> = resp.json().await
-                .context("Fallback JSON parsing failed")?;
+            let raw: Vec<RawPosition> =
+                resp.json().await.context("Fallback JSON parsing failed")?;
 
             let page_len = raw.len();
 
@@ -266,7 +269,10 @@ impl PositionLoader {
                 .offset(offset)?
                 .build();
 
-            let page = self.client.positions(&req).await
+            let page = self
+                .client
+                .positions(&req)
+                .await
                 .context("Data API redeemable check failed")?;
 
             let page_len = page.len();
@@ -310,13 +316,13 @@ impl PositionLoader {
         loop {
             let url = format!(
                 "{}/positions?user={}&redeemable=true&sizeThreshold=0&limit={}&offset={}",
-                self.api_base,
-                self.wallet,
-                limit,
-                offset
+                self.api_base, self.wallet, limit, offset
             );
 
-            let resp = client.get(&url).send().await
+            let resp = client
+                .get(&url)
+                .send()
+                .await
                 .context("Fallback redeemable HTTP request failed")?;
 
             if !resp.status().is_success() {
@@ -326,7 +332,9 @@ impl PositionLoader {
                 ));
             }
 
-            let raw: RawPositionsResponse = resp.json().await
+            let raw: RawPositionsResponse = resp
+                .json()
+                .await
                 .context("Fallback redeemable JSON parsing failed")?;
 
             let page_len = raw.positions.len();

@@ -49,13 +49,13 @@ impl BacktestEngine {
             return Ok(BacktestResult::build(config, 0, 0, 0, vec![], &[]));
         }
 
-        tracing::info!(
-            markets = markets.len(),
-            "Markets loaded"
-        );
+        tracing::info!(markets = markets.len(), "Markets loaded");
 
         // Step 2: Load snapshots
-        let token_ids = self.loader.snapshot_token_ids(config.from, config.to).await?;
+        let token_ids = self
+            .loader
+            .snapshot_token_ids(config.from, config.to)
+            .await?;
         if token_ids.is_empty() {
             tracing::warn!("No snapshots found in time range");
             return Ok(BacktestResult::build(config, 0, 0, 0, vec![], &[]));

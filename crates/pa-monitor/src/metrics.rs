@@ -1,4 +1,4 @@
-use prometheus::{IntCounter, Histogram, Gauge, Registry, histogram_opts};
+use prometheus::{Gauge, Histogram, IntCounter, Registry, histogram_opts};
 use std::sync::LazyLock;
 
 /// Global Prometheus metrics registry.
@@ -6,14 +6,22 @@ pub static REGISTRY: LazyLock<Registry> = LazyLock::new(Registry::new);
 
 /// Number of trading opportunities detected.
 pub static OPPORTUNITIES_DETECTED: LazyLock<IntCounter> = LazyLock::new(|| {
-    let counter = IntCounter::new("opportunities_detected_total", "Total opportunities detected").unwrap();
+    let counter = IntCounter::new(
+        "opportunities_detected_total",
+        "Total opportunities detected",
+    )
+    .unwrap();
     REGISTRY.register(Box::new(counter.clone())).unwrap();
     counter
 });
 
 /// Number of opportunities rejected by risk manager.
 pub static OPPORTUNITIES_REJECTED: LazyLock<IntCounter> = LazyLock::new(|| {
-    let counter = IntCounter::new("opportunities_rejected_total", "Opportunities rejected by risk checks").unwrap();
+    let counter = IntCounter::new(
+        "opportunities_rejected_total",
+        "Opportunities rejected by risk checks",
+    )
+    .unwrap();
     REGISTRY.register(Box::new(counter.clone())).unwrap();
     counter
 });
@@ -34,10 +42,12 @@ pub static EXECUTION_ERRORS: LazyLock<IntCounter> = LazyLock::new(|| {
 
 /// Execution latency (order submission to confirmation).
 pub static EXECUTION_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
-    let hist = Histogram::with_opts(
-        histogram_opts!("execution_latency_seconds", "Execution latency",
-            vec![0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0])
-    ).unwrap();
+    let hist = Histogram::with_opts(histogram_opts!(
+        "execution_latency_seconds",
+        "Execution latency",
+        vec![0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+    ))
+    .unwrap();
     REGISTRY.register(Box::new(hist.clone())).unwrap();
     hist
 });
@@ -51,7 +61,11 @@ pub static REALIZED_PNL: LazyLock<Gauge> = LazyLock::new(|| {
 
 /// Number of active WebSocket subscriptions.
 pub static ACTIVE_SUBSCRIPTIONS: LazyLock<Gauge> = LazyLock::new(|| {
-    let gauge = Gauge::new("active_ws_subscriptions", "Number of active WebSocket subscriptions").unwrap();
+    let gauge = Gauge::new(
+        "active_ws_subscriptions",
+        "Number of active WebSocket subscriptions",
+    )
+    .unwrap();
     REGISTRY.register(Box::new(gauge.clone())).unwrap();
     gauge
 });
@@ -72,17 +86,22 @@ pub static WS_RECONNECT_COUNT: LazyLock<IntCounter> = LazyLock::new(|| {
 
 /// Number of order book snapshots recorded to database.
 pub static SNAPSHOTS_RECORDED: LazyLock<IntCounter> = LazyLock::new(|| {
-    let counter =
-        IntCounter::new("snapshots_recorded_total", "Order book snapshots saved to database")
-            .unwrap();
+    let counter = IntCounter::new(
+        "snapshots_recorded_total",
+        "Order book snapshots saved to database",
+    )
+    .unwrap();
     REGISTRY.register(Box::new(counter.clone())).unwrap();
     counter
 });
 
 /// Whether the circuit breaker is currently active (1=triggered, 0=ok).
 pub static CIRCUIT_BREAKER_ACTIVE: LazyLock<Gauge> = LazyLock::new(|| {
-    let gauge =
-        Gauge::new("circuit_breaker_active", "Circuit breaker status (1=triggered, 0=ok)").unwrap();
+    let gauge = Gauge::new(
+        "circuit_breaker_active",
+        "Circuit breaker status (1=triggered, 0=ok)",
+    )
+    .unwrap();
     REGISTRY.register(Box::new(gauge.clone())).unwrap();
     gauge
 });
@@ -133,7 +152,11 @@ pub static USDC_BALANCE: LazyLock<Gauge> = LazyLock::new(|| {
 
 /// Market value of all positions (sum of size × current_price).
 pub static POSITIONS_MARKET_VALUE: LazyLock<Gauge> = LazyLock::new(|| {
-    let gauge = Gauge::new("positions_market_value_usd", "Market value of all open positions").unwrap();
+    let gauge = Gauge::new(
+        "positions_market_value_usd",
+        "Market value of all open positions",
+    )
+    .unwrap();
     REGISTRY.register(Box::new(gauge.clone())).unwrap();
     gauge
 });
@@ -162,11 +185,8 @@ pub static DEPTH_VALIDATION_REJECTED: LazyLock<IntCounter> = LazyLock::new(|| {
 
 /// Total liquidity rewards orders placed (bid + ask on YES/NO).
 pub static LR_ORDERS_PLACED: LazyLock<IntCounter> = LazyLock::new(|| {
-    let counter = IntCounter::new(
-        "lr_orders_placed_total",
-        "Liquidity rewards orders placed",
-    )
-    .unwrap();
+    let counter =
+        IntCounter::new("lr_orders_placed_total", "Liquidity rewards orders placed").unwrap();
     REGISTRY.register(Box::new(counter.clone())).unwrap();
     counter
 });

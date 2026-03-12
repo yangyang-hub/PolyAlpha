@@ -1,9 +1,9 @@
 use alloy::primitives::{B256, U256};
 use dashmap::DashMap;
+use pa_core::types::StrategyType;
 use rust_decimal::Decimal;
 use std::collections::HashSet;
 use std::sync::Arc;
-use pa_core::types::StrategyType;
 
 /// Loaded position entry: (token_id, size, avg_cost, strategy_type, condition_id).
 pub type LoadedPosition = (U256, Decimal, Decimal, Option<StrategyType>, Option<B256>);
@@ -31,7 +31,15 @@ impl PositionTracker {
     }
 
     /// Update position after a fill.
-    pub fn update(&self, token_id: U256, filled_size: Decimal, price: Decimal, is_buy: bool, strategy_type: Option<StrategyType>, condition_id: Option<B256>) {
+    pub fn update(
+        &self,
+        token_id: U256,
+        filled_size: Decimal,
+        price: Decimal,
+        is_buy: bool,
+        strategy_type: Option<StrategyType>,
+        condition_id: Option<B256>,
+    ) {
         self.positions
             .entry(token_id)
             .and_modify(|entry| {
@@ -96,7 +104,9 @@ impl PositionTracker {
     pub fn size_by_market(&self, condition_id: &B256) -> Decimal {
         let mut total = Decimal::ZERO;
         for entry in self.positions.iter() {
-            if entry.value().condition_id.as_ref() == Some(condition_id) && entry.value().size > Decimal::ZERO {
+            if entry.value().condition_id.as_ref() == Some(condition_id)
+                && entry.value().size > Decimal::ZERO
+            {
                 total += entry.value().size;
             }
         }
@@ -107,7 +117,9 @@ impl PositionTracker {
     pub fn exposure_by_market(&self, condition_id: &B256) -> Decimal {
         let mut total = Decimal::ZERO;
         for entry in self.positions.iter() {
-            if entry.value().condition_id.as_ref() == Some(condition_id) && entry.value().size > Decimal::ZERO {
+            if entry.value().condition_id.as_ref() == Some(condition_id)
+                && entry.value().size > Decimal::ZERO
+            {
                 total += entry.value().size * entry.value().avg_cost;
             }
         }
@@ -143,7 +155,15 @@ impl PositionTracker {
     pub fn load_initial(&self, entries: Vec<LoadedPosition>) {
         for (token_id, size, avg_cost, strategy_type, condition_id) in entries {
             if size > Decimal::ZERO {
-                self.positions.insert(token_id, PositionEntry { size, avg_cost, strategy_type, condition_id });
+                self.positions.insert(
+                    token_id,
+                    PositionEntry {
+                        size,
+                        avg_cost,
+                        strategy_type,
+                        condition_id,
+                    },
+                );
             }
         }
     }
@@ -159,7 +179,8 @@ impl PositionTracker {
         condition_id: Option<B256>,
     ) {
         if size > Decimal::ZERO {
-            self.positions.entry(token_id)
+            self.positions
+                .entry(token_id)
                 .and_modify(|e| {
                     e.size = size;
                     e.avg_cost = avg_cost;
@@ -170,7 +191,12 @@ impl PositionTracker {
                         e.condition_id = condition_id;
                     }
                 })
-                .or_insert(PositionEntry { size, avg_cost, strategy_type, condition_id });
+                .or_insert(PositionEntry {
+                    size,
+                    avg_cost,
+                    strategy_type,
+                    condition_id,
+                });
         } else {
             // Remove the position entirely
             self.positions.remove(&token_id);
@@ -222,9 +248,23 @@ mod tests {
         let market_cid = cid(1);
 
         // Buy YES token in market 1
-        tracker.update(U256::from(10), dec!(50), dec!(0.60), true, Some(StrategyType::Weather), Some(market_cid));
+        tracker.update(
+            U256::from(10),
+            dec!(50),
+            dec!(0.60),
+            true,
+            Some(StrategyType::Weather),
+            Some(market_cid),
+        );
         // Buy NO token in market 1
-        tracker.update(U256::from(11), dec!(30), dec!(0.40), true, Some(StrategyType::Weather), Some(market_cid));
+        tracker.update(
+            U256::from(11),
+            dec!(30),
+            dec!(0.40),
+            true,
+            Some(StrategyType::Weather),
+            Some(market_cid),
+        );
 
         // Total shares in market = 50 + 30 = 80
         assert_eq!(tracker.size_by_market(&market_cid), dec!(80));
@@ -238,16 +278,43 @@ mod tests {
         let tracker = PositionTracker::new();
 
         // Weather strategy: 50 shares @ $0.60 = $30, 30 shares @ $0.40 = $12
-        tracker.update(U256::from(10), dec!(50), dec!(0.60), true, Some(StrategyType::Weather), Some(cid(1)));
-        tracker.update(U256::from(11), dec!(30), dec!(0.40), true, Some(StrategyType::Weather), Some(cid(2)));
+        tracker.update(
+            U256::from(10),
+            dec!(50),
+            dec!(0.60),
+            true,
+            Some(StrategyType::Weather),
+            Some(cid(1)),
+        );
+        tracker.update(
+            U256::from(11),
+            dec!(30),
+            dec!(0.40),
+            true,
+            Some(StrategyType::Weather),
+            Some(cid(2)),
+        );
 
         // CryptoAlpha strategy: 100 shares @ $0.50 = $50
-        tracker.update(U256::from(20), dec!(100), dec!(0.50), true, Some(StrategyType::CryptoAlpha), Some(cid(3)));
+        tracker.update(
+            U256::from(20),
+            dec!(100),
+            dec!(0.50),
+            true,
+            Some(StrategyType::CryptoAlpha),
+            Some(cid(3)),
+        );
 
         // Weather exposure = 50*0.60 + 30*0.40 = 30 + 12 = 42
-        assert_eq!(tracker.exposure_by_strategy(StrategyType::Weather), dec!(42));
+        assert_eq!(
+            tracker.exposure_by_strategy(StrategyType::Weather),
+            dec!(42)
+        );
         // CryptoAlpha exposure = 100*0.50 = 50
-        assert_eq!(tracker.exposure_by_strategy(StrategyType::CryptoAlpha), dec!(50));
+        assert_eq!(
+            tracker.exposure_by_strategy(StrategyType::CryptoAlpha),
+            dec!(50)
+        );
     }
 
     #[test]
@@ -258,14 +325,45 @@ mod tests {
         let market3 = cid(3);
 
         // Weather in 2 markets (market1 has YES+NO = still 1 market)
-        tracker.update(U256::from(10), dec!(50), dec!(0.60), true, Some(StrategyType::Weather), Some(market1));
-        tracker.update(U256::from(11), dec!(30), dec!(0.40), true, Some(StrategyType::Weather), Some(market1));
-        tracker.update(U256::from(20), dec!(20), dec!(0.70), true, Some(StrategyType::Weather), Some(market2));
+        tracker.update(
+            U256::from(10),
+            dec!(50),
+            dec!(0.60),
+            true,
+            Some(StrategyType::Weather),
+            Some(market1),
+        );
+        tracker.update(
+            U256::from(11),
+            dec!(30),
+            dec!(0.40),
+            true,
+            Some(StrategyType::Weather),
+            Some(market1),
+        );
+        tracker.update(
+            U256::from(20),
+            dec!(20),
+            dec!(0.70),
+            true,
+            Some(StrategyType::Weather),
+            Some(market2),
+        );
 
         // CryptoAlpha in 1 market
-        tracker.update(U256::from(30), dec!(100), dec!(0.50), true, Some(StrategyType::CryptoAlpha), Some(market3));
+        tracker.update(
+            U256::from(30),
+            dec!(100),
+            dec!(0.50),
+            true,
+            Some(StrategyType::CryptoAlpha),
+            Some(market3),
+        );
 
         assert_eq!(tracker.market_count_by_strategy(StrategyType::Weather), 2);
-        assert_eq!(tracker.market_count_by_strategy(StrategyType::CryptoAlpha), 1);
+        assert_eq!(
+            tracker.market_count_by_strategy(StrategyType::CryptoAlpha),
+            1
+        );
     }
 }

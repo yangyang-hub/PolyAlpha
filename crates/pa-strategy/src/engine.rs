@@ -1,13 +1,15 @@
+use alloy::primitives::{B256, U256};
+use chrono::{TimeDelta, Utc};
+use pa_core::traits::{Executor, RiskManager, Strategy};
+use pa_core::types::{
+    ExecutionPlan, MarketInfo, OrderBook, RiskDecision, StrategyType, TradeSide, TradingOpportunity,
+};
+use pa_market_data::event_calendar::EventCalendarService;
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use alloy::primitives::{B256, U256};
-use chrono::{TimeDelta, Utc};
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
-use pa_core::traits::{Executor, RiskManager, Strategy};
-use pa_core::types::{TradingOpportunity, ExecutionPlan, MarketInfo, OrderBook, RiskDecision, StrategyType, TradeSide};
-use pa_market_data::event_calendar::EventCalendarService;
 use tokio::sync::{RwLock, broadcast};
 use tokio::time::{Duration, interval};
 use tokio_util::sync::CancellationToken;
@@ -20,6 +22,7 @@ use pa_market_data::ws_feed::OrderBookUpdate;
 /// Operates in two modes simultaneously:
 /// 1. **Event-driven**: reacts to `OrderBookUpdate` events from the WebSocket feed
 /// 2. **Periodic fallback**: full market scan on a timer to catch any missed events
+///
 /// Position snapshot entry for the universal stop-loss scanner.
 pub struct StopLossPosition {
     pub token_id: U256,
@@ -27,6 +30,19 @@ pub struct StopLossPosition {
     pub avg_cost: Decimal,
     pub strategy_type: Option<StrategyType>,
     pub condition_id: Option<B256>,
+}
+
+pub struct StrategyEngineDeps {
+    pub get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+    pub get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
+    pub get_all_positions: Box<dyn Fn() -> Vec<StopLossPosition> + Send + Sync>,
+}
+
+pub struct StrategyEngineOptions {
+    pub scan_interval_ms: u64,
+    pub event_calendar: Option<Arc<EventCalendarService>>,
+    pub min_order_usdc: Decimal,
+    pub max_market_end_days: Option<u64>,
 }
 
 pub struct StrategyEngine {
@@ -57,14 +73,22 @@ impl StrategyEngine {
         strategies: Vec<Box<dyn Strategy>>,
         executor: Arc<dyn Executor>,
         risk_manager: Arc<dyn RiskManager>,
-        scan_interval_ms: u64,
-        event_calendar: Option<Arc<EventCalendarService>>,
-        get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
-        get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
-        get_all_positions: Box<dyn Fn() -> Vec<StopLossPosition> + Send + Sync>,
-        min_order_usdc: Decimal,
-        max_market_end_days: Option<u64>,
+        deps: StrategyEngineDeps,
+        options: StrategyEngineOptions,
     ) -> Self {
+        let StrategyEngineDeps {
+            get_orderbook,
+            get_available_capital,
+            get_all_positions,
+        } = deps;
+
+        let StrategyEngineOptions {
+            scan_interval_ms,
+            event_calendar,
+            min_order_usdc,
+            max_market_end_days,
+        } = options;
+
         Self {
             strategies,
             executor,
@@ -191,9 +215,7 @@ impl StrategyEngine {
             filtered = markets
                 .iter()
                 .filter(|m| {
-                    m.end_date
-                        .map(|ed| ed <= cutoff)
-                        .unwrap_or(true) // no end_date → include (weather/crypto markets)
+                    m.end_date.map(|ed| ed <= cutoff).unwrap_or(true) // no end_date → include (weather/crypto markets)
                 })
                 .cloned()
                 .collect();
@@ -216,7 +238,9 @@ impl StrategyEngine {
                         // Check execution pause inside opportunity loop too —
                         // a balance/allowance failure on opp N should stop opp N+1
                         if Instant::now() < *self.execution_paused_until.lock().unwrap() {
-                            tracing::debug!("Execution paused mid-batch, skipping remaining opportunities");
+                            tracing::debug!(
+                                "Execution paused mid-batch, skipping remaining opportunities"
+                            );
                             break;
                         }
 
@@ -227,7 +251,8 @@ impl StrategyEngine {
 
                         // Apply event calendar position filter
                         let opp = if let Some(ref ec) = self.event_calendar {
-                            let multiplier = ec.position_multiplier(&opp.question, Utc::now()).await;
+                            let multiplier =
+                                ec.position_multiplier(&opp.question, Utc::now()).await;
                             if multiplier < Decimal::ONE {
                                 tracing::debug!(
                                     id = %opp.id, multiplier = %multiplier,
@@ -235,7 +260,8 @@ impl StrategyEngine {
                                 );
                                 let mut scaled = opp;
                                 scaled.size = (scaled.size * multiplier).round_dp(2);
-                                scaled.estimated_profit = (scaled.estimated_profit * multiplier).round_dp(4);
+                                scaled.estimated_profit =
+                                    (scaled.estimated_profit * multiplier).round_dp(4);
                                 scale_execution_plan_size(&mut scaled.execution_plan, multiplier);
                                 pa_monitor::metrics::EVENT_FILTER_APPLIED.inc();
                                 scaled
@@ -357,7 +383,9 @@ impl StrategyEngine {
                 pa_monitor::metrics::EXECUTION_ERRORS.inc();
                 // Pause all execution for 5 minutes on balance/allowance failures
                 if err_msg.contains("balance") || err_msg.contains("allowance") {
-                    tracing::warn!("Balance/allowance error detected — pausing execution for 5 minutes");
+                    tracing::warn!(
+                        "Balance/allowance error detected — pausing execution for 5 minutes"
+                    );
                     *self.execution_paused_until.lock().unwrap() =
                         Instant::now() + Duration::from_secs(300);
                 }
@@ -397,10 +425,10 @@ impl StrategyEngine {
             if pos.size <= Decimal::ZERO {
                 continue;
             }
-            let bid = (self.get_orderbook)(pos.token_id)
-                .and_then(|b| b.best_bid().map(|l| l.price));
-            let ask = (self.get_orderbook)(pos.token_id)
-                .and_then(|b| b.best_ask().map(|l| l.price));
+            let bid =
+                (self.get_orderbook)(pos.token_id).and_then(|b| b.best_bid().map(|l| l.price));
+            let ask =
+                (self.get_orderbook)(pos.token_id).and_then(|b| b.best_ask().map(|l| l.price));
             let stop_threshold = pos.avg_cost * dec!(0.50);
             let triggered = bid.map(|b| b < stop_threshold).unwrap_or(false);
             tracing::debug!(
@@ -505,36 +533,35 @@ impl StrategyEngine {
             // EXCEPTION: If best_bid is very low (< $0.10), the token is likely the LOSING
             // side. Auto-redeem won't help (losing tokens redeem at $0.00). In this case,
             // selling at the current bid salvages some value.
-            if let Some(m) = market {
-                if let Some(end_date) = m.end_date {
-                    if end_date <= chrono::Utc::now() {
-                        // If price is very low, this is likely a losing position.
-                        // Auto-redeem won't help — try to sell to salvage whatever we can.
-                        if best_bid >= dec!(0.10) {
-                            let condition_id = pos.condition_id.unwrap_or(m.condition_id);
-                            let st = pos.strategy_type.unwrap_or(StrategyType::CryptoAlpha);
-                            if !self.is_cooled_down(condition_id, st) {
-                                tracing::info!(
-                                    token_id = %pos.token_id,
-                                    end_date = %end_date,
-                                    best_bid = %best_bid,
-                                    "[STOP-LOSS] Skipping expired market (bid >= $0.10) — auto-redeem will handle"
-                                );
-                                self.set_cooldown(condition_id, st, 3600); // 1 hour
-                            }
-                            continue;
-                        }
-                        // Low-priced expired position — likely losing side, try to sell
+            if let Some(m) = market
+                && let Some(end_date) = m.end_date
+                && end_date <= chrono::Utc::now()
+            {
+                // If price is very low, this is likely a losing position.
+                // Auto-redeem won't help — try to sell to salvage whatever we can.
+                if best_bid >= dec!(0.10) {
+                    let condition_id = pos.condition_id.unwrap_or(m.condition_id);
+                    let st = pos.strategy_type.unwrap_or(StrategyType::CryptoAlpha);
+                    if !self.is_cooled_down(condition_id, st) {
                         tracing::info!(
                             token_id = %pos.token_id,
                             end_date = %end_date,
                             best_bid = %best_bid,
-                            size = %pos.size,
-                            "[STOP-LOSS] Expired market with low price — likely losing side, attempting sell"
+                            "[STOP-LOSS] Skipping expired market (bid >= $0.10) — auto-redeem will handle"
                         );
-                        // Fall through to sell logic below
+                        self.set_cooldown(condition_id, st, 3600); // 1 hour
                     }
+                    continue;
                 }
+                // Low-priced expired position — likely losing side, try to sell
+                tracing::info!(
+                    token_id = %pos.token_id,
+                    end_date = %end_date,
+                    best_bid = %best_bid,
+                    size = %pos.size,
+                    "[STOP-LOSS] Expired market with low price — likely losing side, attempting sell"
+                );
+                // Fall through to sell logic below
             }
 
             // Safety check 2: Cross-validate with counter-token.
@@ -547,58 +574,60 @@ impl StrategyEngine {
             // it's typically because WS filtering excluded it as extreme price (>0.95),
             // which actually CONFIRMS our side is losing. Only block when both sides
             // have actual orderbook data with low bids.
-            if let Some(m) = market {
-                if m.tokens.len() == 2 {
-                    let other_token = m.tokens.iter()
-                        .find(|t| t.token_id != pos.token_id)
-                        .map(|t| t.token_id);
-                    if let Some(other_id) = other_token {
-                        let other_book = (self.get_orderbook)(other_id);
-                        match other_book {
-                            Some(book) => {
-                                let other_bid = book.best_bid()
-                                    .map(|l| l.price)
-                                    .unwrap_or(Decimal::ZERO);
-                                if other_bid < dec!(0.50) {
-                                    // Both sides have orderbook data but low bids — likely stale.
-                                    let condition_id = pos.condition_id.unwrap_or(m.condition_id);
-                                    let st = pos.strategy_type.unwrap_or(StrategyType::CryptoAlpha);
-                                    let sell_value = best_bid * pos.size;
-                                    tracing::info!(
-                                        token_id = %pos.token_id,
-                                        our_bid = %best_bid,
-                                        other_bid = %other_bid,
-                                        avg_cost = %pos.avg_cost,
-                                        size = %pos.size,
-                                        sell_value = %sell_value,
-                                        "[STOP-LOSS] Both sides low bids — market illiquid/stale, cannot sell (will retry in 10m)"
-                                    );
-                                    self.set_cooldown(condition_id, st, 600); // 10 min
-                                    continue;
-                                }
-                                // Counter-token has high bids → our side is genuinely losing.
-                                // Fall through to sell.
-                            }
-                            None => {
-                                // Counter-token not in orderbook cache (not subscribed).
-                                // This typically means WS filtering excluded it as extreme price
-                                // (>0.95 or <0.05), which confirms our side is on the losing end.
+            if let Some(m) = market
+                && m.tokens.len() == 2
+            {
+                let other_token = m
+                    .tokens
+                    .iter()
+                    .find(|t| t.token_id != pos.token_id)
+                    .map(|t| t.token_id);
+                if let Some(other_id) = other_token {
+                    let other_book = (self.get_orderbook)(other_id);
+                    match other_book {
+                        Some(book) => {
+                            let other_bid =
+                                book.best_bid().map(|l| l.price).unwrap_or(Decimal::ZERO);
+                            if other_bid < dec!(0.50) {
+                                // Both sides have orderbook data but low bids — likely stale.
+                                let condition_id = pos.condition_id.unwrap_or(m.condition_id);
+                                let st = pos.strategy_type.unwrap_or(StrategyType::CryptoAlpha);
+                                let sell_value = best_bid * pos.size;
                                 tracing::info!(
                                     token_id = %pos.token_id,
                                     our_bid = %best_bid,
+                                    other_bid = %other_bid,
                                     avg_cost = %pos.avg_cost,
                                     size = %pos.size,
-                                    "[STOP-LOSS] Counter-token not subscribed (likely extreme price) — proceeding"
+                                    sell_value = %sell_value,
+                                    "[STOP-LOSS] Both sides low bids — market illiquid/stale, cannot sell (will retry in 10m)"
                                 );
-                                // Fall through to sell.
+                                self.set_cooldown(condition_id, st, 600); // 10 min
+                                continue;
                             }
+                            // Counter-token has high bids → our side is genuinely losing.
+                            // Fall through to sell.
+                        }
+                        None => {
+                            // Counter-token not in orderbook cache (not subscribed).
+                            // This typically means WS filtering excluded it as extreme price
+                            // (>0.95 or <0.05), which confirms our side is on the losing end.
+                            tracing::info!(
+                                token_id = %pos.token_id,
+                                our_bid = %best_bid,
+                                avg_cost = %pos.avg_cost,
+                                size = %pos.size,
+                                "[STOP-LOSS] Counter-token not subscribed (likely extreme price) — proceeding"
+                            );
+                            // Fall through to sell.
                         }
                     }
                 }
             }
 
             // Determine condition_id
-            let condition_id = pos.condition_id
+            let condition_id = pos
+                .condition_id
                 .or_else(|| market.map(|m| m.condition_id))
                 .unwrap_or(B256::ZERO);
 

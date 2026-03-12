@@ -95,7 +95,10 @@ impl WebSocketFeed {
             token_ids.to_vec()
         };
 
-        tracing::info!(count = subscribe_ids.len(), "Subscribing to order book updates");
+        tracing::info!(
+            count = subscribe_ids.len(),
+            "Subscribing to order book updates"
+        );
 
         // Clone the WS client (Arc-backed, cheap) so we can move it into the spawned task.
         // subscribe_orderbook returns a stream that borrows from the client, so both
@@ -118,7 +121,9 @@ impl WebSocketFeed {
                         // NOTE: subscribe_orderbook returning Ok means the stream was created,
                         // NOT that the underlying TCP/WS connection is established. The SDK
                         // connects lazily in a background task.
-                        tracing::info!("WebSocket stream created (awaiting first message for data confirmation)");
+                        tracing::info!(
+                            "WebSocket stream created (awaiting first message for data confirmation)"
+                        );
                         s
                     }
                     Err(e) => {
@@ -271,7 +276,10 @@ impl WebSocketFeed {
 
     /// Unsubscribe from the given token IDs.
     pub fn unsubscribe(&self, token_ids: &[U256]) -> anyhow::Result<()> {
-        tracing::info!(count = token_ids.len(), "Unsubscribing from order book updates");
+        tracing::info!(
+            count = token_ids.len(),
+            "Unsubscribing from order book updates"
+        );
         self.ws_client.unsubscribe_orderbook(token_ids)?;
         for id in token_ids {
             self.cache.remove(id);
@@ -293,5 +301,7 @@ impl WebSocketFeed {
 fn timestamp_ms_to_datetime(ts_ms: i64) -> DateTime<Utc> {
     let secs = ts_ms / 1000;
     let nsecs = ((ts_ms % 1000) * 1_000_000) as u32;
-    Utc.timestamp_opt(secs, nsecs).single().unwrap_or_else(Utc::now)
+    Utc.timestamp_opt(secs, nsecs)
+        .single()
+        .unwrap_or_else(Utc::now)
 }

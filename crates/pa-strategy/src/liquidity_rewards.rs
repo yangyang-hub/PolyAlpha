@@ -34,7 +34,7 @@ pub fn select_reward_markets(
                 && m.rewards_min_size.is_some()
                 && m.rewards_max_spread.is_some()
                 && m.rewards_daily_rate
-                    .map_or(false, |r| r >= config.min_daily_rate)
+                    .is_some_and(|r| r >= config.min_daily_rate)
         })
         .map(|m| {
             let daily_rate = m.rewards_daily_rate.unwrap_or(Decimal::ZERO);
@@ -48,12 +48,14 @@ pub fn select_reward_markets(
         })
         .collect();
 
-    candidates.sort_by(|a, b| b.density.partial_cmp(&a.density).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.sort_by(|a, b| {
+        b.density
+            .partial_cmp(&a.density)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     candidates.truncate(config.max_markets);
     candidates
 }
-
-
 
 /// Reward market data from the CLOB API.
 #[derive(Debug, Clone)]
@@ -77,18 +79,14 @@ pub fn select_reward_markets_with_clob_data(
     config: &LiquidityRewardsConfig,
 ) -> Vec<RewardMarketCandidate> {
     use std::collections::HashSet;
-    
+
     // Build a HashSet of condition IDs with active rewards for O(1) lookup
-    let reward_conditions: HashSet<alloy::primitives::B256> = clob_rewards
-        .iter()
-        .map(|r| r.condition_id)
-        .collect();
-    
+    let reward_conditions: HashSet<alloy::primitives::B256> =
+        clob_rewards.iter().map(|r| r.condition_id).collect();
+
     // Build a HashMap for reward data lookup
-    let reward_map: std::collections::HashMap<alloy::primitives::B256, &ClobRewardData> = clob_rewards
-        .iter()
-        .map(|r| (r.condition_id, r))
-        .collect();
+    let reward_map: std::collections::HashMap<alloy::primitives::B256, &ClobRewardData> =
+        clob_rewards.iter().map(|r| (r.condition_id, r)).collect();
 
     let mut candidates: Vec<RewardMarketCandidate> = markets
         .iter()
@@ -101,12 +99,12 @@ pub fn select_reward_markets_with_clob_data(
         .filter_map(|m| {
             let reward_data = reward_map.get(&m.condition_id)?;
             let daily_rate = reward_data.total_daily_rate;
-            
+
             // Filter by min_daily_rate
             if daily_rate < config.min_daily_rate {
                 return None;
             }
-            
+
             let density = daily_rate / (m.liquidity + Decimal::ONE);
             Some(RewardMarketCandidate {
                 market: m.clone(),
@@ -117,7 +115,11 @@ pub fn select_reward_markets_with_clob_data(
         })
         .collect();
 
-    candidates.sort_by(|a, b| b.density.partial_cmp(&a.density).unwrap_or(std::cmp::Ordering::Equal));
+    candidates.sort_by(|a, b| {
+        b.density
+            .partial_cmp(&a.density)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     candidates.truncate(config.max_markets);
     candidates
 }
@@ -294,12 +296,20 @@ pub fn should_cancel_depth_order(
 
     if is_buy {
         // Position = number of bids with price strictly above ours + 1
-        let above = book.bids.iter().take_while(|l| l.price > order_price).count();
+        let above = book
+            .bids
+            .iter()
+            .take_while(|l| l.price > order_price)
+            .count();
         let position = above + 1;
         position <= cancel_depth_level
     } else {
         // Position = number of asks with price strictly below ours + 1
-        let below = book.asks.iter().take_while(|l| l.price < order_price).count();
+        let below = book
+            .asks
+            .iter()
+            .take_while(|l| l.price < order_price)
+            .count();
         let position = below + 1;
         position <= cancel_depth_level
     }
@@ -395,11 +405,15 @@ pub fn reconcile_desired_vs_existing(
 
     for (di, d) in desired.iter().enumerate() {
         // Find best matching existing order: same token_id + side, within tolerance
-        let best = existing.iter().enumerate()
+        let best = existing
+            .iter()
+            .enumerate()
             .filter(|(ei, _)| !matched_existing.contains(ei))
             .find(|(_, (_, tid, is_buy, price))| {
                 *tid == d.token_id && *is_buy == d.is_buy && {
-                    if d.price <= Decimal::ZERO { return false; }
+                    if d.price <= Decimal::ZERO {
+                        return false;
+                    }
                     let drift = ((d.price - *price).abs() / d.price * Decimal::from(10_000))
                         .to_u32()
                         .unwrap_or(u32::MAX);
@@ -451,11 +465,7 @@ pub fn select_reward_markets_hybrid(
             let manual_cids: std::collections::HashSet<alloy::primitives::B256> = config
                 .manual_markets
                 .iter()
-                .filter_map(|o| {
-                    o.condition_id
-                        .parse::<alloy::primitives::B256>()
-                        .ok()
-                })
+                .filter_map(|o| o.condition_id.parse::<alloy::primitives::B256>().ok())
                 .collect();
 
             let reward_map: std::collections::HashMap<alloy::primitives::B256, &ClobRewardData> =
@@ -469,7 +479,7 @@ pub fn select_reward_markets_hybrid(
                         && (m.tokens.len() == 2 || config.allow_neg_risk)
                         && (!m.neg_risk || config.allow_neg_risk)
                 })
-                .filter_map(|m| {
+                .map(|m| {
                     let reward_data = reward_map.get(&m.condition_id);
                     let daily_rate = reward_data.map_or(Decimal::ZERO, |r| r.total_daily_rate);
                     let density = daily_rate / (m.liquidity + Decimal::ONE);
@@ -477,12 +487,12 @@ pub fn select_reward_markets_hybrid(
                         Some(r) => (r.rewards_max_spread, r.rewards_min_size),
                         None => (Decimal::ZERO, Decimal::ZERO),
                     };
-                    Some(RewardMarketCandidate {
+                    RewardMarketCandidate {
                         market: m.clone(),
                         density,
                         clob_rewards_max_spread: max_spread,
                         clob_rewards_min_size: min_size,
-                    })
+                    }
                 })
                 .collect()
         }
@@ -493,11 +503,7 @@ pub fn select_reward_markets_hybrid(
             let manual_cids: std::collections::HashSet<alloy::primitives::B256> = config
                 .manual_markets
                 .iter()
-                .filter_map(|o| {
-                    o.condition_id
-                        .parse::<alloy::primitives::B256>()
-                        .ok()
-                })
+                .filter_map(|o| o.condition_id.parse::<alloy::primitives::B256>().ok())
                 .collect();
 
             let auto_cids: std::collections::HashSet<alloy::primitives::B256> =
@@ -546,7 +552,10 @@ pub fn effective_market_config(
 ) -> EffectiveMarketConfig {
     let cid_hex = format!("{:#x}", condition_id);
 
-    let override_entry = global.manual_markets.iter().find(|o| o.condition_id == cid_hex);
+    let override_entry = global
+        .manual_markets
+        .iter()
+        .find(|o| o.condition_id == cid_hex);
 
     EffectiveMarketConfig {
         max_position_per_market: override_entry
@@ -650,11 +659,18 @@ mod tests {
     fn test_select_markets_filters_below_min_rate() {
         let mut config = default_config();
         config.min_daily_rate = dec!(2);
-        let markets = vec![
-            make_reward_market(1, Some(dec!(1)), dec!(100), Some(dec!(5)), Some(dec!(0.04))),
-        ];
+        let markets = vec![make_reward_market(
+            1,
+            Some(dec!(1)),
+            dec!(100),
+            Some(dec!(5)),
+            Some(dec!(0.04)),
+        )];
         let result = select_reward_markets(&markets, &config);
-        assert!(result.is_empty(), "Daily rate 1 < min_daily_rate 2 should be filtered");
+        assert!(
+            result.is_empty(),
+            "Daily rate 1 < min_daily_rate 2 should be filtered"
+        );
     }
 
     #[test]
@@ -662,11 +678,23 @@ mod tests {
         let config = default_config();
         let markets = vec![
             // Market A: rate=10, liquidity=1000 → density=10/1001 ≈ 0.00999
-            make_reward_market(1, Some(dec!(10)), dec!(1000), Some(dec!(5)), Some(dec!(0.04))),
+            make_reward_market(
+                1,
+                Some(dec!(10)),
+                dec!(1000),
+                Some(dec!(5)),
+                Some(dec!(0.04)),
+            ),
             // Market B: rate=5, liquidity=100 → density=5/101 ≈ 0.0495 (higher)
             make_reward_market(2, Some(dec!(5)), dec!(100), Some(dec!(5)), Some(dec!(0.04))),
             // Market C: rate=20, liquidity=5000 → density=20/5001 ≈ 0.00399
-            make_reward_market(3, Some(dec!(20)), dec!(5000), Some(dec!(5)), Some(dec!(0.04))),
+            make_reward_market(
+                3,
+                Some(dec!(20)),
+                dec!(5000),
+                Some(dec!(5)),
+                Some(dec!(0.04)),
+            ),
         ];
         let result = select_reward_markets(&markets, &config);
         assert_eq!(result.len(), 3);
@@ -683,9 +711,27 @@ mod tests {
         let mut config = default_config();
         config.max_markets = 2;
         let markets = vec![
-            make_reward_market(1, Some(dec!(10)), dec!(100), Some(dec!(5)), Some(dec!(0.04))),
-            make_reward_market(2, Some(dec!(10)), dec!(200), Some(dec!(5)), Some(dec!(0.04))),
-            make_reward_market(3, Some(dec!(10)), dec!(300), Some(dec!(5)), Some(dec!(0.04))),
+            make_reward_market(
+                1,
+                Some(dec!(10)),
+                dec!(100),
+                Some(dec!(5)),
+                Some(dec!(0.04)),
+            ),
+            make_reward_market(
+                2,
+                Some(dec!(10)),
+                dec!(200),
+                Some(dec!(5)),
+                Some(dec!(0.04)),
+            ),
+            make_reward_market(
+                3,
+                Some(dec!(10)),
+                dec!(300),
+                Some(dec!(5)),
+                Some(dec!(0.04)),
+            ),
         ];
         let result = select_reward_markets(&markets, &config);
         assert_eq!(result.len(), 2);
@@ -719,17 +765,25 @@ mod tests {
         let max_spread = dec!(0.10); // wider spread so skew effect survives tick rounding
 
         // Zero position → symmetric
-        let q0 = compute_quotes(mid, max_spread, Decimal::ZERO, &config, dec!(5), dec!(0.01)).unwrap();
+        let q0 =
+            compute_quotes(mid, max_spread, Decimal::ZERO, &config, dec!(5), dec!(0.01)).unwrap();
 
         // Full position → maximum skew
-        let q_pos = compute_quotes(mid, max_spread, dec!(100), &config, dec!(5), dec!(0.01)).unwrap();
+        let q_pos =
+            compute_quotes(mid, max_spread, dec!(100), &config, dec!(5), dec!(0.01)).unwrap();
 
         // half_spread = 0.10 * 0.80 / 2 = 0.04
         // skew = 1.0 * 0.50 * 0.04 = 0.02
         // bid_half = 0.04 + 0.02 = 0.06 → bid = floor(0.44) = 0.44
         // ask_half = 0.04 - 0.02 = 0.02 → ask = ceil(0.52) = 0.52
-        assert!(q_pos.bid_price < q0.bid_price, "With positive inventory, bid should be lower (wider)");
-        assert!(q_pos.ask_price < q0.ask_price, "With positive inventory, ask should be lower (closer to mid)");
+        assert!(
+            q_pos.bid_price < q0.bid_price,
+            "With positive inventory, bid should be lower (wider)"
+        );
+        assert!(
+            q_pos.ask_price < q0.ask_price,
+            "With positive inventory, ask should be lower (closer to mid)"
+        );
     }
 
     #[test]
@@ -742,7 +796,10 @@ mod tests {
         // half_spread = 0.001 * 0.80 / 2 = 0.0004
         // bid = floor(0.4996, 0.01) = 0.49, ask = ceil(0.5004, 0.01) = 0.51
         // Check if 0.49 is within 0.001 of 0.50 → |0.50 - 0.49| = 0.01 > 0.001 → rejected
-        assert!(result.is_none(), "Quotes outside rewards_max_spread should be rejected");
+        assert!(
+            result.is_none(),
+            "Quotes outside rewards_max_spread should be rejected"
+        );
     }
 
     #[test]
@@ -755,12 +812,29 @@ mod tests {
         let max_spread = dec!(0.10);
 
         // Size should target max_position (100), not just the floor
-        let q = compute_quotes(mid, max_spread, Decimal::ZERO, &config, dec!(10), dec!(0.01)).unwrap();
-        assert_eq!(q.size, dec!(100), "Size should target max_position_per_market for maximum rewards");
+        let q = compute_quotes(
+            mid,
+            max_spread,
+            Decimal::ZERO,
+            &config,
+            dec!(10),
+            dec!(0.01),
+        )
+        .unwrap();
+        assert_eq!(
+            q.size,
+            dec!(100),
+            "Size should target max_position_per_market for maximum rewards"
+        );
 
         // Even with small market min_size, still targets max_position
-        let q = compute_quotes(mid, max_spread, Decimal::ZERO, &config, dec!(3), dec!(0.01)).unwrap();
-        assert_eq!(q.size, dec!(100), "Size should target max_position_per_market regardless of floor");
+        let q =
+            compute_quotes(mid, max_spread, Decimal::ZERO, &config, dec!(3), dec!(0.01)).unwrap();
+        assert_eq!(
+            q.size,
+            dec!(100),
+            "Size should target max_position_per_market regardless of floor"
+        );
     }
 
     #[test]
@@ -770,7 +844,8 @@ mod tests {
         let config = default_config();
         let mid = dec!(0.50);
         let max_spread = dec!(0.10);
-        let q = compute_quotes(mid, max_spread, Decimal::ZERO, &config, dec!(5), dec!(0.01)).unwrap();
+        let q =
+            compute_quotes(mid, max_spread, Decimal::ZERO, &config, dec!(5), dec!(0.01)).unwrap();
         assert_eq!(q.size, config.max_position_per_market);
         // In the run loop, remaining_exposure caps bid_size:
         // e.g. if remaining_exposure=3 USDC, bid_size = min(100, 3) = 3 < min_order_size → skipped
@@ -784,23 +859,49 @@ mod tests {
         // midpoint=0.02, spread=0.10 → half_spread = 0.10*0.80/2 = 0.04
         // bid = 0.02 - 0.04 = -0.02 → clamped to 0.01
         // ask = 0.02 + 0.04 = 0.06
-        let result = compute_quotes(dec!(0.02), dec!(0.10), Decimal::ZERO, &config, dec!(5), dec!(0.01));
-        assert!(result.is_some(), "Clamped floor bid should be accepted for LR");
+        let result = compute_quotes(
+            dec!(0.02),
+            dec!(0.10),
+            Decimal::ZERO,
+            &config,
+            dec!(5),
+            dec!(0.01),
+        );
+        assert!(
+            result.is_some(),
+            "Clamped floor bid should be accepted for LR"
+        );
         let q = result.unwrap();
         assert_eq!(q.bid_price, dec!(0.01));
         assert_eq!(q.ask_price, dec!(0.06));
 
         // midpoint=0.05, spread=0.10 → half_spread=0.04
         // bid = 0.05 - 0.04 = 0.01 → exactly 0.01, valid
-        let result = compute_quotes(dec!(0.05), dec!(0.10), Decimal::ZERO, &config, dec!(5), dec!(0.01));
+        let result = compute_quotes(
+            dec!(0.05),
+            dec!(0.10),
+            Decimal::ZERO,
+            &config,
+            dec!(5),
+            dec!(0.01),
+        );
         assert!(result.is_some(), "Bid exactly at 0.01 should be accepted");
     }
 
-    fn make_orderbook(bids: Vec<(Decimal, Decimal)>, asks: Vec<(Decimal, Decimal)>) -> pa_core::types::OrderBook {
+    fn make_orderbook(
+        bids: Vec<(Decimal, Decimal)>,
+        asks: Vec<(Decimal, Decimal)>,
+    ) -> pa_core::types::OrderBook {
         pa_core::types::OrderBook {
             token_id: U256::from(1u64),
-            bids: bids.into_iter().map(|(price, size)| pa_core::types::PriceLevel { price, size }).collect(),
-            asks: asks.into_iter().map(|(price, size)| pa_core::types::PriceLevel { price, size }).collect(),
+            bids: bids
+                .into_iter()
+                .map(|(price, size)| pa_core::types::PriceLevel { price, size })
+                .collect(),
+            asks: asks
+                .into_iter()
+                .map(|(price, size)| pa_core::types::PriceLevel { price, size })
+                .collect(),
             timestamp: chrono::Utc::now(),
         }
     }
@@ -841,7 +942,10 @@ mod tests {
             vec![(dec!(0.51), dec!(100)), (dec!(0.52), dec!(100))],
         );
         let result = compute_depth_quotes(&book, 3, dec!(0.10), Decimal::ZERO, &config, dec!(5));
-        assert!(result.is_none(), "Should return None when depth is insufficient");
+        assert!(
+            result.is_none(),
+            "Should return None when depth is insufficient"
+        );
     }
 
     #[test]
@@ -863,7 +967,10 @@ mod tests {
         // rewards_max_spread = 0.04, midpoint = (0.50+0.51)/2 = 0.505
         // |0.505 - 0.40| = 0.105 > 0.04 → rejected
         let result = compute_depth_quotes(&book, 3, dec!(0.04), Decimal::ZERO, &config, dec!(5));
-        assert!(result.is_none(), "Should reject quotes outside rewards_max_spread");
+        assert!(
+            result.is_none(),
+            "Should reject quotes outside rewards_max_spread"
+        );
     }
 
     #[test]
@@ -878,8 +985,10 @@ mod tests {
             vec![(dec!(0.51), dec!(100))],
         );
         // cancel_depth_level = 2: cancel when position <= 2
-        assert!(should_cancel_depth_order(&book, dec!(0.48), true, 2),
-            "Buy at level 2 should trigger cancel when cancel_depth=2");
+        assert!(
+            should_cancel_depth_order(&book, dec!(0.48), true, 2),
+            "Buy at level 2 should trigger cancel when cancel_depth=2"
+        );
 
         // Same order but book still has 0.50 above → position = 3
         let book2 = make_orderbook(
@@ -891,8 +1000,10 @@ mod tests {
             ],
             vec![(dec!(0.51), dec!(100))],
         );
-        assert!(!should_cancel_depth_order(&book2, dec!(0.48), true, 2),
-            "Buy at level 3 should NOT trigger cancel when cancel_depth=2");
+        assert!(
+            !should_cancel_depth_order(&book2, dec!(0.48), true, 2),
+            "Buy at level 3 should NOT trigger cancel when cancel_depth=2"
+        );
     }
 
     #[test]
@@ -906,8 +1017,10 @@ mod tests {
                 (dec!(0.54), dec!(100)),
             ],
         );
-        assert!(should_cancel_depth_order(&book, dec!(0.53), false, 2),
-            "Sell at level 2 should trigger cancel when cancel_depth=2");
+        assert!(
+            should_cancel_depth_order(&book, dec!(0.53), false, 2),
+            "Sell at level 2 should trigger cancel when cancel_depth=2"
+        );
 
         // Add one more level below → position = 3
         let book2 = make_orderbook(
@@ -919,8 +1032,10 @@ mod tests {
                 (dec!(0.54), dec!(100)),
             ],
         );
-        assert!(!should_cancel_depth_order(&book2, dec!(0.53), false, 2),
-            "Sell at level 3 should NOT trigger cancel when cancel_depth=2");
+        assert!(
+            !should_cancel_depth_order(&book2, dec!(0.53), false, 2),
+            "Sell at level 3 should NOT trigger cancel when cancel_depth=2"
+        );
     }
 
     // ──── Balance-Aware Sizing tests ────
@@ -930,9 +1045,7 @@ mod tests {
         // balance=100 USDC, 4 sides being quoted, bid price=0.40
         // per_side_budget = 100/4 = 25
         // affordable = floor_2dp(25/0.40) = floor_2dp(62.50) = 62.50
-        let size = balance_aware_size(
-            dec!(0.40), dec!(100), 4, dec!(100), dec!(500), dec!(5),
-        );
+        let size = balance_aware_size(dec!(0.40), dec!(100), 4, dec!(100), dec!(500), dec!(5));
         assert_eq!(size, dec!(62.50));
     }
 
@@ -942,30 +1055,22 @@ mod tests {
         // balance=50, 2 sides, max_pos=200, remaining_exp=1000
         // per_side_budget = 50/2 = 25
         // affordable = floor(25/0.60) = floor(41.666..) = 41.66
-        let size = balance_aware_size(
-            dec!(0.60), dec!(50), 2, dec!(200), dec!(1000), dec!(5),
-        );
+        let size = balance_aware_size(dec!(0.60), dec!(50), 2, dec!(200), dec!(1000), dec!(5));
         assert_eq!(size, dec!(41.66));
     }
 
     #[test]
     fn test_balance_aware_size_respects_limits() {
         // affordable=100 but max_position=30 → 30
-        let size = balance_aware_size(
-            dec!(0.50), dec!(100), 2, dec!(30), dec!(500), dec!(5),
-        );
+        let size = balance_aware_size(dec!(0.50), dec!(100), 2, dec!(30), dec!(500), dec!(5));
         assert_eq!(size, dec!(30));
 
         // affordable=62 but remaining_exposure=10 → 10
-        let size = balance_aware_size(
-            dec!(0.40), dec!(100), 4, dec!(100), dec!(10), dec!(5),
-        );
+        let size = balance_aware_size(dec!(0.40), dec!(100), 4, dec!(100), dec!(10), dec!(5));
         assert_eq!(size, dec!(10));
 
         // Result below min_order_size → 0
-        let size = balance_aware_size(
-            dec!(0.40), dec!(100), 4, dec!(100), dec!(3), dec!(5),
-        );
+        let size = balance_aware_size(dec!(0.40), dec!(100), 4, dec!(100), dec!(3), dec!(5));
         assert_eq!(size, Decimal::ZERO);
     }
 
@@ -997,9 +1102,7 @@ mod tests {
             price: dec!(0.50),
             size: dec!(100),
         }];
-        let existing = vec![
-            ("order1".to_string(), U256::from(1u64), true, dec!(0.50)),
-        ];
+        let existing = vec![("order1".to_string(), U256::from(1u64), true, dec!(0.50))];
         let result = reconcile_desired_vs_existing(&desired, &existing, 50);
         assert_eq!(result.kept, 1);
         assert!(result.to_cancel.is_empty());
@@ -1015,9 +1118,7 @@ mod tests {
             size: dec!(100),
         }];
         // Existing order drifted to 0.48 — 400 bps drift > 50 bps tolerance
-        let existing = vec![
-            ("order1".to_string(), U256::from(1u64), true, dec!(0.48)),
-        ];
+        let existing = vec![("order1".to_string(), U256::from(1u64), true, dec!(0.48))];
         let result = reconcile_desired_vs_existing(&desired, &existing, 50);
         assert_eq!(result.kept, 0);
         assert_eq!(result.to_cancel.len(), 1);
@@ -1051,9 +1152,13 @@ mod tests {
             rewards_min_size: dec!(5),
             total_daily_rate: dec!(10),
         }];
-        let markets = vec![
-            make_reward_market(1, Some(dec!(10)), dec!(100), Some(dec!(5)), Some(dec!(0.04))),
-        ];
+        let markets = vec![make_reward_market(
+            1,
+            Some(dec!(10)),
+            dec!(100),
+            Some(dec!(5)),
+            Some(dec!(0.04)),
+        )];
         let result = select_reward_markets_hybrid(&markets, &clob_rewards, &config);
         assert_eq!(result.len(), 1);
     }
@@ -1085,7 +1190,13 @@ mod tests {
             },
         ];
         let markets = vec![
-            make_reward_market(1, Some(dec!(10)), dec!(100), Some(dec!(5)), Some(dec!(0.04))),
+            make_reward_market(
+                1,
+                Some(dec!(10)),
+                dec!(100),
+                Some(dec!(5)),
+                Some(dec!(0.04)),
+            ),
             make_reward_market(2, Some(dec!(5)), dec!(100), Some(dec!(5)), Some(dec!(0.04))),
         ];
         let result = select_reward_markets_hybrid(&markets, &clob_rewards, &config);
@@ -1106,16 +1217,20 @@ mod tests {
             quote_no: None,
             order_depth_level: None,
         }];
-        let clob_rewards = vec![
-            ClobRewardData {
-                condition_id: B256::from(U256::from(1u64)),
-                rewards_max_spread: dec!(0.04),
-                rewards_min_size: dec!(5),
-                total_daily_rate: dec!(10),
-            },
-        ];
+        let clob_rewards = vec![ClobRewardData {
+            condition_id: B256::from(U256::from(1u64)),
+            rewards_max_spread: dec!(0.04),
+            rewards_min_size: dec!(5),
+            total_daily_rate: dec!(10),
+        }];
         let markets = vec![
-            make_reward_market(1, Some(dec!(10)), dec!(100), Some(dec!(5)), Some(dec!(0.04))),
+            make_reward_market(
+                1,
+                Some(dec!(10)),
+                dec!(100),
+                Some(dec!(5)),
+                Some(dec!(0.04)),
+            ),
             make_reward_market(3, Some(dec!(3)), dec!(50), Some(dec!(5)), Some(dec!(0.04))),
         ];
         let result = select_reward_markets_hybrid(&markets, &clob_rewards, &config);
@@ -1148,7 +1263,13 @@ mod tests {
     #[test]
     fn test_neg_risk_filtered_by_default() {
         let config = default_config(); // allow_neg_risk = false
-        let mut m = make_reward_market(1, Some(dec!(10)), dec!(100), Some(dec!(5)), Some(dec!(0.04)));
+        let mut m = make_reward_market(
+            1,
+            Some(dec!(10)),
+            dec!(100),
+            Some(dec!(5)),
+            Some(dec!(0.04)),
+        );
         m.neg_risk = true;
         let markets = vec![m];
         let result = select_reward_markets(&markets, &config);
@@ -1161,7 +1282,13 @@ mod tests {
         config.allow_neg_risk = true;
         config.market_mode = "manual".to_string();
 
-        let mut m = make_reward_market(1, Some(dec!(10)), dec!(100), Some(dec!(5)), Some(dec!(0.04)));
+        let mut m = make_reward_market(
+            1,
+            Some(dec!(10)),
+            dec!(100),
+            Some(dec!(5)),
+            Some(dec!(0.04)),
+        );
         m.neg_risk = true;
         // NegRisk markets can have >2 tokens — add a 3rd
         m.tokens.push(TokenInfo {
@@ -1187,6 +1314,10 @@ mod tests {
 
         let markets = vec![m];
         let result = select_reward_markets_hybrid(&markets, &clob_rewards, &config);
-        assert_eq!(result.len(), 1, "NegRisk should be allowed with allow_neg_risk=true");
+        assert_eq!(
+            result.len(),
+            1,
+            "NegRisk should be allowed with allow_neg_risk=true"
+        );
     }
 }

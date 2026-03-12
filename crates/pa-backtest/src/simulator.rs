@@ -8,12 +8,12 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use pa_core::Result;
 use pa_core::traits::Executor;
 use pa_core::types::{
-    TradingOpportunity, ExecutionPlan, ExecutionResult,
-    ExecutionStatus, OrderBook, TradeRecord, TradeSide, TxType,
+    ExecutionPlan, ExecutionResult, ExecutionStatus, OrderBook, TradeRecord, TradeSide,
+    TradingOpportunity, TxType,
 };
-use pa_core::Result;
 use pa_strategy::profitability::ProfitCalculator;
 
 use alloy::primitives::{B256, U256};
@@ -118,7 +118,9 @@ impl TradeSimulator {
             TradeSide::Sell => self.slipped_sell_price(price),
         };
 
-        let fee = self.profit_calc.capped_fee(actual_price, self.config.fee_rate_bps);
+        let fee = self
+            .profit_calc
+            .capped_fee(actual_price, self.config.fee_rate_bps);
         let total_fees = fee * filled;
 
         // Directional profit is based on model edge, not actual resolution.
@@ -167,7 +169,14 @@ impl Executor for TradeSimulator {
                 price,
                 size,
                 condition_id,
-            } => self.simulate_directional_buy(*token_id, *side, *price, *size, *condition_id, opp.id),
+            } => self.simulate_directional_buy(
+                *token_id,
+                *side,
+                *price,
+                *size,
+                *condition_id,
+                opp.id,
+            ),
         };
         result.strategy_type = opp.strategy_type;
         Ok(result)

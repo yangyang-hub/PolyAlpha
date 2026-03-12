@@ -71,7 +71,10 @@ impl GammaFeed {
         // Check which discovery mode to use
         let general_strategies = ["liquidity_rewards"];
         let needs_full_scan = self.enabled_strategies.is_empty()
-            || self.enabled_strategies.iter().any(|s| general_strategies.contains(&s.as_str()));
+            || self
+                .enabled_strategies
+                .iter()
+                .any(|s| general_strategies.contains(&s.as_str()));
 
         let all_markets = if needs_full_scan {
             self.discover_via_pagination().await?
@@ -105,7 +108,10 @@ impl GammaFeed {
         // market coverage to match against CLOB reward condition_ids.
         // WS subscription is independently limited by ws_max_instruments.
         general_markets.sort_by(|a, b| b.liquidity.cmp(&a.liquidity));
-        let lr_enabled = self.enabled_strategies.iter().any(|s| s == "liquidity_rewards");
+        let lr_enabled = self
+            .enabled_strategies
+            .iter()
+            .any(|s| s == "liquidity_rewards");
         if !lr_enabled {
             let remaining_slots = self.max_markets.saturating_sub(strategy_markets.len());
             general_markets.truncate(remaining_slots);
@@ -138,7 +144,12 @@ impl GammaFeed {
         let mut search_terms: Vec<&str> = Vec::new();
         if check_weather {
             // "weather" catches most weather markets; specific terms catch the rest
-            search_terms.extend_from_slice(&["weather", "temperature", "inches of snow", "inches of rain"]);
+            search_terms.extend_from_slice(&[
+                "weather",
+                "temperature",
+                "inches of snow",
+                "inches of rain",
+            ]);
         }
         if check_crypto {
             search_terms.extend_from_slice(&["bitcoin price", "ethereum price", "crypto price"]);
@@ -249,7 +260,12 @@ impl GammaFeed {
     /// Fetch and parse a search results page.
     async fn fetch_search_results(&self, url: &str) -> anyhow::Result<SearchResults> {
         let resp = self.http_client.get(url).send().await.map_err(|e| {
-            anyhow::anyhow!("search request failed: {} (timeout={}, connect={})", e, e.is_timeout(), e.is_connect())
+            anyhow::anyhow!(
+                "search request failed: {} (timeout={}, connect={})",
+                e,
+                e.is_timeout(),
+                e.is_connect()
+            )
         })?;
 
         let status = resp.status();
@@ -257,12 +273,19 @@ impl GammaFeed {
             return Err(anyhow::anyhow!("HTTP {}", status));
         }
 
-        let body_text = resp.text().await
+        let body_text = resp
+            .text()
+            .await
             .map_err(|e| anyhow::anyhow!("body read failed: {}", e))?;
 
         serde_json::from_str(&body_text).map_err(|e| {
             let preview = &body_text[..body_text.len().min(200)];
-            anyhow::anyhow!("JSON parse failed: {} (len={}, preview={})", e, body_text.len(), preview)
+            anyhow::anyhow!(
+                "JSON parse failed: {} (len={}, preview={})",
+                e,
+                body_text.len(),
+                preview
+            )
         })
     }
 
@@ -335,7 +358,10 @@ impl GammaFeed {
                     None => {
                         consecutive_page_failures += 1;
                         if consecutive_page_failures >= 3 {
-                            tracing::warn!(offset, "3 consecutive page failures, stopping pagination");
+                            tracing::warn!(
+                                offset,
+                                "3 consecutive page failures, stopping pagination"
+                            );
                             break;
                         }
                         tracing::warn!(offset, "Skipping failed page, trying next offset");
@@ -474,8 +500,7 @@ impl GammaFeed {
         // Crypto price markets: asset keyword + price indicator
         if check_crypto {
             let crypto_assets = [
-                "bitcoin", "btc", "ethereum", "eth", "solana",
-                "bnb", "xrp", "ripple", "dogecoin",
+                "bitcoin", "btc", "ethereum", "eth", "solana", "bnb", "xrp", "ripple", "dogecoin",
                 "cardano", "avax", "polkadot", "polygon", "matic",
             ];
             let has_crypto_asset = crypto_assets.iter().any(|kw| {
@@ -536,7 +561,9 @@ impl GammaFeed {
         let no_token_id = clob_token_ids[1];
 
         // Extract tick size and fee rate
-        let tick_size = market.order_price_min_tick_size.unwrap_or(Decimal::new(1, 2)); // default 0.01
+        let tick_size = market
+            .order_price_min_tick_size
+            .unwrap_or(Decimal::new(1, 2)); // default 0.01
         let fee_rate_bps = market.taker_base_fee.unwrap_or(0) as u32;
 
         // Determine neg_risk status
@@ -549,7 +576,10 @@ impl GammaFeed {
         let liquidity = market.liquidity.unwrap_or(Decimal::ZERO);
         let volume_24h = market.volume_24hr.unwrap_or(Decimal::ZERO);
         let strategy_relevant = Self::is_strategy_relevant(&question);
-        let lr_enabled = self.enabled_strategies.iter().any(|s| s == "liquidity_rewards");
+        let lr_enabled = self
+            .enabled_strategies
+            .iter()
+            .any(|s| s == "liquidity_rewards");
 
         if !strategy_relevant && !lr_enabled {
             if liquidity < self.min_liquidity {
@@ -565,11 +595,16 @@ impl GammaFeed {
         let rewards_max_spread = market.rewards_max_spread;
         let today = chrono::Utc::now().date_naive();
         let rewards_daily_rate = market.clob_rewards.as_ref().and_then(|rewards| {
-            let rate: Decimal = rewards.iter()
+            let rate: Decimal = rewards
+                .iter()
                 .filter(|r| r.end_date.map_or(true, |ed| ed >= today))
                 .filter_map(|r| r.rewards_daily_rate)
                 .sum();
-            if rate > Decimal::ZERO { Some(rate) } else { None }
+            if rate > Decimal::ZERO {
+                Some(rate)
+            } else {
+                None
+            }
         });
         let holding_rewards_enabled = market.holding_rewards_enabled.unwrap_or(false);
         let fees_enabled = market.fees_enabled.unwrap_or(false);
@@ -668,7 +703,10 @@ impl GammaFeed {
             if let Some(ref title) = market.event_title
                 && !title.is_empty()
             {
-                groups.entry(title.clone()).or_default().push(market.clone());
+                groups
+                    .entry(title.clone())
+                    .or_default()
+                    .push(market.clone());
             }
         }
 
@@ -722,10 +760,7 @@ impl GammaFeed {
     ///
     /// Used to ensure exit scanning can find markets for positions even after
     /// the market has expired or been resolved.
-    pub async fn fetch_position_markets(
-        &self,
-        condition_ids: &[B256],
-    ) -> Vec<MarketInfo> {
+    pub async fn fetch_position_markets(&self, condition_ids: &[B256]) -> Vec<MarketInfo> {
         let mut results = Vec::new();
 
         for condition_id in condition_ids {
@@ -737,7 +772,10 @@ impl GammaFeed {
 
             match self.http_client.get(&url).send().await {
                 Ok(resp) => {
-                    match resp.json::<Vec<polymarket_client_sdk::gamma::types::response::Market>>().await {
+                    match resp
+                        .json::<Vec<polymarket_client_sdk::gamma::types::response::Market>>()
+                        .await
+                    {
                         Ok(markets) => {
                             if let Some(market) = markets.into_iter().next() {
                                 if let Some(info) = self.convert_market_for_exit(&market) {
@@ -796,7 +834,9 @@ impl GammaFeed {
         let yes_token_id = clob_token_ids[0];
         let no_token_id = clob_token_ids[1];
 
-        let tick_size = market.order_price_min_tick_size.unwrap_or(Decimal::new(1, 2));
+        let tick_size = market
+            .order_price_min_tick_size
+            .unwrap_or(Decimal::new(1, 2));
         let fee_rate_bps = market.taker_base_fee.unwrap_or(0) as u32;
 
         let neg_risk = market.neg_risk.unwrap_or(false);
@@ -927,7 +967,10 @@ mod tests {
         ];
 
         let groups = GammaFeed::group_binary_events(&markets);
-        assert!(groups.is_empty(), "Markets without event_title should be excluded");
+        assert!(
+            groups.is_empty(),
+            "Markets without event_title should be excluded"
+        );
     }
 
     #[test]

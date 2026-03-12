@@ -27,13 +27,12 @@ impl ConfigStore {
 
     /// Load a config section. Returns (data, version) if found.
     pub async fn load_section(&self, section: &str) -> Result<Option<(Value, i32)>> {
-        let row: Option<(Value, i32)> = sqlx::query_as(
-            "SELECT data, version FROM app_config WHERE section = $1",
-        )
-        .bind(section)
-        .fetch_optional(&self.pool)
-        .await
-        .context("load_section query failed")?;
+        let row: Option<(Value, i32)> =
+            sqlx::query_as("SELECT data, version FROM app_config WHERE section = $1")
+                .bind(section)
+                .fetch_optional(&self.pool)
+                .await
+                .context("load_section query failed")?;
         Ok(row)
     }
 
@@ -78,12 +77,10 @@ impl ConfigStore {
 
     /// Load all config sections into a HashMap.
     pub async fn load_all(&self) -> Result<HashMap<String, Value>> {
-        let rows: Vec<(String, Value)> = sqlx::query_as(
-            "SELECT section, data FROM app_config",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .context("load_all query failed")?;
+        let rows: Vec<(String, Value)> = sqlx::query_as("SELECT section, data FROM app_config")
+            .fetch_all(&self.pool)
+            .await
+            .context("load_all query failed")?;
 
         Ok(rows.into_iter().collect())
     }
@@ -124,18 +121,16 @@ impl ConfigStore {
                         .context("invalid risk override")?;
                 }
                 "market_filter" => {
-                    base.market_filter =
-                        serde_json::from_value::<MarketFilterConfig>(data.clone())
-                            .context("invalid market_filter override")?;
+                    base.market_filter = serde_json::from_value::<MarketFilterConfig>(data.clone())
+                        .context("invalid market_filter override")?;
                 }
                 "weather" => {
                     base.weather = serde_json::from_value::<WeatherConfig>(data.clone())
                         .context("invalid weather override")?;
                 }
                 "crypto_alpha" => {
-                    base.crypto_alpha =
-                        serde_json::from_value::<CryptoAlphaConfig>(data.clone())
-                            .context("invalid crypto_alpha override")?;
+                    base.crypto_alpha = serde_json::from_value::<CryptoAlphaConfig>(data.clone())
+                        .context("invalid crypto_alpha override")?;
                 }
                 "event_calendar" => {
                     base.event_calendar =
@@ -148,9 +143,8 @@ impl ConfigStore {
                             .context("invalid liquidity_rewards override")?;
                 }
                 "smart_money" => {
-                    base.smart_money =
-                        serde_json::from_value::<SmartMoneyConfig>(data.clone())
-                            .context("invalid smart_money override")?;
+                    base.smart_money = serde_json::from_value::<SmartMoneyConfig>(data.clone())
+                        .context("invalid smart_money override")?;
                 }
                 other => {
                     tracing::warn!(section = other, "Unknown config section in DB, skipping");
@@ -166,14 +160,30 @@ pub fn validate_section(section: &str, data: &Value) -> Result<()> {
     use pa_core::config::*;
 
     match section {
-        "strategy" => { let _ = serde_json::from_value::<StrategyConfig>(data.clone())?; }
-        "risk" => { let _ = serde_json::from_value::<RiskConfig>(data.clone())?; }
-        "market_filter" => { let _ = serde_json::from_value::<MarketFilterConfig>(data.clone())?; }
-        "weather" => { let _ = serde_json::from_value::<WeatherConfig>(data.clone())?; }
-        "crypto_alpha" => { let _ = serde_json::from_value::<CryptoAlphaConfig>(data.clone())?; }
-        "event_calendar" => { let _ = serde_json::from_value::<EventCalendarConfig>(data.clone())?; }
-        "liquidity_rewards" => { let _ = serde_json::from_value::<LiquidityRewardsConfig>(data.clone())?; }
-        "smart_money" => { let _ = serde_json::from_value::<SmartMoneyConfig>(data.clone())?; }
+        "strategy" => {
+            let _ = serde_json::from_value::<StrategyConfig>(data.clone())?;
+        }
+        "risk" => {
+            let _ = serde_json::from_value::<RiskConfig>(data.clone())?;
+        }
+        "market_filter" => {
+            let _ = serde_json::from_value::<MarketFilterConfig>(data.clone())?;
+        }
+        "weather" => {
+            let _ = serde_json::from_value::<WeatherConfig>(data.clone())?;
+        }
+        "crypto_alpha" => {
+            let _ = serde_json::from_value::<CryptoAlphaConfig>(data.clone())?;
+        }
+        "event_calendar" => {
+            let _ = serde_json::from_value::<EventCalendarConfig>(data.clone())?;
+        }
+        "liquidity_rewards" => {
+            let _ = serde_json::from_value::<LiquidityRewardsConfig>(data.clone())?;
+        }
+        "smart_money" => {
+            let _ = serde_json::from_value::<SmartMoneyConfig>(data.clone())?;
+        }
         _ => return Err(anyhow!("Unknown config section: {}", section)),
     }
     Ok(())

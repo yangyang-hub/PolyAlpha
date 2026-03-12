@@ -6,7 +6,8 @@ use polymarket_client_sdk::ctf::types::{
 };
 
 /// USDC contract address on Polygon mainnet.
-pub const USDC_ADDRESS: Address = alloy::primitives::address!("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174");
+pub const USDC_ADDRESS: Address =
+    alloy::primitives::address!("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174");
 
 /// On-chain CTF executor for split/merge/redeem operations.
 ///
@@ -54,22 +55,15 @@ impl<P: Provider + Clone> CtfExecutor<P> {
     /// # Arguments
     /// * `condition_id` - The market's condition ID
     /// * `amount` - Amount to merge (in USDC decimals, i.e. 1_000_000 = 1 USDC)
-    pub async fn merge(
-        &self,
-        condition_id: B256,
-        amount: U256,
-    ) -> anyhow::Result<TxResult> {
+    pub async fn merge(&self, condition_id: B256, amount: U256) -> anyhow::Result<TxResult> {
         tracing::info!(
             condition_id = %condition_id,
             amount = %amount,
             "Executing on-chain merge"
         );
 
-        let request = MergePositionsRequest::for_binary_market(
-            self.collateral,
-            condition_id,
-            amount,
-        );
+        let request =
+            MergePositionsRequest::for_binary_market(self.collateral, condition_id, amount);
 
         let response = self.client.merge_positions(&request).await?;
 
@@ -93,22 +87,15 @@ impl<P: Provider + Clone> CtfExecutor<P> {
     /// # Arguments
     /// * `condition_id` - The market's condition ID
     /// * `amount` - Amount of USDC to split (in USDC decimals)
-    pub async fn split(
-        &self,
-        condition_id: B256,
-        amount: U256,
-    ) -> anyhow::Result<TxResult> {
+    pub async fn split(&self, condition_id: B256, amount: U256) -> anyhow::Result<TxResult> {
         tracing::info!(
             condition_id = %condition_id,
             amount = %amount,
             "Executing on-chain split"
         );
 
-        let request = SplitPositionRequest::for_binary_market(
-            self.collateral,
-            condition_id,
-            amount,
-        );
+        let request =
+            SplitPositionRequest::for_binary_market(self.collateral, condition_id, amount);
 
         let response = self.client.split_position(&request).await?;
 
@@ -130,16 +117,10 @@ impl<P: Provider + Clone> CtfExecutor<P> {
     ///
     /// # Arguments
     /// * `condition_id` - The resolved market's condition ID
-    pub async fn redeem(
-        &self,
-        condition_id: B256,
-    ) -> anyhow::Result<TxResult> {
+    pub async fn redeem(&self, condition_id: B256) -> anyhow::Result<TxResult> {
         tracing::info!(condition_id = %condition_id, "Executing on-chain redeem");
 
-        let request = RedeemPositionsRequest::for_binary_market(
-            self.collateral,
-            condition_id,
-        );
+        let request = RedeemPositionsRequest::for_binary_market(self.collateral, condition_id);
 
         let response = self.client.redeem_positions(&request).await?;
 

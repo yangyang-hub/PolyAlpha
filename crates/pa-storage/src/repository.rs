@@ -3,7 +3,9 @@ use sqlx::PgPool;
 
 use rust_decimal::Decimal;
 
-use crate::models::{MarketRow, OpportunityRow, OrderBookSnapshotRow, PositionRow, TokenRow, TradeRow};
+use crate::models::{
+    MarketRow, OpportunityRow, OrderBookSnapshotRow, PositionRow, TokenRow, TradeRow,
+};
 
 /// Repository for database operations.
 #[derive(Clone)]
@@ -29,9 +31,7 @@ impl Repository {
 
     /// Run pending migrations.
     pub async fn migrate(&self) -> anyhow::Result<()> {
-        sqlx::migrate!("../../migrations")
-            .run(&self.pool)
-            .await?;
+        sqlx::migrate!("../../migrations").run(&self.pool).await?;
         tracing::info!("Database migrations applied");
         Ok(())
     }
@@ -84,7 +84,10 @@ impl Repository {
     }
 
     /// Insert an order book snapshot (for backtesting).
-    pub async fn insert_orderbook_snapshot(&self, row: &OrderBookSnapshotRow) -> anyhow::Result<()> {
+    pub async fn insert_orderbook_snapshot(
+        &self,
+        row: &OrderBookSnapshotRow,
+    ) -> anyhow::Result<()> {
         sqlx::query(
             r#"INSERT INTO orderbook_snapshots
             (token_id, timestamp, bids, asks, best_bid, best_ask, midpoint)
@@ -131,10 +134,7 @@ impl Repository {
     }
 
     /// Load market metadata for given condition IDs.
-    pub async fn load_markets(
-        &self,
-        condition_ids: &[Vec<u8>],
-    ) -> anyhow::Result<Vec<MarketRow>> {
+    pub async fn load_markets(&self, condition_ids: &[Vec<u8>]) -> anyhow::Result<Vec<MarketRow>> {
         let rows = sqlx::query_as::<_, MarketRow>(
             r#"SELECT condition_id, question_id, question, neg_risk, neg_risk_market_id,
                       tick_size, fee_rate_bps, active, created_at, updated_at
@@ -148,10 +148,7 @@ impl Repository {
     }
 
     /// Load token info for given condition IDs.
-    pub async fn load_tokens(
-        &self,
-        condition_ids: &[Vec<u8>],
-    ) -> anyhow::Result<Vec<TokenRow>> {
+    pub async fn load_tokens(&self, condition_ids: &[Vec<u8>]) -> anyhow::Result<Vec<TokenRow>> {
         let rows = sqlx::query_as::<_, TokenRow>(
             r#"SELECT token_id, condition_id, outcome, complement_id
             FROM tokens

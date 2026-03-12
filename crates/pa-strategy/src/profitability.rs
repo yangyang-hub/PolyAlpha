@@ -1,6 +1,6 @@
+use pa_core::types::ProfitEstimate;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use pa_core::types::ProfitEstimate;
 
 /// Calculates profitability for trading opportunities.
 pub struct ProfitCalculator {
@@ -129,7 +129,11 @@ mod tests {
         let est = calc().directional_buy_profit(dec!(0.50), dec!(0.70), dec!(100), 200);
         // gross = (0.70 - 0.50) * 100 = 20.00
         assert_eq!(est.gross_profit, dec!(20.00));
-        assert!(est.net_profit > Decimal::ZERO, "Expected positive profit, got {}", est.net_profit);
+        assert!(
+            est.net_profit > Decimal::ZERO,
+            "Expected positive profit, got {}",
+            est.net_profit
+        );
         assert_eq!(est.gas, Decimal::ZERO); // CLOB-only
     }
 
@@ -147,7 +151,11 @@ mod tests {
         // Bought at 0.50, sell at 0.80 → gross profit = (0.80 - 0.50) * 100 = 30.00
         let est = calc().directional_sell_profit(dec!(0.80), dec!(0.50), dec!(100), 200);
         assert_eq!(est.gross_profit, dec!(30.00));
-        assert!(est.net_profit > Decimal::ZERO, "Expected positive net profit, got {}", est.net_profit);
+        assert!(
+            est.net_profit > Decimal::ZERO,
+            "Expected positive net profit, got {}",
+            est.net_profit
+        );
         assert_eq!(est.gas, Decimal::ZERO); // CLOB-only
         assert!(est.roi > Decimal::ZERO);
     }
@@ -157,7 +165,11 @@ mod tests {
         // Bought at 0.70, sell at 0.40 → gross profit = (0.40 - 0.70) * 100 = -30.00
         let est = calc().directional_sell_profit(dec!(0.40), dec!(0.70), dec!(100), 200);
         assert_eq!(est.gross_profit, dec!(-30.00));
-        assert!(est.net_profit < Decimal::ZERO, "Expected negative net profit (stop-loss), got {}", est.net_profit);
+        assert!(
+            est.net_profit < Decimal::ZERO,
+            "Expected negative net profit (stop-loss), got {}",
+            est.net_profit
+        );
         assert_eq!(est.gas, Decimal::ZERO); // CLOB-only
         assert!(est.roi < Decimal::ZERO);
     }

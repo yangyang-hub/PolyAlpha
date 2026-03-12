@@ -11,8 +11,8 @@ use uuid::Uuid;
 use pa_core::config::CryptoAlphaConfig;
 use pa_core::traits::Strategy;
 use pa_core::types::{
-    TradingOpportunity, BinaryEventGroup, ExecutionPlan, MarketInfo, NegRiskEvent, OrderBook,
-    StrategyType, TradeSide,
+    BinaryEventGroup, ExecutionPlan, MarketInfo, NegRiskEvent, OrderBook, StrategyType, TradeSide,
+    TradingOpportunity,
 };
 
 use crate::profitability::ProfitCalculator;
@@ -108,7 +108,8 @@ pub fn find_asset(question: &str) -> Option<&'static CryptoAsset> {
     let lower = question.to_lowercase();
 
     // Exclude non-price markets that happen to contain crypto asset names
-    if lower.contains("gas price") || lower.contains("gas fee")
+    if lower.contains("gas price")
+        || lower.contains("gas fee")
         || lower.contains("volatility index")
         || lower.contains("dominance")
         || lower.contains("kimchi premium")
@@ -410,10 +411,7 @@ impl CryptoPriceClient {
 
     /// Fetch current price + 30-day daily closes from Binance. Falls back to CoinGecko.
     /// If the asset has a Deribit currency, also fetches DVOL implied volatility.
-    pub async fn get_price_data(
-        &self,
-        asset: &CryptoAsset,
-    ) -> anyhow::Result<CryptoPriceData> {
+    pub async fn get_price_data(&self, asset: &CryptoAsset) -> anyhow::Result<CryptoPriceData> {
         // Try Binance first
         let mut data = match self.fetch_binance(asset.binance_symbol).await {
             Ok(d) => d,
@@ -424,7 +422,11 @@ impl CryptoPriceClient {
                     "Binance fetch failed, trying CoinGecko fallback"
                 );
                 // Fallback to CoinGecko
-                if self.coingecko_api_key.as_ref().is_some_and(|k| !k.is_empty()) {
+                if self
+                    .coingecko_api_key
+                    .as_ref()
+                    .is_some_and(|k| !k.is_empty())
+                {
                     self.fetch_coingecko(asset.coingecko_id).await?
                 } else {
                     anyhow::bail!(
@@ -690,8 +692,8 @@ pub fn gbm_probability(current_price: f64, threshold: f64, mu: f64, sigma: f64, 
     }
 
     let t = days / 365.0;
-    let d = ((current_price / threshold).ln() + (mu - sigma * sigma / 2.0) * t)
-        / (sigma * t.sqrt());
+    let d =
+        ((current_price / threshold).ln() + (mu - sigma * sigma / 2.0) * t) / (sigma * t.sqrt());
 
     normal_cdf(d)
 }
@@ -730,18 +732,28 @@ pub struct CryptoAlphaStrategy {
     near_miss_edge_bps: std::sync::atomic::AtomicU32,
 }
 
+pub struct CryptoAlphaDeps {
+    pub get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+    pub get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
+    pub get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
+    pub get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
+    pub get_balance: Box<dyn Fn() -> Decimal + Send + Sync>,
+    pub neg_risk_events: Vec<NegRiskEvent>,
+    pub binary_event_groups: Vec<BinaryEventGroup>,
+}
+
 impl CryptoAlphaStrategy {
-    pub fn new(
-        config: CryptoAlphaConfig,
-        gas_cost_usd: Decimal,
-        get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
-        get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
-        get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
-        neg_risk_events: Vec<NegRiskEvent>,
-        binary_event_groups: Vec<BinaryEventGroup>,
-        get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
-        get_balance: Box<dyn Fn() -> Decimal + Send + Sync>,
-    ) -> Self {
+    pub fn new(config: CryptoAlphaConfig, gas_cost_usd: Decimal, deps: CryptoAlphaDeps) -> Self {
+        let CryptoAlphaDeps {
+            get_orderbook,
+            get_available_capital,
+            get_position,
+            get_held_positions,
+            get_balance,
+            neg_risk_events,
+            binary_event_groups,
+        } = deps;
+
         let coingecko_key = if config.coingecko_api_key.is_empty() {
             None
         } else {
@@ -812,10 +824,10 @@ impl CryptoAlphaStrategy {
 
     /// Update the cached volatility for dynamic TTL calculation.
     fn update_cache_sigma(&self, binance_symbol: &str, sigma: f64) {
-        if let Ok(mut cache) = self.price_cache.lock() {
-            if let Some(entry) = cache.get_mut(binance_symbol) {
-                entry.last_sigma = Some(sigma);
-            }
+        if let Ok(mut cache) = self.price_cache.lock()
+            && let Some(entry) = cache.get_mut(binance_symbol)
+        {
+            entry.last_sigma = Some(sigma);
         }
     }
 
@@ -882,7 +894,10 @@ impl CryptoAlphaStrategy {
         let no_ask = no_book.best_ask()?.price;
 
         // Check bid-ask spread — wide spreads cause immediate mark-to-market losses
-        let yes_bid = yes_book.best_bid().map(|l| l.price).unwrap_or(Decimal::ZERO);
+        let yes_bid = yes_book
+            .best_bid()
+            .map(|l| l.price)
+            .unwrap_or(Decimal::ZERO);
         let no_bid = no_book.best_bid().map(|l| l.price).unwrap_or(Decimal::ZERO);
         let yes_spread = if yes_ask > Decimal::ZERO {
             (yes_ask - yes_bid) / yes_ask
@@ -917,14 +932,14 @@ impl CryptoAlphaStrategy {
         let yes_edge = model_prob - yes_ask;
         let no_edge = model_prob_no - no_ask;
 
-        let (token_id, ask_price, edge, prob_for_sizing) = if yes_edge > no_edge && yes_edge > Decimal::ZERO
-        {
-            (yes_token.token_id, yes_ask, yes_edge, model_prob)
-        } else if no_edge > Decimal::ZERO {
-            (no_token.token_id, no_ask, no_edge, model_prob_no)
-        } else {
-            return None;
-        };
+        let (token_id, ask_price, edge, prob_for_sizing) =
+            if yes_edge > no_edge && yes_edge > Decimal::ZERO {
+                (yes_token.token_id, yes_ask, yes_edge, model_prob)
+            } else if no_edge > Decimal::ZERO {
+                (no_token.token_id, no_ask, no_edge, model_prob_no)
+            } else {
+                return None;
+            };
 
         // Check min edge
         let edge_bps = {
@@ -1084,36 +1099,36 @@ impl CryptoAlphaStrategy {
 
             // Check bid-ask spread — skip outcomes with wide spreads
             let mut skip_outcome = false;
-            if let Some(ref yb) = (self.get_orderbook)(yes_token.token_id) {
-                if let (Some(ask), Some(bid)) = (yb.best_ask(), yb.best_bid()) {
-                    let spread = if ask.price > Decimal::ZERO {
-                        (ask.price - bid.price) / ask.price
-                    } else {
-                        Decimal::ONE
-                    };
-                    let spread_bps = {
-                        use rust_decimal::prelude::ToPrimitive;
-                        (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
-                    };
-                    if spread_bps > self.config.max_spread_bps {
-                        skip_outcome = true;
-                    }
+            if let Some(ref yb) = (self.get_orderbook)(yes_token.token_id)
+                && let (Some(ask), Some(bid)) = (yb.best_ask(), yb.best_bid())
+            {
+                let spread = if ask.price > Decimal::ZERO {
+                    (ask.price - bid.price) / ask.price
+                } else {
+                    Decimal::ONE
+                };
+                let spread_bps = {
+                    use rust_decimal::prelude::ToPrimitive;
+                    (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
+                };
+                if spread_bps > self.config.max_spread_bps {
+                    skip_outcome = true;
                 }
             }
-            if let Some(ref nb) = (self.get_orderbook)(no_token.token_id) {
-                if let (Some(ask), Some(bid)) = (nb.best_ask(), nb.best_bid()) {
-                    let spread = if ask.price > Decimal::ZERO {
-                        (ask.price - bid.price) / ask.price
-                    } else {
-                        Decimal::ONE
-                    };
-                    let spread_bps = {
-                        use rust_decimal::prelude::ToPrimitive;
-                        (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
-                    };
-                    if spread_bps > self.config.max_spread_bps {
-                        skip_outcome = true;
-                    }
+            if let Some(ref nb) = (self.get_orderbook)(no_token.token_id)
+                && let (Some(ask), Some(bid)) = (nb.best_ask(), nb.best_bid())
+            {
+                let spread = if ask.price > Decimal::ZERO {
+                    (ask.price - bid.price) / ask.price
+                } else {
+                    Decimal::ONE
+                };
+                let spread_bps = {
+                    use rust_decimal::prelude::ToPrimitive;
+                    (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
+                };
+                if spread_bps > self.config.max_spread_bps {
+                    skip_outcome = true;
                 }
             }
             if skip_outcome {
@@ -1264,15 +1279,13 @@ impl CryptoAlphaStrategy {
     /// the same event title (e.g. "What price will Bitcoin hit in 2026?").
     /// Fetches price data once for the shared asset, then evaluates all
     /// markets to find the best edge.
-    async fn detect_crypto_group(
-        &self,
-        group: &BinaryEventGroup,
-    ) -> Option<TradingOpportunity> {
+    async fn detect_crypto_group(&self, group: &BinaryEventGroup) -> Option<TradingOpportunity> {
         // Try to identify crypto asset from the group title first, then from individual markets
         let asset = find_asset(&group.title).or_else(|| {
-            group.markets.iter().find_map(|m| {
-                parse_crypto_question(&m.question).map(|q| q.asset)
-            })
+            group
+                .markets
+                .iter()
+                .find_map(|m| parse_crypto_question(&m.question).map(|q| q.asset))
         })?;
 
         // Fetch price data once for the entire group
@@ -1346,36 +1359,36 @@ impl CryptoAlphaStrategy {
 
             // Check bid-ask spread — skip markets with wide spreads
             let mut skip_market = false;
-            if let Some(ref yb) = (self.get_orderbook)(yes_token.token_id) {
-                if let (Some(ask), Some(bid)) = (yb.best_ask(), yb.best_bid()) {
-                    let spread = if ask.price > Decimal::ZERO {
-                        (ask.price - bid.price) / ask.price
-                    } else {
-                        Decimal::ONE
-                    };
-                    let spread_bps = {
-                        use rust_decimal::prelude::ToPrimitive;
-                        (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
-                    };
-                    if spread_bps > self.config.max_spread_bps {
-                        skip_market = true;
-                    }
+            if let Some(ref yb) = (self.get_orderbook)(yes_token.token_id)
+                && let (Some(ask), Some(bid)) = (yb.best_ask(), yb.best_bid())
+            {
+                let spread = if ask.price > Decimal::ZERO {
+                    (ask.price - bid.price) / ask.price
+                } else {
+                    Decimal::ONE
+                };
+                let spread_bps = {
+                    use rust_decimal::prelude::ToPrimitive;
+                    (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
+                };
+                if spread_bps > self.config.max_spread_bps {
+                    skip_market = true;
                 }
             }
-            if let Some(ref nb) = (self.get_orderbook)(no_token.token_id) {
-                if let (Some(ask), Some(bid)) = (nb.best_ask(), nb.best_bid()) {
-                    let spread = if ask.price > Decimal::ZERO {
-                        (ask.price - bid.price) / ask.price
-                    } else {
-                        Decimal::ONE
-                    };
-                    let spread_bps = {
-                        use rust_decimal::prelude::ToPrimitive;
-                        (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
-                    };
-                    if spread_bps > self.config.max_spread_bps {
-                        skip_market = true;
-                    }
+            if let Some(ref nb) = (self.get_orderbook)(no_token.token_id)
+                && let (Some(ask), Some(bid)) = (nb.best_ask(), nb.best_bid())
+            {
+                let spread = if ask.price > Decimal::ZERO {
+                    (ask.price - bid.price) / ask.price
+                } else {
+                    Decimal::ONE
+                };
+                let spread_bps = {
+                    use rust_decimal::prelude::ToPrimitive;
+                    (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
+                };
+                if spread_bps > self.config.max_spread_bps {
+                    skip_market = true;
                 }
             }
             if skip_market {
@@ -1545,10 +1558,7 @@ impl CryptoAlphaStrategy {
             return vec![];
         }
 
-        tracing::debug!(
-            held_positions = held.len(),
-            "[CryptoAlpha] scanning exits"
-        );
+        tracing::debug!(held_positions = held.len(), "[CryptoAlpha] scanning exits");
 
         // Build reverse map: token_id → market
         let token_to_market: HashMap<U256, &MarketInfo> = markets
@@ -1582,7 +1592,13 @@ impl CryptoAlphaStrategy {
                     best_bid = %best_bid,
                     "[EXIT] Capital efficiency — crypto"
                 );
-                exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
+                exits.push(self.build_exit_opportunity(
+                    *token_id,
+                    *size,
+                    *avg_cost,
+                    best_bid,
+                    &token_to_market,
+                ));
                 continue;
             }
 
@@ -1599,7 +1615,13 @@ impl CryptoAlphaStrategy {
                     loss_pct = %loss_pct,
                     "[EXIT] Deep loss detected — crypto position lost >= 50%"
                 );
-                exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
+                exits.push(self.build_exit_opportunity(
+                    *token_id,
+                    *size,
+                    *avg_cost,
+                    best_bid,
+                    &token_to_market,
+                ));
                 continue;
             }
 
@@ -1641,25 +1663,45 @@ impl CryptoAlphaStrategy {
                     continue;
                 }
 
-                let target_date = parsed.target_date.unwrap_or_else(|| {
-                    (Utc::now() + chrono::Duration::days(30)).date_naive()
-                });
-                let days_to_target = (target_date - Utc::now().date_naive()).num_days().max(1) as f64;
+                let target_date = parsed
+                    .target_date
+                    .unwrap_or_else(|| (Utc::now() + chrono::Duration::days(30)).date_naive());
+                let days_to_target =
+                    (target_date - Utc::now().date_naive()).num_days().max(1) as f64;
 
-                let model_prob = gbm_probability(price_data.current_price, parsed.threshold, mu, sigma, days_to_target);
+                let model_prob = gbm_probability(
+                    price_data.current_price,
+                    parsed.threshold,
+                    mu,
+                    sigma,
+                    days_to_target,
+                );
                 let effective_prob = match parsed.direction {
                     PriceDirection::Above => model_prob,
                     PriceDirection::Below => 1.0 - model_prob,
                 };
 
-                let is_yes = market.tokens.first().map(|t| t.token_id == *token_id).unwrap_or(false);
-                if is_yes { effective_prob } else { 1.0 - effective_prob }
+                let is_yes = market
+                    .tokens
+                    .first()
+                    .map(|t| t.token_id == *token_id)
+                    .unwrap_or(false);
+                if is_yes {
+                    effective_prob
+                } else {
+                    1.0 - effective_prob
+                }
             } else if let Some(range) = parse_crypto_outcome_range(&market.question) {
                 // NegRisk outcome: find asset from parent event title
-                let neg_risk_asset = self.neg_risk_events.iter()
-                    .find(|ev| ev.markets.iter().any(|m| m.tokens.iter().any(|t| t.token_id == *token_id)))
-                    .and_then(|ev| parse_crypto_event_title(&ev.title))
-                    .map(|(asset, target_date)| (asset, target_date));
+                let neg_risk_asset = self
+                    .neg_risk_events
+                    .iter()
+                    .find(|ev| {
+                        ev.markets
+                            .iter()
+                            .any(|m| m.tokens.iter().any(|t| t.token_id == *token_id))
+                    })
+                    .and_then(|ev| parse_crypto_event_title(&ev.title));
 
                 let (asset, target_date) = match neg_risk_asset {
                     Some(v) => v,
@@ -1691,15 +1733,25 @@ impl CryptoAlphaStrategy {
                     continue;
                 }
 
-                let target_date = target_date.unwrap_or_else(|| {
-                    (Utc::now() + chrono::Duration::days(30)).date_naive()
-                });
-                let days_to_target = (target_date - Utc::now().date_naive()).num_days().max(1) as f64;
+                let target_date = target_date
+                    .unwrap_or_else(|| (Utc::now() + chrono::Duration::days(30)).date_naive());
+                let days_to_target =
+                    (target_date - Utc::now().date_naive()).num_days().max(1) as f64;
 
-                let range_prob = gbm_range_probability(price_data.current_price, &range, mu, sigma, days_to_target);
+                let range_prob = gbm_range_probability(
+                    price_data.current_price,
+                    &range,
+                    mu,
+                    sigma,
+                    days_to_target,
+                );
 
                 // NegRisk: YES token = tokens[0], NO token = tokens[1]
-                let is_yes = market.tokens.first().map(|t| t.token_id == *token_id).unwrap_or(false);
+                let is_yes = market
+                    .tokens
+                    .first()
+                    .map(|t| t.token_id == *token_id)
+                    .unwrap_or(false);
                 if is_yes { range_prob } else { 1.0 - range_prob }
             } else {
                 tracing::debug!(token_id = %token_id, question = %market.question, "[CryptoAlpha EXIT] could not parse question or outcome range");
@@ -1717,7 +1769,13 @@ impl CryptoAlphaStrategy {
                     best_bid = %best_bid,
                     "[EXIT] Model reversal — crypto"
                 );
-                exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
+                exits.push(self.build_exit_opportunity(
+                    *token_id,
+                    *size,
+                    *avg_cost,
+                    best_bid,
+                    &token_to_market,
+                ));
             } else {
                 tracing::debug!(
                     token_id = %token_id,
@@ -1747,7 +1805,9 @@ impl CryptoAlphaStrategy {
         let question = market.map(|m| m.question.clone()).unwrap_or_default();
         let fee_rate_bps = market.map(|m| m.fee_rate_bps).unwrap_or(200);
 
-        let est = self.profit_calc.directional_sell_profit(best_bid, avg_cost, size, fee_rate_bps);
+        let est = self
+            .profit_calc
+            .directional_sell_profit(best_bid, avg_cost, size, fee_rate_bps);
 
         TradingOpportunity {
             id: Uuid::now_v7(),
@@ -1779,12 +1839,11 @@ impl Strategy for CryptoAlphaStrategy {
         StrategyType::CryptoAlpha
     }
 
-    async fn scan(
-        &self,
-        markets: &[MarketInfo],
-    ) -> pa_core::Result<Vec<TradingOpportunity>> {
+    async fn scan(&self, markets: &[MarketInfo]) -> pa_core::Result<Vec<TradingOpportunity>> {
         let mut opportunities = Vec::new();
-        let count = self.scan_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let count = self
+            .scan_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let log_diag = count.is_multiple_of(600); // ~every 60s at 100ms interval
 
         let mut binary_crypto = 0u32;
@@ -1804,7 +1863,10 @@ impl Strategy for CryptoAlphaStrategy {
         for group in &self.binary_event_groups {
             // Quick check: does this group contain any crypto market?
             let has_crypto = find_asset(&group.title).is_some()
-                || group.markets.iter().any(|m| parse_crypto_question(&m.question).is_some());
+                || group
+                    .markets
+                    .iter()
+                    .any(|m| parse_crypto_question(&m.question).is_some());
             if !has_crypto {
                 continue;
             }
@@ -1842,9 +1904,7 @@ impl Strategy for CryptoAlphaStrategy {
         for event in &self.neg_risk_events {
             if let Some((asset, target_date)) = parse_crypto_event_title(&event.title) {
                 let now_date = Utc::now().date_naive();
-                let days = target_date
-                    .map(|d| (d - now_date).num_days())
-                    .unwrap_or(30); // Default 30 days for events without explicit date
+                let days = target_date.map(|d| (d - now_date).num_days()).unwrap_or(30); // Default 30 days for events without explicit date
                 if days <= 0 {
                     neg_risk_expired += 1;
                     continue;
@@ -1874,7 +1934,9 @@ impl Strategy for CryptoAlphaStrategy {
             );
             // Log sample binary event group titles
             for (i, group) in self.binary_event_groups.iter().enumerate() {
-                if i >= 5 { break; }
+                if i >= 5 {
+                    break;
+                }
                 let has_crypto = find_asset(&group.title).is_some();
                 tracing::debug!(
                     idx = i,
@@ -1949,9 +2011,7 @@ mod tests {
     #[test]
     fn test_volatility_calculation() {
         // Simulated 30 daily closes with upward trend
-        let closes: Vec<f64> = (0..30)
-            .map(|i| 100.0 * (1.0 + 0.01 * i as f64))
-            .collect();
+        let closes: Vec<f64> = (0..30).map(|i| 100.0 * (1.0 + 0.01 * i as f64)).collect();
 
         let (mu, sigma) = calculate_volatility(&closes).unwrap();
         // Positive drift (prices going up)
@@ -2045,8 +2105,7 @@ mod tests {
 
     #[test]
     fn test_parse_crypto_event_title_eth() {
-        let (asset, _date) =
-            parse_crypto_event_title("Ethereum price on February 28?").unwrap();
+        let (asset, _date) = parse_crypto_event_title("Ethereum price on February 28?").unwrap();
         assert_eq!(asset.name, "Ethereum");
     }
 
@@ -2198,7 +2257,9 @@ mod tests {
         // Group title contains crypto asset
         assert!(find_asset("What price will Bitcoin hit in 2026?").is_some());
         assert_eq!(
-            find_asset("What price will Bitcoin hit in 2026?").unwrap().name,
+            find_asset("What price will Bitcoin hit in 2026?")
+                .unwrap()
+                .name,
             "Bitcoin"
         );
         assert!(find_asset("Ethereum price predictions 2026").is_some());
@@ -2230,8 +2291,8 @@ mod tests {
 
     #[test]
     fn test_binary_event_group_type() {
-        use pa_core::types::BinaryEventGroup;
         use alloy::primitives::B256;
+        use pa_core::types::BinaryEventGroup;
 
         let market1 = MarketInfo {
             condition_id: B256::ZERO,
@@ -2273,8 +2334,8 @@ mod tests {
 
     // ──── Exit Tests ────
 
-    use pa_core::types::{Outcome, PriceLevel, TokenInfo};
     use alloy::primitives::B256;
+    use pa_core::types::{Outcome, PriceLevel, TokenInfo};
 
     fn make_crypto_market(question: &str) -> MarketInfo {
         MarketInfo {
@@ -2316,8 +2377,14 @@ mod tests {
     fn make_crypto_book(token_id: U256, best_bid: Decimal) -> OrderBook {
         OrderBook {
             token_id,
-            bids: vec![PriceLevel { price: best_bid, size: dec!(500) }],
-            asks: vec![PriceLevel { price: best_bid + dec!(0.02), size: dec!(500) }],
+            bids: vec![PriceLevel {
+                price: best_bid,
+                size: dec!(500),
+            }],
+            asks: vec![PriceLevel {
+                price: best_bid + dec!(0.02),
+                size: dec!(500),
+            }],
             timestamp: Utc::now(),
         }
     }
@@ -2341,13 +2408,15 @@ mod tests {
         CryptoAlphaStrategy::new(
             config,
             Decimal::ZERO,
-            Box::new(move |tid| books.get(&tid).cloned()),
-            Box::new(|| Decimal::MAX),
-            Box::new(|_| Decimal::ZERO),
-            vec![],
-            vec![],
-            Box::new(move || held.clone()),
-            Box::new(|| dec!(200)), // test balance $200
+            CryptoAlphaDeps {
+                get_orderbook: Box::new(move |tid| books.get(&tid).cloned()),
+                get_available_capital: Box::new(|| Decimal::MAX),
+                get_position: Box::new(|_| Decimal::ZERO),
+                get_held_positions: Box::new(move || held.clone()),
+                get_balance: Box::new(|| dec!(200)), // test balance $200
+                neg_risk_events: vec![],
+                binary_event_groups: vec![],
+            },
         )
     }
 
@@ -2360,7 +2429,10 @@ mod tests {
 
         let mut books = HashMap::new();
         books.insert(token_id, make_crypto_book(token_id, dec!(0.99)));
-        books.insert(U256::from(2u64), make_crypto_book(U256::from(2u64), dec!(0.01)));
+        books.insert(
+            U256::from(2u64),
+            make_crypto_book(U256::from(2u64), dec!(0.01)),
+        );
 
         let held = vec![(token_id, dec!(50), dec!(0.60))];
         let strategy = make_crypto_strategy(books, held);
@@ -2369,12 +2441,13 @@ mod tests {
         assert_eq!(exits.len(), 1);
         assert!(exits[0].question.starts_with("[EXIT]"));
         match &exits[0].execution_plan {
-            ExecutionPlan::DirectionalBuy { side, price, size, .. } => {
+            ExecutionPlan::DirectionalBuy {
+                side, price, size, ..
+            } => {
                 assert_eq!(*side, TradeSide::Sell);
                 assert_eq!(*price, dec!(0.99));
                 assert_eq!(*size, dec!(50));
             }
-            _ => panic!("Expected DirectionalBuy with Sell side"),
         }
     }
 
@@ -2389,7 +2462,10 @@ mod tests {
 
         let mut books = HashMap::new();
         books.insert(token_id, make_crypto_book(token_id, dec!(0.80)));
-        books.insert(U256::from(2u64), make_crypto_book(U256::from(2u64), dec!(0.20)));
+        books.insert(
+            U256::from(2u64),
+            make_crypto_book(U256::from(2u64), dec!(0.20)),
+        );
 
         let held = vec![(token_id, dec!(30), dec!(0.50))];
         let strategy = make_crypto_strategy(books, held);
@@ -2400,15 +2476,18 @@ mod tests {
         let cache_key = parsed.asset.binance_symbol.to_string();
         {
             let mut cache = strategy.price_cache.lock().unwrap();
-            cache.insert(cache_key, CachedPrice {
-                data: CryptoPriceData {
-                    current_price: 95000.0,
-                    daily_closes: (0..30).map(|i| 94000.0 + (i as f64) * 100.0).collect(),
-                    implied_vol: None,
+            cache.insert(
+                cache_key,
+                CachedPrice {
+                    data: CryptoPriceData {
+                        current_price: 95000.0,
+                        daily_closes: (0..30).map(|i| 94000.0 + (i as f64) * 100.0).collect(),
+                        implied_vol: None,
+                    },
+                    fetched_at: Utc::now(),
+                    last_sigma: None,
                 },
-                fetched_at: Utc::now(),
-                last_sigma: None,
-            });
+            );
         }
 
         let exits = strategy.scan_exits(&[market]).await;
@@ -2530,7 +2609,10 @@ mod tests {
         // Create order book with 20% spread (YES: bid=0.40, ask=0.50)
         let mut yes_book = make_crypto_book(token_id, dec!(0.50));
         yes_book.bids.clear();
-        yes_book.bids.push(PriceLevel { price: dec!(0.40), size: dec!(500) });
+        yes_book.bids.push(PriceLevel {
+            price: dec!(0.40),
+            size: dec!(500),
+        });
 
         // NO side with tight spread (doesn't matter, YES is wide enough)
         let no_book = make_crypto_book(U256::from(2u64), dec!(0.50));
@@ -2555,20 +2637,25 @@ mod tests {
         let strategy = CryptoAlphaStrategy::new(
             config,
             Decimal::ZERO,
-            Box::new(move |tid| books.get(&tid).cloned()),
-            Box::new(|| Decimal::MAX),
-            Box::new(|_| Decimal::ZERO),
-            vec![],
-            vec![],
-            Box::new(|| vec![]),
-            Box::new(|| dec!(200)),
+            CryptoAlphaDeps {
+                get_orderbook: Box::new(move |tid| books.get(&tid).cloned()),
+                get_available_capital: Box::new(|| Decimal::MAX),
+                get_position: Box::new(|_| Decimal::ZERO),
+                get_held_positions: Box::new(Vec::new),
+                get_balance: Box::new(|| dec!(200)),
+                neg_risk_events: vec![],
+                binary_event_groups: vec![],
+            },
         );
 
         // Use a far future date so the question parses with days > 0
         let question = "Will Bitcoin exceed $50,000 by December 31?";
         let market = make_crypto_market(question);
         let result = strategy.detect_crypto_opportunity(&market).await;
-        assert!(result.is_none(), "Market with 20% spread should be rejected (max 12%)");
+        assert!(
+            result.is_none(),
+            "Market with 20% spread should be rejected (max 12%)"
+        );
     }
 
     #[tokio::test]
@@ -2581,7 +2668,10 @@ mod tests {
             use rust_decimal::prelude::ToPrimitive;
             (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
         };
-        assert!(spread_bps <= 1200, "8% spread (800 bps) should pass 12% filter");
+        assert!(
+            spread_bps <= 1200,
+            "8% spread (800 bps) should pass 12% filter"
+        );
         assert_eq!(spread_bps, 800);
 
         // Also verify wide spread is correctly computed
@@ -2590,7 +2680,10 @@ mod tests {
             use rust_decimal::prelude::ToPrimitive;
             (wide_spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
         };
-        assert!(wide_bps > 1200, "20% spread (2000 bps) should fail 12% filter");
+        assert!(
+            wide_bps > 1200,
+            "20% spread (2000 bps) should fail 12% filter"
+        );
         assert_eq!(wide_bps, 2000);
     }
 }

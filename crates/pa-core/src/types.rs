@@ -8,10 +8,10 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EventCategory {
-    Macro,      // FOMC, CPI, NFP, GDP
-    Crypto,     // Token unlocks, forks, ETF decisions
-    Political,  // Elections, hearings, legislation
-    Sports,     // Matches, tournaments
+    Macro,     // FOMC, CPI, NFP, GDP
+    Crypto,    // Token unlocks, forks, ETF decisions
+    Political, // Elections, hearings, legislation
+    Sports,    // Matches, tournaments
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -297,7 +297,13 @@ pub enum ExecutionPlan {
 impl ExecutionPlan {
     /// Returns true if this is an exit/sell order (reduces risk, not increases it).
     pub fn is_exit(&self) -> bool {
-        matches!(self, ExecutionPlan::DirectionalBuy { side: TradeSide::Sell, .. })
+        matches!(
+            self,
+            ExecutionPlan::DirectionalBuy {
+                side: TradeSide::Sell,
+                ..
+            }
+        )
     }
 
     /// Extract the liquidity requirements for each leg of this plan.
@@ -484,10 +490,7 @@ mod tests {
 
     #[test]
     fn test_walk_book_full_fill() {
-        let book = make_book(
-            vec![],
-            vec![(dec!(0.50), dec!(100))],
-        );
+        let book = make_book(vec![], vec![(dec!(0.50), dec!(100))]);
         let result = book.walk_book(TradeSide::Buy, dec!(50)).unwrap();
         assert_eq!(result.filled, dec!(50));
         assert_eq!(result.avg_price, dec!(0.50));
@@ -515,10 +518,7 @@ mod tests {
 
     #[test]
     fn test_walk_book_partial() {
-        let book = make_book(
-            vec![],
-            vec![(dec!(0.50), dec!(10))],
-        );
+        let book = make_book(vec![], vec![(dec!(0.50), dec!(10))]);
         let result = book.walk_book(TradeSide::Buy, dec!(100)).unwrap();
         assert_eq!(result.filled, dec!(10));
         assert_eq!(result.avg_price, dec!(0.50));

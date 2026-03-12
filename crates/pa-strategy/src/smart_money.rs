@@ -10,7 +10,7 @@ use uuid::Uuid;
 use pa_core::config::SmartMoneyConfig;
 use pa_core::traits::Strategy;
 use pa_core::types::{
-    TradingOpportunity, ExecutionPlan, MarketInfo, OrderBook, StrategyType, TradeSide,
+    ExecutionPlan, MarketInfo, OrderBook, StrategyType, TradeSide, TradingOpportunity,
 };
 use pa_market_data::wallet_tracker::{SignalType, SmartMoneySignal};
 
@@ -30,6 +30,15 @@ struct AggregatedSignal {
 
 // ──── SmartMoneyStrategy ────
 
+pub struct SmartMoneyStrategyDeps {
+    pub get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+    pub get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
+    pub get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
+    pub get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
+    pub signals: Arc<RwLock<Vec<SmartMoneySignal>>>,
+    pub markets: Arc<RwLock<HashMap<B256, MarketInfo>>>,
+}
+
 pub struct SmartMoneyStrategy {
     config: SmartMoneyConfig,
     profit_calc: ProfitCalculator,
@@ -37,9 +46,6 @@ pub struct SmartMoneyStrategy {
     get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
     get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
     get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
-    /// Returns current wallet USDC balance (reserved for future dynamic sizing).
-    #[allow(dead_code)]
-    get_balance: Box<dyn Fn() -> Decimal + Send + Sync>,
     /// Shared signal queue from WalletTracker.
     signals: Arc<RwLock<Vec<SmartMoneySignal>>>,
     /// Markets lookup: condition_id → MarketInfo (for fee_rate_bps etc.)
@@ -47,18 +53,20 @@ pub struct SmartMoneyStrategy {
 }
 
 impl SmartMoneyStrategy {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: SmartMoneyConfig,
         gas_cost_usd: Decimal,
-        get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
-        get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
-        get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
-        get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
-        get_balance: Box<dyn Fn() -> Decimal + Send + Sync>,
-        signals: Arc<RwLock<Vec<SmartMoneySignal>>>,
-        markets: Arc<RwLock<HashMap<B256, MarketInfo>>>,
+        deps: SmartMoneyStrategyDeps,
     ) -> Self {
+        let SmartMoneyStrategyDeps {
+            get_orderbook,
+            get_available_capital,
+            get_position,
+            get_held_positions,
+            signals,
+            markets,
+        } = deps;
+
         Self {
             config,
             profit_calc: ProfitCalculator::new(gas_cost_usd),
@@ -66,7 +74,6 @@ impl SmartMoneyStrategy {
             get_available_capital,
             get_position,
             get_held_positions,
-            get_balance,
             signals,
             markets,
         }
@@ -106,7 +113,9 @@ impl SmartMoneyStrategy {
                     // For entries: target = wallet_size * follow_ratio * weight
                     entry.target_size += sig.wallet_size * follow_ratio * sig.wallet_weight;
                     // Keep as Entry/Increase
-                    if entry.signal_type == SignalType::Exit || entry.signal_type == SignalType::Decrease {
+                    if entry.signal_type == SignalType::Exit
+                        || entry.signal_type == SignalType::Decrease
+                    {
                         entry.signal_type = sig.signal_type;
                     }
                 }
@@ -288,7 +297,10 @@ impl SmartMoneyStrategy {
                     .unwrap_or(200);
 
                 let est = self.profit_calc.directional_sell_profit(
-                    best_bid, *avg_cost, *size, fee_rate_bps,
+                    best_bid,
+                    *avg_cost,
+                    *size,
+                    fee_rate_bps,
                 );
 
                 tracing::info!(
@@ -331,10 +343,7 @@ impl Strategy for SmartMoneyStrategy {
         StrategyType::SmartMoney
     }
 
-    async fn scan(
-        &self,
-        markets: &[MarketInfo],
-    ) -> pa_core::Result<Vec<TradingOpportunity>> {
+    async fn scan(&self, markets: &[MarketInfo]) -> pa_core::Result<Vec<TradingOpportunity>> {
         // Update markets lookup
         self.update_markets(markets);
 
@@ -351,7 +360,7 @@ impl Strategy for SmartMoneyStrategy {
 
         // Generate opportunities
         let mut opps = Vec::new();
-        for (_token_id, agg) in &aggregated {
+        for agg in aggregated.values() {
             let opp = match agg.signal_type {
                 SignalType::Entry | SignalType::Increase => self.process_entry_signal(agg),
                 SignalType::Decrease | SignalType::Exit => self.process_exit_signal(agg),
@@ -371,7 +380,7 @@ impl Strategy for SmartMoneyStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pa_core::types::{OrderBook, PriceLevel, TokenInfo, Outcome};
+    use pa_core::types::{OrderBook, Outcome, PriceLevel, TokenInfo};
     use rust_decimal_macros::dec;
 
     fn make_book(bids: Vec<(Decimal, Decimal)>, asks: Vec<(Decimal, Decimal)>) -> OrderBook {
@@ -435,20 +444,19 @@ mod tests {
 
         let book = Arc::new(book);
         let signals_arc = Arc::new(RwLock::new(signals));
-        let markets_arc = Arc::new(RwLock::new(
-            HashMap::from([(market.condition_id, market)]),
-        ));
+        let markets_arc = Arc::new(RwLock::new(HashMap::from([(market.condition_id, market)])));
 
         SmartMoneyStrategy::new(
             config,
             dec!(0.00),
-            Box::new(move |_| Some((*book).clone())),
-            Box::new(move || balance),
-            Box::new(move |_| position),
-            Box::new(|| vec![]),
-            Box::new(move || balance),
-            signals_arc,
-            markets_arc,
+            SmartMoneyStrategyDeps {
+                get_orderbook: Box::new(move |_| Some((*book).clone())),
+                get_available_capital: Box::new(move || balance),
+                get_position: Box::new(move |_| position),
+                get_held_positions: Box::new(Vec::new),
+                signals: signals_arc,
+                markets: markets_arc,
+            },
         )
     }
 
@@ -488,8 +496,7 @@ mod tests {
             get_orderbook: Box::new(|_| None),
             get_available_capital: Box::new(|| dec!(1000)),
             get_position: Box::new(|_| Decimal::ZERO),
-            get_held_positions: Box::new(|| vec![]),
-            get_balance: Box::new(|| dec!(1000)),
+            get_held_positions: Box::new(Vec::new),
             signals: Arc::new(RwLock::new(vec![])),
             markets: Arc::new(RwLock::new(HashMap::new())),
         };
@@ -506,10 +513,7 @@ mod tests {
     fn test_entry_proportional_sizing() {
         let token_id = U256::from(42u64);
         let cid = B256::ZERO;
-        let book = make_book(
-            vec![(dec!(0.55), dec!(500))],
-            vec![(dec!(0.60), dec!(500))],
-        );
+        let book = make_book(vec![(dec!(0.55), dec!(500))], vec![(dec!(0.60), dec!(500))]);
         let market = make_market(cid, token_id);
 
         let signals = vec![SmartMoneySignal {
@@ -541,10 +545,7 @@ mod tests {
     fn test_exit_follows_wallet() {
         let token_id = U256::from(42u64);
         let cid = B256::ZERO;
-        let book = make_book(
-            vec![(dec!(0.55), dec!(500))],
-            vec![(dec!(0.60), dec!(500))],
-        );
+        let book = make_book(vec![(dec!(0.55), dec!(500))], vec![(dec!(0.60), dec!(500))]);
         let market = make_market(cid, token_id);
 
         let signals = vec![SmartMoneySignal {
@@ -574,7 +575,6 @@ mod tests {
         assert_eq!(opp.size, dec!(20));
         match opp.execution_plan {
             ExecutionPlan::DirectionalBuy { side, .. } => assert_eq!(side, TradeSide::Sell),
-            _ => panic!("expected DirectionalBuy"),
         }
     }
 
@@ -623,10 +623,7 @@ mod tests {
         let token_id = U256::from(42u64);
         let cid = B256::ZERO;
         // best_bid = 0.99 ≥ threshold 0.98
-        let book = make_book(
-            vec![(dec!(0.99), dec!(500))],
-            vec![(dec!(1.00), dec!(500))],
-        );
+        let book = make_book(vec![(dec!(0.99), dec!(500))], vec![(dec!(1.00), dec!(500))]);
         let market = make_market(cid, token_id);
 
         let config = SmartMoneyConfig {
@@ -635,21 +632,20 @@ mod tests {
         };
 
         let book_arc = Arc::new(book);
-        let markets_arc = Arc::new(RwLock::new(
-            HashMap::from([(cid, market)]),
-        ));
+        let markets_arc = Arc::new(RwLock::new(HashMap::from([(cid, market)])));
 
         let strategy = SmartMoneyStrategy::new(
             config,
             dec!(0.00),
-            Box::new(move |_| Some((*book_arc).clone())),
-            Box::new(|| dec!(1000)),
-            Box::new(|_| Decimal::ZERO),
-            // We hold 50 shares at avg_cost 0.60
-            Box::new(move || vec![(token_id, dec!(50), dec!(0.60))]),
-            Box::new(|| dec!(1000)),
-            Arc::new(RwLock::new(vec![])),
-            markets_arc,
+            SmartMoneyStrategyDeps {
+                get_orderbook: Box::new(move |_| Some((*book_arc).clone())),
+                get_available_capital: Box::new(|| dec!(1000)),
+                get_position: Box::new(|_| Decimal::ZERO),
+                // We hold 50 shares at avg_cost 0.60
+                get_held_positions: Box::new(move || vec![(token_id, dec!(50), dec!(0.60))]),
+                signals: Arc::new(RwLock::new(vec![])),
+                markets: markets_arc,
+            },
         );
 
         let exits = strategy.scan_exits();
@@ -660,7 +656,6 @@ mod tests {
                 assert_eq!(*side, TradeSide::Sell);
                 assert_eq!(*price, dec!(0.99));
             }
-            _ => panic!("expected DirectionalBuy"),
         }
     }
 }

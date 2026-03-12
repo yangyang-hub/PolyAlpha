@@ -57,8 +57,9 @@ struct Args {
 }
 
 fn parse_datetime(s: &str) -> Result<chrono::DateTime<chrono::Utc>> {
-    let naive = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
-        .with_context(|| format!("Invalid datetime format: '{s}'. Expected: 2025-01-01T00:00:00"))?;
+    let naive = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").with_context(|| {
+        format!("Invalid datetime format: '{s}'. Expected: 2025-01-01T00:00:00")
+    })?;
     Ok(naive.and_utc())
 }
 
@@ -131,7 +132,9 @@ async fn main() -> Result<()> {
     };
 
     tracing::info!("Running backtest...");
-    let result = engine.run(backtest_config, risk_config, strategy_config).await?;
+    let result = engine
+        .run(backtest_config, risk_config, strategy_config)
+        .await?;
 
     match args.output.as_str() {
         "json" => {

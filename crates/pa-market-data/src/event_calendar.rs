@@ -98,8 +98,10 @@ impl EventCalendarService {
         events
             .iter()
             .filter(|e| {
-                let window_start = e.event_time - Duration::hours(self.config.pre_event_hours as i64);
-                let window_end = e.event_time + Duration::hours(self.config.post_event_hours as i64);
+                let window_start =
+                    e.event_time - Duration::hours(self.config.pre_event_hours as i64);
+                let window_end =
+                    e.event_time + Duration::hours(self.config.post_event_hours as i64);
                 now >= window_start && now <= window_end
             })
             .cloned()
@@ -147,7 +149,9 @@ impl EventCalendarService {
     /// Fetch economic calendar events from Finnhub.
     async fn fetch_finnhub(&self) -> anyhow::Result<Vec<CalendarEvent>> {
         let today = Utc::now().format("%Y-%m-%d").to_string();
-        let end = (Utc::now() + Duration::days(30)).format("%Y-%m-%d").to_string();
+        let end = (Utc::now() + Duration::days(30))
+            .format("%Y-%m-%d")
+            .to_string();
 
         let url = format!(
             "https://finnhub.io/api/v1/calendar/economic?from={}&to={}&token={}",
@@ -164,7 +168,9 @@ impl EventCalendarService {
     /// Fetch crypto events from CoinMarketCal.
     async fn fetch_coinmarketcal(&self) -> anyhow::Result<Vec<CalendarEvent>> {
         let today = Utc::now().format("%Y-%m-%d").to_string();
-        let end = (Utc::now() + Duration::days(30)).format("%Y-%m-%d").to_string();
+        let end = (Utc::now() + Duration::days(30))
+            .format("%Y-%m-%d")
+            .to_string();
 
         let url = format!(
             "https://developers.coinmarketcal.com/v1/events?max=75&dateRangeStart={}&dateRangeEnd={}",
@@ -188,29 +194,48 @@ impl EventCalendarService {
 
 /// Static keyword expansion maps: event title triggers → market question keywords.
 /// Allocated once and reused across all calls.
-static MACRO_KEYWORD_MAP: LazyLock<HashMap<&'static str, Vec<&'static str>>> = LazyLock::new(|| {
-    let mut m = HashMap::new();
-    m.insert("fomc", vec!["interest rate", "federal reserve", "fed", "monetary policy", "rate cut", "rate hike"]);
-    m.insert("cpi", vec!["inflation", "consumer price", "cpi"]);
-    m.insert("nonfarm", vec!["employment", "jobs", "labor", "unemployment", "nonfarm"]);
-    m.insert("gdp", vec!["economic growth", "gdp", "recession"]);
-    m
-});
+static MACRO_KEYWORD_MAP: LazyLock<HashMap<&'static str, Vec<&'static str>>> =
+    LazyLock::new(|| {
+        let mut m = HashMap::new();
+        m.insert(
+            "fomc",
+            vec![
+                "interest rate",
+                "federal reserve",
+                "fed",
+                "monetary policy",
+                "rate cut",
+                "rate hike",
+            ],
+        );
+        m.insert("cpi", vec!["inflation", "consumer price", "cpi"]);
+        m.insert(
+            "nonfarm",
+            vec!["employment", "jobs", "labor", "unemployment", "nonfarm"],
+        );
+        m.insert("gdp", vec!["economic growth", "gdp", "recession"]);
+        m
+    });
 
-static POLITICAL_KEYWORD_MAP: LazyLock<HashMap<&'static str, Vec<&'static str>>> = LazyLock::new(|| {
-    let mut m = HashMap::new();
-    m.insert("election", vec!["election", "vote", "president", "congress", "senate"]);
-    m.insert("hearing", vec!["hearing", "testimony", "committee"]);
-    m
-});
+static POLITICAL_KEYWORD_MAP: LazyLock<HashMap<&'static str, Vec<&'static str>>> =
+    LazyLock::new(|| {
+        let mut m = HashMap::new();
+        m.insert(
+            "election",
+            vec!["election", "vote", "president", "congress", "senate"],
+        );
+        m.insert("hearing", vec!["hearing", "testimony", "committee"]);
+        m
+    });
 
-static SPORTS_KEYWORD_MAP: LazyLock<HashMap<&'static str, Vec<&'static str>>> = LazyLock::new(|| {
-    let mut m = HashMap::new();
-    m.insert("super bowl", vec!["super bowl", "nfl", "football"]);
-    m.insert("nba finals", vec!["nba", "basketball", "finals"]);
-    m.insert("world cup", vec!["world cup", "fifa", "soccer"]);
-    m
-});
+static SPORTS_KEYWORD_MAP: LazyLock<HashMap<&'static str, Vec<&'static str>>> =
+    LazyLock::new(|| {
+        let mut m = HashMap::new();
+        m.insert("super bowl", vec!["super bowl", "nfl", "football"]);
+        m.insert("nba finals", vec!["nba", "basketball", "finals"]);
+        m.insert("world cup", vec!["world cup", "fifa", "soccer"]);
+        m
+    });
 
 /// Check whether a calendar event is relevant to a market question.
 fn event_matches_market(event: &CalendarEvent, lower_question: &str) -> bool {
@@ -267,7 +292,11 @@ fn parse_finnhub_response(body: &serde_json::Value) -> anyhow::Result<Vec<Calend
             continue;
         }
 
-        let title = item.get("event").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let title = item
+            .get("event")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if title.is_empty() {
             continue;
         }
@@ -306,18 +335,28 @@ fn parse_coinmarketcal_response(body: &serde_json::Value) -> anyhow::Result<Vec<
         .clone();
 
     for item in &body_arr {
-        let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let title = item
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if title.is_empty() {
             continue;
         }
 
-        let date_str = item.get("date_event").and_then(|v| v.as_str()).unwrap_or("");
+        let date_str = item
+            .get("date_event")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let event_time = match parse_datetime(date_str) {
             Some(t) => t,
             None => continue,
         };
 
-        let percentage = item.get("percentage").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let percentage = item
+            .get("percentage")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
         let impact = if percentage >= 80.0 {
             EventImpact::High
         } else if percentage >= 50.0 {
@@ -687,7 +726,9 @@ mod tests {
             });
         }
 
-        let mult = svc.position_multiplier("Will the interest rate increase?", Utc::now()).await;
+        let mult = svc
+            .position_multiplier("Will the interest rate increase?", Utc::now())
+            .await;
         assert_eq!(mult, dec!(0.25));
     }
 
@@ -709,7 +750,9 @@ mod tests {
             });
         }
 
-        let mult = svc.position_multiplier("Will inflation exceed 3%?", Utc::now()).await;
+        let mult = svc
+            .position_multiplier("Will inflation exceed 3%?", Utc::now())
+            .await;
         assert_eq!(mult, dec!(0.50));
     }
 
@@ -731,7 +774,9 @@ mod tests {
             });
         }
 
-        let mult = svc.position_multiplier("Will GDP growth exceed 2%?", Utc::now()).await;
+        let mult = svc
+            .position_multiplier("Will GDP growth exceed 2%?", Utc::now())
+            .await;
         assert_eq!(mult, dec!(0.75));
     }
 
@@ -764,7 +809,9 @@ mod tests {
         }
 
         // Both match — should take minimum (0.25 from High)
-        let mult = svc.position_multiplier("Will the interest rate change?", Utc::now()).await;
+        let mult = svc
+            .position_multiplier("Will the interest rate change?", Utc::now())
+            .await;
         assert_eq!(mult, dec!(0.25));
     }
 
@@ -789,11 +836,15 @@ mod tests {
         }
 
         // "federal reserve" is in the FOMC expanded keywords
-        let mult = svc.position_multiplier("Will the federal reserve cut rates?", Utc::now()).await;
+        let mult = svc
+            .position_multiplier("Will the federal reserve cut rates?", Utc::now())
+            .await;
         assert_eq!(mult, dec!(0.25));
 
         // Unrelated market should not match
-        let mult_no = svc.position_multiplier("Will it snow in NYC tomorrow?", Utc::now()).await;
+        let mult_no = svc
+            .position_multiplier("Will it snow in NYC tomorrow?", Utc::now())
+            .await;
         assert_eq!(mult_no, Decimal::ONE);
     }
 
@@ -817,7 +868,9 @@ mod tests {
         }
 
         // Political question — crypto event should not match
-        let mult = svc.position_multiplier("Will the president win the election?", Utc::now()).await;
+        let mult = svc
+            .position_multiplier("Will the president win the election?", Utc::now())
+            .await;
         assert_eq!(mult, Decimal::ONE);
     }
 }

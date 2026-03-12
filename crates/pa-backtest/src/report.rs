@@ -106,7 +106,10 @@ impl BacktestResult {
         let mut cumulative = Decimal::ZERO;
 
         for exec in executions {
-            if matches!(exec.status, ExecutionStatus::NoFill | ExecutionStatus::Failed) {
+            if matches!(
+                exec.status,
+                ExecutionStatus::NoFill | ExecutionStatus::Failed
+            ) {
                 continue;
             }
             cumulative += exec.realized_profit;
@@ -135,7 +138,10 @@ impl BacktestResult {
         let total_pnl: Decimal = filled.iter().map(|e| e.realized_profit).sum();
         let total_fees: Decimal = filled.iter().map(|e| e.total_fees).sum();
         let total_gas: Decimal = filled.iter().map(|e| e.total_gas).sum();
-        let win_count = filled.iter().filter(|e| e.realized_profit > Decimal::ZERO).count();
+        let win_count = filled
+            .iter()
+            .filter(|e| e.realized_profit > Decimal::ZERO)
+            .count();
         let loss_count = trade_count.saturating_sub(win_count);
 
         let win_rate = if trade_count > 0 {
@@ -162,7 +168,10 @@ impl BacktestResult {
         // Per-strategy breakdown (paired by index with strategy_types)
         let mut by_strategy: HashMap<StrategyType, StrategyStats> = HashMap::new();
         for (i, exec) in executions.iter().enumerate() {
-            if matches!(exec.status, ExecutionStatus::NoFill | ExecutionStatus::Failed) {
+            if matches!(
+                exec.status,
+                ExecutionStatus::NoFill | ExecutionStatus::Failed
+            ) {
                 continue;
             }
             if let Some(&st) = strategy_types.get(i) {

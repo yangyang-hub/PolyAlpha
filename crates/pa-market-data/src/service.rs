@@ -103,9 +103,9 @@ impl MarketDataFeed for MarketDataService {
     }
 
     async fn get_orderbook(&self, token_id: U256) -> pa_core::Result<OrderBook> {
-        self.cache
-            .get(&token_id)
-            .ok_or_else(|| pa_core::Error::MarketData(format!("No order book cached for token {token_id}")))
+        self.cache.get(&token_id).ok_or_else(|| {
+            pa_core::Error::MarketData(format!("No order book cached for token {token_id}"))
+        })
     }
 
     async fn discover_markets(&self) -> pa_core::Result<Vec<MarketInfo>> {

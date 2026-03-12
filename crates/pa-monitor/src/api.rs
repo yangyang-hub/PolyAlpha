@@ -7,12 +7,12 @@ use axum::{Router, routing::get};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
 use pa_core::config::Settings;
-use pa_storage::config_store::{ConfigStore, validate_section, extract_section};
+use pa_storage::config_store::{ConfigStore, extract_section, validate_section};
 
 use crate::health::HealthCheck;
 
@@ -83,8 +83,7 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
         .route("/metrics", get(metrics_handler))
         .merge(api_routes)
         .fallback_service(
-            ServeDir::new("frontend/dist")
-                .fallback(ServeFile::new("frontend/dist/index.html")),
+            ServeDir::new("frontend/dist").fallback(ServeFile::new("frontend/dist/index.html")),
         )
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -123,10 +122,7 @@ async fn health_handler(State(state): State<Arc<ApiState>>) -> Json<Value> {
         if !ok {
             all_ok = false;
         }
-        checks.insert(
-            name.to_string(),
-            json!(if ok { "ok" } else { "error" }),
-        );
+        checks.insert(name.to_string(), json!(if ok { "ok" } else { "error" }));
     }
 
     let status = if all_ok { "healthy" } else { "degraded" };
@@ -369,7 +365,10 @@ async fn get_positions(
 ) -> Json<Value> {
     let positions = state.positions.read().await;
     let filtered: Vec<&PositionApiEntry> = match &query.strategy {
-        Some(s) => positions.iter().filter(|p| p.strategy.as_deref() == Some(s.as_str())).collect(),
+        Some(s) => positions
+            .iter()
+            .filter(|p| p.strategy.as_deref() == Some(s.as_str()))
+            .collect(),
         None => positions.iter().collect(),
     };
     Json(serde_json::to_value(&filtered).unwrap_or(json!([])))

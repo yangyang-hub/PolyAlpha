@@ -3,11 +3,11 @@ use alloy::signers::local::PrivateKeySigner;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
-use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::auth::Normal;
-use polymarket_client_sdk::clob::types::{OrderType, Side, SignatureType};
+use polymarket_client_sdk::auth::state::Authenticated;
 use polymarket_client_sdk::clob::types::request::{BalanceAllowanceRequest, OrdersRequest};
 use polymarket_client_sdk::clob::types::response::PostOrderResponse;
+use polymarket_client_sdk::clob::types::{OrderType, Side, SignatureType};
 
 /// CLOB order executor using the Polymarket SDK.
 ///
@@ -33,7 +33,11 @@ impl ClobExecutor {
     /// * `host` - CLOB API host (e.g. "https://clob.polymarket.com")
     /// * `signer` - Local wallet signer with chain_id set (137 for Polygon)
     /// * `signature_type` - 0=EOA, 1=Proxy, 2=GnosisSafe
-    pub async fn connect(host: &str, signer: PrivateKeySigner, signature_type: u8) -> anyhow::Result<Self> {
+    pub async fn connect(
+        host: &str,
+        signer: PrivateKeySigner,
+        signature_type: u8,
+    ) -> anyhow::Result<Self> {
         let unauth_client = polymarket_client_sdk::clob::Client::new(
             host,
             polymarket_client_sdk::clob::Config::default(),
@@ -66,10 +70,7 @@ impl ClobExecutor {
     fn cost_precision_step(price: Decimal) -> (u64, u64, u64) {
         let scale = price.scale();
         let denom = 10u64.pow(scale);
-        let numer = (price * Decimal::from(denom))
-            .round()
-            .to_u64()
-            .unwrap_or(1);
+        let numer = (price * Decimal::from(denom)).round().to_u64().unwrap_or(1);
         if numer == 0 {
             return (1, 0, denom);
         }
@@ -98,10 +99,7 @@ impl ClobExecutor {
         }
 
         // Round S down to nearest multiple of s_step
-        let s_val = (size * Decimal::from(100u64))
-            .round()
-            .to_u64()
-            .unwrap_or(0);
+        let s_val = (size * Decimal::from(100u64)).round().to_u64().unwrap_or(0);
 
         if s_step == 0 || s_val < s_step {
             return Decimal::ZERO;
@@ -444,7 +442,10 @@ impl ClobExecutor {
     /// Check whether the given orders are currently scoring for liquidity rewards.
     ///
     /// Returns a map of order_id -> is_scoring. Uses the CLOB `are_orders_scoring` endpoint.
-    pub async fn are_orders_scoring(&self, order_ids: &[&str]) -> anyhow::Result<std::collections::HashMap<String, bool>> {
+    pub async fn are_orders_scoring(
+        &self,
+        order_ids: &[&str],
+    ) -> anyhow::Result<std::collections::HashMap<String, bool>> {
         let result = self.client.are_orders_scoring(order_ids).await?;
         Ok(result)
     }
@@ -453,12 +454,13 @@ impl ClobExecutor {
     ///
     /// Returns a summary of each order's status, useful for detecting fills on
     /// resting GTC orders.
-    pub async fn get_orders_by_market(&self, condition_id: B256) -> anyhow::Result<Vec<OpenOrderInfo>> {
+    pub async fn get_orders_by_market(
+        &self,
+        condition_id: B256,
+    ) -> anyhow::Result<Vec<OpenOrderInfo>> {
         use polymarket_client_sdk::clob::types::OrderStatusType;
 
-        let req = OrdersRequest::builder()
-            .market(condition_id)
-            .build();
+        let req = OrdersRequest::builder().market(condition_id).build();
 
         let mut all_orders = Vec::new();
         let mut cursor: Option<String> = None;
@@ -467,7 +469,10 @@ impl ClobExecutor {
             let page = self.client.orders(&req, cursor).await?;
 
             for o in &page.data {
-                let is_matched = matches!(o.status, OrderStatusType::Matched | OrderStatusType::Delayed);
+                let is_matched = matches!(
+                    o.status,
+                    OrderStatusType::Matched | OrderStatusType::Delayed
+                );
                 let is_buy = matches!(o.side, Side::Buy);
                 all_orders.push(OpenOrderInfo {
                     order_id: o.id.clone(),
@@ -538,7 +543,7 @@ impl ClobExecutor {
             tx_hashes: response.transaction_hashes,
         }
     }
-    
+
     /// Fetch current liquidity rewards from the CLOB API.
     ///
     /// Returns paginated results of markets with active rewards.
@@ -547,7 +552,11 @@ impl ClobExecutor {
     pub async fn current_rewards(
         &self,
         next_cursor: Option<String>,
-    ) -> anyhow::Result<polymarket_client_sdk::clob::types::response::Page<polymarket_client_sdk::clob::types::response::CurrentRewardResponse>> {
+    ) -> anyhow::Result<
+        polymarket_client_sdk::clob::types::response::Page<
+            polymarket_client_sdk::clob::types::response::CurrentRewardResponse,
+        >,
+    > {
         Ok(self.client.current_rewards(next_cursor).await?)
     }
 }
@@ -692,12 +701,17 @@ mod tests {
             assert!(
                 cost >= Decimal::ONE,
                 "price={} min_size={} cost={} < $1.00",
-                price, size, cost,
+                price,
+                size,
+                cost,
             );
             assert_eq!(
-                cost, cost.round_dp(2),
+                cost,
+                cost.round_dp(2),
                 "price={} min_size={} cost={} has >2dp",
-                price, size, cost,
+                price,
+                size,
+                cost,
             );
         }
     }
@@ -751,8 +765,18 @@ mod tests {
     #[test]
     fn test_min_cost_adjusted_size_validity() {
         // All common prices should produce valid costs
-        for price in [dec!(0.50), dec!(0.75), dec!(0.80), dec!(0.82), dec!(0.84),
-                      dec!(0.90), dec!(0.95), dec!(0.97), dec!(0.98), dec!(0.99)] {
+        for price in [
+            dec!(0.50),
+            dec!(0.75),
+            dec!(0.80),
+            dec!(0.82),
+            dec!(0.84),
+            dec!(0.90),
+            dec!(0.95),
+            dec!(0.97),
+            dec!(0.98),
+            dec!(0.99),
+        ] {
             assert_min_cost_valid(price);
         }
     }

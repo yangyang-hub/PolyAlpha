@@ -3,10 +3,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use alloy::primitives::U256;
-use rust_decimal::prelude::ToPrimitive;
 use async_trait::async_trait;
 use chrono::{Datelike, Local, NaiveDate, Utc};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -14,8 +14,7 @@ use uuid::Uuid;
 use pa_core::config::{ForecastErrorConfig, WeatherConfig};
 use pa_core::traits::Strategy;
 use pa_core::types::{
-    TradingOpportunity, ExecutionPlan, MarketInfo, NegRiskEvent, OrderBook, StrategyType,
-    TradeSide,
+    ExecutionPlan, MarketInfo, NegRiskEvent, OrderBook, StrategyType, TradeSide, TradingOpportunity,
 };
 
 use crate::profitability::ProfitCalculator;
@@ -78,17 +77,67 @@ pub fn sigma_for_metric(
 
 /// Known city names for location extraction.
 const KNOWN_CITIES: &[&str] = &[
-    "New York", "NYC", "Los Angeles", "LA", "Chicago", "Houston", "Phoenix",
-    "Philadelphia", "San Antonio", "San Diego", "Dallas", "San Jose",
-    "Austin", "Jacksonville", "Fort Worth", "Columbus", "Charlotte",
-    "Indianapolis", "San Francisco", "Seattle", "Denver", "Nashville",
-    "Oklahoma City", "El Paso", "Portland", "Las Vegas", "Memphis",
-    "Louisville", "Baltimore", "Milwaukee", "Albuquerque", "Tucson",
-    "Fresno", "Mesa", "Sacramento", "Atlanta", "Kansas City", "Omaha",
-    "Miami", "Minneapolis", "Tampa", "New Orleans", "Cleveland",
-    "London", "Paris", "Tokyo", "Berlin", "Sydney", "Toronto", "Mumbai",
-    "Beijing", "Shanghai", "Moscow", "Dubai", "Singapore", "Hong Kong",
-    "Rome", "Madrid", "Amsterdam", "Bangkok", "Seoul",
+    "New York",
+    "NYC",
+    "Los Angeles",
+    "LA",
+    "Chicago",
+    "Houston",
+    "Phoenix",
+    "Philadelphia",
+    "San Antonio",
+    "San Diego",
+    "Dallas",
+    "San Jose",
+    "Austin",
+    "Jacksonville",
+    "Fort Worth",
+    "Columbus",
+    "Charlotte",
+    "Indianapolis",
+    "San Francisco",
+    "Seattle",
+    "Denver",
+    "Nashville",
+    "Oklahoma City",
+    "El Paso",
+    "Portland",
+    "Las Vegas",
+    "Memphis",
+    "Louisville",
+    "Baltimore",
+    "Milwaukee",
+    "Albuquerque",
+    "Tucson",
+    "Fresno",
+    "Mesa",
+    "Sacramento",
+    "Atlanta",
+    "Kansas City",
+    "Omaha",
+    "Miami",
+    "Minneapolis",
+    "Tampa",
+    "New Orleans",
+    "Cleveland",
+    "London",
+    "Paris",
+    "Tokyo",
+    "Berlin",
+    "Sydney",
+    "Toronto",
+    "Mumbai",
+    "Beijing",
+    "Shanghai",
+    "Moscow",
+    "Dubai",
+    "Singapore",
+    "Hong Kong",
+    "Rome",
+    "Madrid",
+    "Amsterdam",
+    "Bangkok",
+    "Seoul",
 ];
 
 /// Check if `text` contains `word` as a whole word (not part of a larger word).
@@ -130,7 +179,10 @@ pub fn parse_weather_question(question: &str) -> Option<WeatherQuestion> {
     // Determine metric
     let metric = if lower.contains("snowfall") || contains_word(&lower, "snow") {
         WeatherMetric::Snowfall
-    } else if lower.contains("rainfall") || contains_word(&lower, "rain") || lower.contains("inches of rain") {
+    } else if lower.contains("rainfall")
+        || contains_word(&lower, "rain")
+        || lower.contains("inches of rain")
+    {
         WeatherMetric::Rainfall
     } else if lower.contains("wind speed") || contains_word(&lower, "wind") {
         WeatherMetric::WindSpeed
@@ -143,16 +195,17 @@ pub fn parse_weather_question(question: &str) -> Option<WeatherQuestion> {
     };
 
     // Determine comparison
-    let comparison = if lower.contains("below") || lower.contains("under") || lower.contains("less than") {
-        Comparison::Below
-    } else if lower.contains("at most") || lower.contains("no more than") {
-        Comparison::AtMost
-    } else if lower.contains("at least") || lower.contains("no less than") {
-        Comparison::AtLeast
-    } else {
-        // Default: "exceed", "above", "over", "reach", "hit"
-        Comparison::Above
-    };
+    let comparison =
+        if lower.contains("below") || lower.contains("under") || lower.contains("less than") {
+            Comparison::Below
+        } else if lower.contains("at most") || lower.contains("no more than") {
+            Comparison::AtMost
+        } else if lower.contains("at least") || lower.contains("no less than") {
+            Comparison::AtLeast
+        } else {
+            // Default: "exceed", "above", "over", "reach", "hit"
+            Comparison::Above
+        };
 
     // Extract numeric threshold
     let threshold = extract_number(&lower)?;
@@ -257,18 +310,29 @@ fn extract_location(question: &str) -> Option<String> {
 
 /// Month name lookup table for date parsing.
 const MONTHS: &[(&str, u32)] = &[
-    ("january", 1), ("jan", 1),
-    ("february", 2), ("feb", 2),
-    ("march", 3), ("mar", 3),
-    ("april", 4), ("apr", 4),
+    ("january", 1),
+    ("jan", 1),
+    ("february", 2),
+    ("feb", 2),
+    ("march", 3),
+    ("mar", 3),
+    ("april", 4),
+    ("apr", 4),
     ("may", 5),
-    ("june", 6), ("jun", 6),
-    ("july", 7), ("jul", 7),
-    ("august", 8), ("aug", 8),
-    ("september", 9), ("sep", 9),
-    ("october", 10), ("oct", 10),
-    ("november", 11), ("nov", 11),
-    ("december", 12), ("dec", 12),
+    ("june", 6),
+    ("jun", 6),
+    ("july", 7),
+    ("jul", 7),
+    ("august", 8),
+    ("aug", 8),
+    ("september", 9),
+    ("sep", 9),
+    ("october", 10),
+    ("oct", 10),
+    ("november", 11),
+    ("nov", 11),
+    ("december", 12),
+    ("dec", 12),
 ];
 
 /// Parse a target date from question/event text.
@@ -338,7 +402,8 @@ pub fn parse_target_date(text: &str) -> Option<NaiveDate> {
                             lower[m_start..m_end].parse::<u32>(),
                             lower[d_start..d_end].parse::<u32>(),
                         )
-                        && (1..=12).contains(&m) && (1..=31).contains(&d)
+                        && (1..=12).contains(&m)
+                        && (1..=31).contains(&d)
                     {
                         let year = today.year();
                         if let Some(date) = NaiveDate::from_ymd_opt(year, m, d) {
@@ -377,7 +442,9 @@ pub fn parse_target_date(text: &str) -> Option<NaiveDate> {
 /// Check if a month name appears in text with a preposition context.
 /// Avoids false matches like "may" (modal verb) in "temperatures may exceed".
 fn has_month_with_context(lower: &str, month_name: &str) -> bool {
-    for prefix in &["in ", "by ", "of ", "for ", "during ", "through ", "before ", "after ", "until "] {
+    for prefix in &[
+        "in ", "by ", "of ", "for ", "during ", "through ", "before ", "after ", "until ",
+    ] {
         let pattern = format!("{}{}", prefix, month_name);
         if lower.contains(&pattern) {
             return true;
@@ -426,7 +493,9 @@ fn celsius_to_fahrenheit(c: f64) -> f64 {
 fn is_temperature_metric(metric: WeatherMetric) -> bool {
     matches!(
         metric,
-        WeatherMetric::TemperatureMax | WeatherMetric::TemperatureMin | WeatherMetric::TemperatureAvg
+        WeatherMetric::TemperatureMax
+            | WeatherMetric::TemperatureMin
+            | WeatherMetric::TemperatureAvg
     )
 }
 
@@ -505,7 +574,9 @@ fn parse_dash_range(text: &str) -> Option<OutcomeRange> {
 
         while i < len {
             // Find start of first number
-            if bytes[i].is_ascii_digit() || (bytes[i] == b'-' && i + 1 < len && bytes[i + 1].is_ascii_digit()) {
+            if bytes[i].is_ascii_digit()
+                || (bytes[i] == b'-' && i + 1 < len && bytes[i + 1].is_ascii_digit())
+            {
                 let num1_start = i;
                 // Skip possible negative sign
                 if bytes[i] == b'-' {
@@ -628,7 +699,10 @@ pub fn parse_weather_event_title(title: &str) -> Option<(WeatherMetric, String)>
     // Determine metric (same logic as parse_weather_question)
     let metric = if lower.contains("snowfall") || contains_word(&lower, "snow") {
         WeatherMetric::Snowfall
-    } else if lower.contains("rainfall") || contains_word(&lower, "rain") || lower.contains("inches of rain") {
+    } else if lower.contains("rainfall")
+        || contains_word(&lower, "rain")
+        || lower.contains("inches of rain")
+    {
         WeatherMetric::Rainfall
     } else if lower.contains("wind speed") || contains_word(&lower, "wind") {
         WeatherMetric::WindSpeed
@@ -835,11 +909,14 @@ impl NoaaClient {
         // Cache the result
         {
             let mut cache = self.grid_cache.lock().unwrap();
-            cache.insert(cache_key, CachedGridPoint {
-                office: office.clone(),
-                grid_x,
-                grid_y,
-            });
+            cache.insert(
+                cache_key,
+                CachedGridPoint {
+                    office: office.clone(),
+                    grid_x,
+                    grid_y,
+                },
+            );
         }
 
         Ok((office, grid_x, grid_y))
@@ -893,9 +970,8 @@ impl NoaaClient {
             WeatherMetric::WindSpeed => resp.properties.wind_speed,
         };
 
-        let series = series.ok_or_else(|| {
-            anyhow::anyhow!("NOAA response missing data for metric {:?}", metric)
-        })?;
+        let series = series
+            .ok_or_else(|| anyhow::anyhow!("NOAA response missing data for metric {:?}", metric))?;
 
         // Group values by date, applying unit conversions
         let is_temp = is_temperature_metric(metric);
@@ -905,7 +981,9 @@ impl NoaaClient {
         let mut daily_values: HashMap<NaiveDate, Vec<f64>> = HashMap::new();
         for tv in &series.values {
             let Some(raw_val) = tv.value else { continue };
-            let Some(date) = parse_noaa_date(&tv.valid_time) else { continue };
+            let Some(date) = parse_noaa_date(&tv.valid_time) else {
+                continue;
+            };
 
             // Convert SI → US units
             let val = if is_temp {
@@ -934,11 +1012,19 @@ impl NoaaClient {
         for date in &sorted_dates {
             let day_vals = &daily_values[date];
             let agg = match metric {
-                WeatherMetric::TemperatureMax => day_vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-                WeatherMetric::TemperatureMin => day_vals.iter().copied().fold(f64::INFINITY, f64::min),
-                WeatherMetric::TemperatureAvg => day_vals.iter().sum::<f64>() / day_vals.len() as f64,
+                WeatherMetric::TemperatureMax => {
+                    day_vals.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+                }
+                WeatherMetric::TemperatureMin => {
+                    day_vals.iter().copied().fold(f64::INFINITY, f64::min)
+                }
+                WeatherMetric::TemperatureAvg => {
+                    day_vals.iter().sum::<f64>() / day_vals.len() as f64
+                }
                 WeatherMetric::Rainfall | WeatherMetric::Snowfall => day_vals.iter().sum::<f64>(),
-                WeatherMetric::WindSpeed => day_vals.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                WeatherMetric::WindSpeed => {
+                    day_vals.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+                }
             };
             values.push(agg);
             dates.push(date.format("%Y-%m-%d").to_string());
@@ -1122,7 +1208,8 @@ fn effective_sigma(forecast: &ForecastData, forecast_error_sigma: f64) -> f64 {
         (forecast_error_sigma.powi(2) + forecast.model_spread.powi(2)).sqrt()
     } else {
         // Multi-day: combine observed variance with forecast error and model spread
-        (forecast.std_dev.powi(2) + forecast_error_sigma.powi(2) + forecast.model_spread.powi(2)).sqrt()
+        (forecast.std_dev.powi(2) + forecast_error_sigma.powi(2) + forecast.model_spread.powi(2))
+            .sqrt()
     }
 }
 
@@ -1146,10 +1233,18 @@ pub fn model_probability(
     if sigma < 1e-10 {
         return match comparison {
             Comparison::Above | Comparison::AtLeast => {
-                if mean >= threshold { 1.0 } else { 0.0 }
+                if mean >= threshold {
+                    1.0
+                } else {
+                    0.0
+                }
             }
             Comparison::Below | Comparison::AtMost => {
-                if mean <= threshold { 1.0 } else { 0.0 }
+                if mean <= threshold {
+                    1.0
+                } else {
+                    0.0
+                }
             }
         };
     }
@@ -1207,7 +1302,12 @@ pub fn model_range_probability(
 /// - `|new_value - previous| > threshold * sigma`
 ///
 /// Returns `false` if the change is below the threshold.
-fn is_significant_change(new_value: f64, previous: Option<f64>, sigma: f64, threshold: f64) -> bool {
+fn is_significant_change(
+    new_value: f64,
+    previous: Option<f64>,
+    sigma: f64,
+    threshold: f64,
+) -> bool {
     match previous {
         None => true, // First observation is always fresh
         Some(prev) => {
@@ -1260,6 +1360,15 @@ pub struct WeatherAlphaStrategy {
     scan_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
+pub struct WeatherAlphaDeps {
+    pub get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
+    pub get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
+    pub get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
+    pub get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
+    pub get_balance: Box<dyn Fn() -> Decimal + Send + Sync>,
+    pub neg_risk_events: Vec<NegRiskEvent>,
+}
+
 impl WeatherAlphaStrategy {
     /// Convert a USDC budget into share size at a given token ask price.
     fn shares_from_usdc_budget(usdc_budget: Decimal, ask_price: Decimal) -> Decimal {
@@ -1269,16 +1378,16 @@ impl WeatherAlphaStrategy {
         usdc_budget / ask_price
     }
 
-    pub fn new(
-        config: WeatherConfig,
-        gas_cost_usd: Decimal,
-        get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
-        get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
-        get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
-        neg_risk_events: Vec<NegRiskEvent>,
-        get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
-        get_balance: Box<dyn Fn() -> Decimal + Send + Sync>,
-    ) -> Self {
+    pub fn new(config: WeatherConfig, gas_cost_usd: Decimal, deps: WeatherAlphaDeps) -> Self {
+        let WeatherAlphaDeps {
+            get_orderbook,
+            get_available_capital,
+            get_position,
+            get_held_positions,
+            get_balance,
+            neg_risk_events,
+        } = deps;
+
         let noaa = NoaaClient::new(&config.noaa_user_agent);
         Self {
             config,
@@ -1330,7 +1439,9 @@ impl WeatherAlphaStrategy {
                 if city_lower == "new york" {
                     loc_lower.contains("nyc") || loc_lower.contains("new york")
                 } else if city_lower == "los angeles" {
-                    loc_lower.contains("la ") || loc_lower == "la" || loc_lower.contains("los angeles")
+                    loc_lower.contains("la ")
+                        || loc_lower == "la"
+                        || loc_lower.contains("los angeles")
                 } else {
                     false
                 }
@@ -1385,20 +1496,27 @@ impl WeatherAlphaStrategy {
             };
 
             // Detect precipitation unit
-            let precipitation_unit = if matches!(parsed.metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
+            let precipitation_unit = if matches!(
+                parsed.metric,
+                WeatherMetric::Rainfall | WeatherMetric::Snowfall
+            ) {
                 detect_precipitation_unit(&market.question)
             } else {
                 "inch"
             };
 
             // Fetch actual historical data
-            let actual_value = match self.noaa.fetch_historical(
-                coords.0,
-                coords.1,
-                parsed.metric,
-                target_date,
-                precipitation_unit,
-            ).await {
+            let actual_value = match self
+                .noaa
+                .fetch_historical(
+                    coords.0,
+                    coords.1,
+                    parsed.metric,
+                    target_date,
+                    precipitation_unit,
+                )
+                .await
+            {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::debug!(
@@ -1460,7 +1578,7 @@ impl WeatherAlphaStrategy {
                         effective_max.min((self.get_available_capital)()),
                         yes_ask,
                     );
-                    
+
                     if size > Decimal::ZERO {
                         let est = self.profit_calc.directional_buy_profit(
                             yes_ask,
@@ -1501,7 +1619,7 @@ impl WeatherAlphaStrategy {
                         effective_max.min((self.get_available_capital)()),
                         no_ask,
                     );
-                    
+
                     if size > Decimal::ZERO {
                         let est = self.profit_calc.directional_buy_profit(
                             no_ask,
@@ -1564,13 +1682,17 @@ impl WeatherAlphaStrategy {
         }
 
         // Get forecast
-        let precipitation_unit = if matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
-            detect_precipitation_unit(&event.title)
-        } else {
-            "inch"
-        };
+        let precipitation_unit =
+            if matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
+                detect_precipitation_unit(&event.title)
+            } else {
+                "inch"
+            };
 
-        let forecast = match self.get_forecast_by_location(location, metric, Some(target_date), precipitation_unit).await {
+        let forecast = match self
+            .get_forecast_by_location(location, metric, Some(target_date), precipitation_unit)
+            .await
+        {
             Some((f, _)) => f,
             None => return opportunities,
         };
@@ -1597,7 +1719,12 @@ impl WeatherAlphaStrategy {
                 range
             };
 
-            let sigma = sigma_for_metric(&self.config.forecast_error, metric, Some((target_date - today).num_days()), self.config.dynamic_sigma);
+            let sigma = sigma_for_metric(
+                &self.config.forecast_error,
+                metric,
+                Some((target_date - today).num_days()),
+                self.config.dynamic_sigma,
+            );
             let prob_f64 = model_range_probability(&forecast, &range, sigma, metric);
             let model_prob = match Decimal::from_f64_retain(prob_f64) {
                 Some(d) => d,
@@ -1612,7 +1739,8 @@ impl WeatherAlphaStrategy {
         }
 
         // Find peak probability bin
-        let peak_prob = bin_evals.iter()
+        let peak_prob = bin_evals
+            .iter()
             .map(|(_, p, _)| *p)
             .fold(Decimal::ZERO, |a, b| a.max(b));
 
@@ -1712,9 +1840,6 @@ impl WeatherAlphaStrategy {
     // The exit logic already handles model reversal which effectively trims losing positions
     // when the forecast moves against them.
 
-
-    /// Get cached forecast or fetch new one.    }
-
     /// Get cached forecast or fetch new one.
     /// Returns (forecast, is_fresh_signal) where is_fresh_signal indicates a significant change.
     async fn get_forecast(
@@ -1752,7 +1877,13 @@ impl WeatherAlphaStrategy {
         // Fetch from NOAA
         let forecast = match self
             .noaa
-            .forecast(coords.0, coords.1, parsed.metric, target_date, precipitation_unit)
+            .forecast(
+                coords.0,
+                coords.1,
+                parsed.metric,
+                target_date,
+                precipitation_unit,
+            )
             .await
         {
             Ok(f) => f,
@@ -1772,12 +1903,8 @@ impl WeatherAlphaStrategy {
         let (previous_mean, is_fresh_signal) = {
             let cache = self.forecast_cache.lock().unwrap();
             let prev = cache.get(&key).and_then(|e| e.previous_mean);
-            let base_sigma = sigma_for_metric(
-                &self.config.forecast_error,
-                parsed.metric,
-                None,
-                false,
-            );
+            let base_sigma =
+                sigma_for_metric(&self.config.forecast_error, parsed.metric, None, false);
             let fresh = is_significant_change(
                 new_mean,
                 prev,
@@ -1813,7 +1940,10 @@ impl WeatherAlphaStrategy {
     ) -> Option<TradingOpportunity> {
         // Parse target date and precipitation unit from question
         let target_date = parse_target_date(&market.question);
-        let precipitation_unit = if matches!(parsed.metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
+        let precipitation_unit = if matches!(
+            parsed.metric,
+            WeatherMetric::Rainfall | WeatherMetric::Snowfall
+        ) {
             detect_precipitation_unit(&market.question)
         } else {
             "inch"
@@ -1828,9 +1958,7 @@ impl WeatherAlphaStrategy {
             return None;
         }
 
-        let days_to_event = target_date.map(|d| {
-            (d - Local::now().date_naive()).num_days()
-        });
+        let days_to_event = target_date.map(|d| (d - Local::now().date_naive()).num_days());
         let forecast_error_sigma = sigma_for_metric(
             &self.config.forecast_error,
             parsed.metric,
@@ -1838,11 +1966,12 @@ impl WeatherAlphaStrategy {
             self.config.dynamic_sigma,
         );
         // Convert °C threshold to °F since forecast is always in Fahrenheit
-        let threshold = if is_temperature_metric(parsed.metric) && is_celsius_market(&market.question) {
-            celsius_to_fahrenheit(parsed.threshold)
-        } else {
-            parsed.threshold
-        };
+        let threshold =
+            if is_temperature_metric(parsed.metric) && is_celsius_market(&market.question) {
+                celsius_to_fahrenheit(parsed.threshold)
+            } else {
+                parsed.threshold
+            };
         let model_prob = model_probability(
             &forecast,
             threshold,
@@ -2051,12 +2180,7 @@ impl WeatherAlphaStrategy {
         let (previous_mean, is_fresh_signal) = {
             let cache = self.forecast_cache.lock().unwrap();
             let prev = cache.get(&cache_key).and_then(|e| e.previous_mean);
-            let base_sigma = sigma_for_metric(
-                &self.config.forecast_error,
-                metric,
-                None,
-                false,
-            );
+            let base_sigma = sigma_for_metric(&self.config.forecast_error, metric, None, false);
             let fresh = is_significant_change(
                 new_mean,
                 prev,
@@ -2095,11 +2219,12 @@ impl WeatherAlphaStrategy {
     ) -> Option<TradingOpportunity> {
         // Parse target date and precipitation unit from event title
         let target_date = parse_target_date(&event.title);
-        let precipitation_unit = if matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
-            detect_precipitation_unit(&event.title)
-        } else {
-            "inch"
-        };
+        let precipitation_unit =
+            if matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
+                detect_precipitation_unit(&event.title)
+            } else {
+                "inch"
+            };
 
         let (forecast, is_fresh) = self
             .get_forecast_by_location(location, metric, target_date, precipitation_unit)
@@ -2110,9 +2235,7 @@ impl WeatherAlphaStrategy {
             return None;
         }
 
-        let days_to_event = target_date.map(|d| {
-            (d - Local::now().date_naive()).num_days()
-        });
+        let days_to_event = target_date.map(|d| (d - Local::now().date_naive()).num_days());
         let forecast_error_sigma = sigma_for_metric(
             &self.config.forecast_error,
             metric,
@@ -2124,10 +2247,10 @@ impl WeatherAlphaStrategy {
         let mut best_edge = Decimal::ZERO;
         let mut best_candidate: Option<(
             &MarketInfo,
-            U256,       // token_id
-            Decimal,    // ask_price
-            Decimal,    // model_prob (effective for this side)
-            Decimal,    // edge
+            U256,    // token_id
+            Decimal, // ask_price
+            Decimal, // model_prob (effective for this side)
+            Decimal, // edge
         )> = None;
 
         for market in &event.markets {
@@ -2178,36 +2301,36 @@ impl WeatherAlphaStrategy {
 
             // Check bid-ask spread before evaluating edge
             let mut skip_market = false;
-            if let Some(ref yb) = yes_book {
-                if let (Some(ask), Some(bid)) = (yb.best_ask(), yb.best_bid()) {
-                    let spread = if ask.price > Decimal::ZERO {
-                        (ask.price - bid.price) / ask.price
-                    } else {
-                        Decimal::ONE
-                    };
-                    let spread_bps = {
-                        use rust_decimal::prelude::ToPrimitive;
-                        (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
-                    };
-                    if spread_bps > self.config.max_spread_bps {
-                        skip_market = true;
-                    }
+            if let Some(ref yb) = yes_book
+                && let (Some(ask), Some(bid)) = (yb.best_ask(), yb.best_bid())
+            {
+                let spread = if ask.price > Decimal::ZERO {
+                    (ask.price - bid.price) / ask.price
+                } else {
+                    Decimal::ONE
+                };
+                let spread_bps = {
+                    use rust_decimal::prelude::ToPrimitive;
+                    (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
+                };
+                if spread_bps > self.config.max_spread_bps {
+                    skip_market = true;
                 }
             }
-            if let Some(ref nb) = no_book {
-                if let (Some(ask), Some(bid)) = (nb.best_ask(), nb.best_bid()) {
-                    let spread = if ask.price > Decimal::ZERO {
-                        (ask.price - bid.price) / ask.price
-                    } else {
-                        Decimal::ONE
-                    };
-                    let spread_bps = {
-                        use rust_decimal::prelude::ToPrimitive;
-                        (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
-                    };
-                    if spread_bps > self.config.max_spread_bps {
-                        skip_market = true;
-                    }
+            if let Some(ref nb) = no_book
+                && let (Some(ask), Some(bid)) = (nb.best_ask(), nb.best_bid())
+            {
+                let spread = if ask.price > Decimal::ZERO {
+                    (ask.price - bid.price) / ask.price
+                } else {
+                    Decimal::ONE
+                };
+                let spread_bps = {
+                    use rust_decimal::prelude::ToPrimitive;
+                    (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
+                };
+                if spread_bps > self.config.max_spread_bps {
+                    skip_market = true;
                 }
             }
 
@@ -2329,10 +2452,7 @@ impl WeatherAlphaStrategy {
             return vec![];
         }
 
-        tracing::debug!(
-            held_positions = held.len(),
-            "[Weather] scanning exits"
-        );
+        tracing::debug!(held_positions = held.len(), "[Weather] scanning exits");
 
         // Build reverse map: token_id → market
         let token_to_market: std::collections::HashMap<U256, &MarketInfo> = markets
@@ -2367,7 +2487,13 @@ impl WeatherAlphaStrategy {
                     threshold = %self.config.profit_take_threshold,
                     "[EXIT] Profit take — weather"
                 );
-                exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
+                exits.push(self.build_exit_opportunity(
+                    *token_id,
+                    *size,
+                    *avg_cost,
+                    best_bid,
+                    &token_to_market,
+                ));
                 continue;
             }
 
@@ -2378,7 +2504,13 @@ impl WeatherAlphaStrategy {
                     best_bid = %best_bid,
                     "[EXIT] Capital efficiency — weather"
                 );
-                exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
+                exits.push(self.build_exit_opportunity(
+                    *token_id,
+                    *size,
+                    *avg_cost,
+                    best_bid,
+                    &token_to_market,
+                ));
                 continue;
             }
 
@@ -2396,7 +2528,13 @@ impl WeatherAlphaStrategy {
                     loss_pct = %loss_pct,
                     "[EXIT] Deep loss detected — weather position lost >= 50%"
                 );
-                exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
+                exits.push(self.build_exit_opportunity(
+                    *token_id,
+                    *size,
+                    *avg_cost,
+                    best_bid,
+                    &token_to_market,
+                ));
                 continue;
             }
 
@@ -2416,7 +2554,9 @@ impl WeatherAlphaStrategy {
             // For NegRisk outcomes (e.g. "36-37°F"), parse_weather_question fails because
             // there's no city name. Use parse_weather_event_title on the event title instead.
             // For binary markets, parse_weather_question gives threshold + comparison too.
-            let (location, metric, target_date, precipitation_unit, binary_parsed) = if market.neg_risk {
+            let (location, metric, target_date, precipitation_unit, binary_parsed) = if market
+                .neg_risk
+            {
                 let event_title = match &market.event_title {
                     Some(t) => t.as_str(),
                     None => {
@@ -2432,11 +2572,12 @@ impl WeatherAlphaStrategy {
                     }
                 };
                 let target_date = parse_target_date(event_title);
-                let precipitation_unit = if matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
-                    detect_precipitation_unit(event_title)
-                } else {
-                    "inch"
-                };
+                let precipitation_unit =
+                    if matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
+                        detect_precipitation_unit(event_title)
+                    } else {
+                        "inch"
+                    };
                 (location, metric, target_date, precipitation_unit, None)
             } else {
                 let parsed = match parse_weather_question(&market.question) {
@@ -2447,7 +2588,10 @@ impl WeatherAlphaStrategy {
                     }
                 };
                 let target_date = parse_target_date(&market.question);
-                let precipitation_unit = if matches!(parsed.metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
+                let precipitation_unit = if matches!(
+                    parsed.metric,
+                    WeatherMetric::Rainfall | WeatherMetric::Snowfall
+                ) {
                     detect_precipitation_unit(&market.question)
                 } else {
                     "inch"
@@ -2487,9 +2631,7 @@ impl WeatherAlphaStrategy {
                 }
             };
 
-            let days_to_event = target_date.map(|d| {
-                (d - Local::now().date_naive()).num_days()
-            });
+            let days_to_event = target_date.map(|d| (d - Local::now().date_naive()).num_days());
             let forecast_error_sigma = sigma_for_metric(
                 &self.config.forecast_error,
                 metric,
@@ -2500,14 +2642,15 @@ impl WeatherAlphaStrategy {
             // For NegRisk outcomes (ranges), use model_range_probability instead of model_probability
             let model_prob = if market.neg_risk {
                 if let Some(range) = parse_outcome_range(&market.question) {
-                    let range = if is_temperature_metric(metric) && is_celsius_market(&market.question) {
-                        OutcomeRange {
-                            lower: range.lower.map(celsius_to_fahrenheit),
-                            upper: range.upper.map(celsius_to_fahrenheit),
-                        }
-                    } else {
-                        range
-                    };
+                    let range =
+                        if is_temperature_metric(metric) && is_celsius_market(&market.question) {
+                            OutcomeRange {
+                                lower: range.lower.map(celsius_to_fahrenheit),
+                                upper: range.upper.map(celsius_to_fahrenheit),
+                            }
+                        } else {
+                            range
+                        };
                     model_range_probability(&forecast, &range, forecast_error_sigma, metric)
                 } else {
                     // NegRisk outcome couldn't be parsed as range — skip
@@ -2518,11 +2661,12 @@ impl WeatherAlphaStrategy {
                     Some(p) => p,
                     None => continue,
                 };
-                let threshold = if is_temperature_metric(metric) && is_celsius_market(&market.question) {
-                    celsius_to_fahrenheit(parsed.threshold)
-                } else {
-                    parsed.threshold
-                };
+                let threshold =
+                    if is_temperature_metric(metric) && is_celsius_market(&market.question) {
+                        celsius_to_fahrenheit(parsed.threshold)
+                    } else {
+                        parsed.threshold
+                    };
                 model_probability(
                     &forecast,
                     threshold,
@@ -2537,8 +2681,16 @@ impl WeatherAlphaStrategy {
             };
 
             // Determine which side we hold: check if this token is YES or NO
-            let is_yes = market.tokens.first().map(|t| t.token_id == *token_id).unwrap_or(false);
-            let effective_prob = if is_yes { model_prob_dec } else { Decimal::ONE - model_prob_dec };
+            let is_yes = market
+                .tokens
+                .first()
+                .map(|t| t.token_id == *token_id)
+                .unwrap_or(false);
+            let effective_prob = if is_yes {
+                model_prob_dec
+            } else {
+                Decimal::ONE - model_prob_dec
+            };
 
             if effective_prob < best_bid - exit_buffer {
                 tracing::debug!(
@@ -2547,7 +2699,13 @@ impl WeatherAlphaStrategy {
                     best_bid = %best_bid,
                     "[EXIT] Model reversal — weather"
                 );
-                exits.push(self.build_exit_opportunity(*token_id, *size, *avg_cost, best_bid, &token_to_market));
+                exits.push(self.build_exit_opportunity(
+                    *token_id,
+                    *size,
+                    *avg_cost,
+                    best_bid,
+                    &token_to_market,
+                ));
             } else {
                 tracing::debug!(
                     token_id = %token_id,
@@ -2577,7 +2735,9 @@ impl WeatherAlphaStrategy {
         let question = market.map(|m| m.question.clone()).unwrap_or_default();
         let fee_rate_bps = market.map(|m| m.fee_rate_bps).unwrap_or(200);
 
-        let est = self.profit_calc.directional_sell_profit(best_bid, avg_cost, size, fee_rate_bps);
+        let est = self
+            .profit_calc
+            .directional_sell_profit(best_bid, avg_cost, size, fee_rate_bps);
 
         TradingOpportunity {
             id: Uuid::now_v7(),
@@ -2609,13 +2769,12 @@ impl Strategy for WeatherAlphaStrategy {
         StrategyType::Weather
     }
 
-    async fn scan(
-        &self,
-        markets: &[MarketInfo],
-    ) -> pa_core::Result<Vec<TradingOpportunity>> {
+    async fn scan(&self, markets: &[MarketInfo]) -> pa_core::Result<Vec<TradingOpportunity>> {
         let mut opportunities = Vec::new();
-        let count = self.scan_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let log_diag = count % 600 == 0;
+        let count = self
+            .scan_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let log_diag = count.is_multiple_of(600);
 
         let mut binary_weather = 0u32;
         let mut neg_risk_weather = 0u32;
@@ -2688,7 +2847,9 @@ impl Strategy for WeatherAlphaStrategy {
                 if !self.is_target_city(&location) {
                     continue;
                 }
-                let opps = self.detect_neg_risk_surround(event, metric, &location).await;
+                let opps = self
+                    .detect_neg_risk_surround(event, metric, &location)
+                    .await;
                 if !opps.is_empty() {
                     surround_count += opps.len() as u32;
                     opportunities.extend(opps);
@@ -2705,7 +2866,6 @@ impl Strategy for WeatherAlphaStrategy {
 
         // Note: Dynamic trimming is handled through the scan_exits function
         // which detects model reversals for NegRisk positions.
-
 
         Ok(opportunities)
     }
@@ -2808,13 +2968,23 @@ mod tests {
         // z = (100-95)/5 = 1.0, P(X>100) = 1 - CDF(1.0) ≈ 0.159
         let forecast = ForecastData {
             values: vec![90.0, 95.0, 100.0],
-            dates: vec!["2025-07-01".into(), "2025-07-02".into(), "2025-07-03".into()],
+            dates: vec![
+                "2025-07-01".into(),
+                "2025-07-02".into(),
+                "2025-07-03".into(),
+            ],
             mean: 95.0,
             std_dev: 5.0,
             target_value: None,
             model_spread: 0.0,
         };
-        let prob = model_probability(&forecast, 100.0, Comparison::Above, 0.0, WeatherMetric::TemperatureMax);
+        let prob = model_probability(
+            &forecast,
+            100.0,
+            Comparison::Above,
+            0.0,
+            WeatherMetric::TemperatureMax,
+        );
         assert!(
             (prob - 0.159).abs() < 0.01,
             "P(X>100) = {}, expected ~0.159",
@@ -2828,13 +2998,23 @@ mod tests {
         // P(X<100) = CDF(1.0) ≈ 0.841
         let forecast = ForecastData {
             values: vec![90.0, 95.0, 100.0],
-            dates: vec!["2025-07-01".into(), "2025-07-02".into(), "2025-07-03".into()],
+            dates: vec![
+                "2025-07-01".into(),
+                "2025-07-02".into(),
+                "2025-07-03".into(),
+            ],
             mean: 95.0,
             std_dev: 5.0,
             target_value: None,
             model_spread: 0.0,
         };
-        let prob = model_probability(&forecast, 100.0, Comparison::Below, 0.0, WeatherMetric::TemperatureMax);
+        let prob = model_probability(
+            &forecast,
+            100.0,
+            Comparison::Below,
+            0.0,
+            WeatherMetric::TemperatureMax,
+        );
         assert!(
             (prob - 0.841).abs() < 0.01,
             "P(X<100) = {}, expected ~0.841",
@@ -2853,8 +3033,20 @@ mod tests {
             target_value: None,
             model_spread: 0.0,
         };
-        let prob_no_extra = model_probability(&forecast, 100.0, Comparison::Above, 0.0, WeatherMetric::TemperatureMax);
-        let prob_with_extra = model_probability(&forecast, 100.0, Comparison::Above, 3.0, WeatherMetric::TemperatureMax);
+        let prob_no_extra = model_probability(
+            &forecast,
+            100.0,
+            Comparison::Above,
+            0.0,
+            WeatherMetric::TemperatureMax,
+        );
+        let prob_with_extra = model_probability(
+            &forecast,
+            100.0,
+            Comparison::Above,
+            3.0,
+            WeatherMetric::TemperatureMax,
+        );
         // With extra forecast error, probability should be higher (closer to 0.5)
         assert!(
             prob_with_extra > prob_no_extra,
@@ -2869,7 +3061,7 @@ mod tests {
         // Setup: market has YES@0.30 but model says P=0.60
         // This should produce a detectable edge
         let config = WeatherConfig {
-            min_edge_bps: 500, // 5%
+            min_edge_bps: 500,    // 5%
             max_spread_bps: 1200, // 12%
             max_position_pct: dec!(0.50),
             kelly_fraction: dec!(0.25),
@@ -2898,7 +3090,12 @@ mod tests {
         let edge_bps_dec = edge * dec!(10000);
         use rust_decimal::prelude::ToPrimitive;
         let edge_bps = edge_bps_dec.to_u32().unwrap_or(0);
-        assert!(edge_bps >= config.min_edge_bps, "edge_bps={} >= min={}", edge_bps, config.min_edge_bps);
+        assert!(
+            edge_bps >= config.min_edge_bps,
+            "edge_bps={} >= min={}",
+            edge_bps,
+            config.min_edge_bps
+        );
     }
 
     // ──── OutcomeRange Parser Tests ────
@@ -2996,14 +3193,35 @@ mod tests {
             target_value: None,
             model_spread: 0.0,
         };
-        let ranges = vec![
-            OutcomeRange { lower: None, upper: Some(35.0) },          // ≤35
-            OutcomeRange { lower: Some(35.0), upper: Some(37.0) },    // 35-37
-            OutcomeRange { lower: Some(37.0), upper: Some(39.0) },    // 37-39
-            OutcomeRange { lower: Some(39.0), upper: Some(41.0) },    // 39-41
-            OutcomeRange { lower: Some(41.0), upper: Some(43.0) },    // 41-43
-            OutcomeRange { lower: Some(43.0), upper: Some(45.0) },    // 43-45
-            OutcomeRange { lower: Some(45.0), upper: None },          // ≥45
+        let ranges = [
+            OutcomeRange {
+                lower: None,
+                upper: Some(35.0),
+            }, // ≤35
+            OutcomeRange {
+                lower: Some(35.0),
+                upper: Some(37.0),
+            }, // 35-37
+            OutcomeRange {
+                lower: Some(37.0),
+                upper: Some(39.0),
+            }, // 37-39
+            OutcomeRange {
+                lower: Some(39.0),
+                upper: Some(41.0),
+            }, // 39-41
+            OutcomeRange {
+                lower: Some(41.0),
+                upper: Some(43.0),
+            }, // 41-43
+            OutcomeRange {
+                lower: Some(43.0),
+                upper: Some(45.0),
+            }, // 43-45
+            OutcomeRange {
+                lower: Some(45.0),
+                upper: None,
+            }, // ≥45
         ];
         let total: f64 = ranges
             .iter()
@@ -3100,7 +3318,10 @@ mod tests {
     fn test_parse_target_date_may_modal_verb() {
         // "may" as a modal verb should NOT be parsed as the month May
         let date = parse_target_date("Will temperatures may exceed 100°F this summer?");
-        assert!(date.is_none(), "Modal verb 'may' should not match as month May");
+        assert!(
+            date.is_none(),
+            "Modal verb 'may' should not match as month May"
+        );
     }
 
     #[test]
@@ -3182,7 +3403,11 @@ mod tests {
     fn test_weibull_cdf_large() {
         // Very large value should have CDF near 1
         let cdf = weibull_cdf(100.0, 10.0, 0.0);
-        assert!(cdf > 0.99, "Weibull CDF at 10x mean should be near 1, got {}", cdf);
+        assert!(
+            cdf > 0.99,
+            "Weibull CDF at 10x mean should be near 1, got {}",
+            cdf
+        );
     }
 
     // ──── CDF Zero-Mean Edge Case Tests ────
@@ -3201,9 +3426,9 @@ mod tests {
     #[test]
     fn test_lognormal_cdf_zero_sigma_point_mass() {
         // sigma=0 with positive mean: point mass at mean
-        assert_eq!(lognormal_cdf(5.0, 3.0, 0.0), 1.0);  // t > mean
-        assert_eq!(lognormal_cdf(3.0, 3.0, 0.0), 1.0);  // t == mean
-        assert_eq!(lognormal_cdf(1.0, 3.0, 0.0), 0.0);  // t < mean
+        assert_eq!(lognormal_cdf(5.0, 3.0, 0.0), 1.0); // t > mean
+        assert_eq!(lognormal_cdf(3.0, 3.0, 0.0), 1.0); // t == mean
+        assert_eq!(lognormal_cdf(1.0, 3.0, 0.0), 0.0); // t < mean
     }
 
     #[test]
@@ -3244,7 +3469,9 @@ mod tests {
 
     #[test]
     fn test_is_celsius_market() {
-        assert!(is_celsius_market("Will the highest temperature in Wellington be 23°C or higher?"));
+        assert!(is_celsius_market(
+            "Will the highest temperature in Wellington be 23°C or higher?"
+        ));
         assert!(is_celsius_market("between 10-12°C"));
         assert!(is_celsius_market("temperature will exceed 30 Celsius"));
         assert!(!is_celsius_market("Will the highest temperature be 84°F?"));
@@ -3265,9 +3492,18 @@ mod tests {
         // CDF(value) = P(X <= value). For point mass at mean (sigma → 0):
         // P(X <= 80) = 1.0 when mean=70 (mass is below threshold)
         // P(X <= 60) = 0.0 when mean=70 (mass is above threshold)
-        assert_eq!(cdf_for_metric(WeatherMetric::TemperatureMax, 80.0, 70.0, 0.0), 1.0);
-        assert_eq!(cdf_for_metric(WeatherMetric::TemperatureMax, 60.0, 70.0, 0.0), 0.0);
-        assert_eq!(cdf_for_metric(WeatherMetric::TemperatureMax, 70.0, 70.0, 0.0), 1.0); // at mean
+        assert_eq!(
+            cdf_for_metric(WeatherMetric::TemperatureMax, 80.0, 70.0, 0.0),
+            1.0
+        );
+        assert_eq!(
+            cdf_for_metric(WeatherMetric::TemperatureMax, 60.0, 70.0, 0.0),
+            0.0
+        );
+        assert_eq!(
+            cdf_for_metric(WeatherMetric::TemperatureMax, 70.0, 70.0, 0.0),
+            1.0
+        ); // at mean
     }
 
     #[test]
@@ -3286,12 +3522,28 @@ mod tests {
         let sigma = 3.0;
 
         // Incorrect: using raw Celsius threshold
-        let prob_wrong = model_probability(&forecast, 23.0, Comparison::AtLeast, sigma, WeatherMetric::TemperatureMax);
-        assert!(prob_wrong > 0.99, "Without conversion prob should be ~1.0, got {}", prob_wrong);
+        let prob_wrong = model_probability(
+            &forecast,
+            23.0,
+            Comparison::AtLeast,
+            sigma,
+            WeatherMetric::TemperatureMax,
+        );
+        assert!(
+            prob_wrong > 0.99,
+            "Without conversion prob should be ~1.0, got {}",
+            prob_wrong
+        );
 
         // Correct: convert 23°C to 73.4°F
         let threshold_f = celsius_to_fahrenheit(23.0);
-        let prob_correct = model_probability(&forecast, threshold_f, Comparison::AtLeast, sigma, WeatherMetric::TemperatureMax);
+        let prob_correct = model_probability(
+            &forecast,
+            threshold_f,
+            Comparison::AtLeast,
+            sigma,
+            WeatherMetric::TemperatureMax,
+        );
         assert!(
             prob_correct < 0.40,
             "With conversion prob should be ~0.26, got {}",
@@ -3310,12 +3562,30 @@ mod tests {
             wind_sigma_mph: 5.0,
         };
         // Without dynamic sigma, returns base values
-        assert_eq!(sigma_for_metric(&config, WeatherMetric::TemperatureMax, None, false), 3.0);
-        assert_eq!(sigma_for_metric(&config, WeatherMetric::TemperatureMin, None, false), 3.0);
-        assert_eq!(sigma_for_metric(&config, WeatherMetric::TemperatureAvg, None, false), 3.0);
-        assert_eq!(sigma_for_metric(&config, WeatherMetric::Rainfall, None, false), 0.3);
-        assert_eq!(sigma_for_metric(&config, WeatherMetric::Snowfall, None, false), 2.0);
-        assert_eq!(sigma_for_metric(&config, WeatherMetric::WindSpeed, None, false), 5.0);
+        assert_eq!(
+            sigma_for_metric(&config, WeatherMetric::TemperatureMax, None, false),
+            3.0
+        );
+        assert_eq!(
+            sigma_for_metric(&config, WeatherMetric::TemperatureMin, None, false),
+            3.0
+        );
+        assert_eq!(
+            sigma_for_metric(&config, WeatherMetric::TemperatureAvg, None, false),
+            3.0
+        );
+        assert_eq!(
+            sigma_for_metric(&config, WeatherMetric::Rainfall, None, false),
+            0.3
+        );
+        assert_eq!(
+            sigma_for_metric(&config, WeatherMetric::Snowfall, None, false),
+            2.0
+        );
+        assert_eq!(
+            sigma_for_metric(&config, WeatherMetric::WindSpeed, None, false),
+            5.0
+        );
     }
 
     // ──── Dynamic Sigma Tests ────
@@ -3325,7 +3595,11 @@ mod tests {
         let config = ForecastErrorConfig::default(); // temp=3.0
         // sqrt(1) = 1.0 → 3.0 * 1.0 = 3.0
         let sigma = sigma_for_metric(&config, WeatherMetric::TemperatureMax, Some(1), true);
-        assert!((sigma - 3.0).abs() < 1e-6, "1-day sigma = {}, expected 3.0", sigma);
+        assert!(
+            (sigma - 3.0).abs() < 1e-6,
+            "1-day sigma = {}, expected 3.0",
+            sigma
+        );
     }
 
     #[test]
@@ -3333,7 +3607,11 @@ mod tests {
         let config = ForecastErrorConfig::default(); // temp=3.0
         // sqrt(4) = 2.0 → 3.0 * 2.0 = 6.0
         let sigma = sigma_for_metric(&config, WeatherMetric::TemperatureMax, Some(4), true);
-        assert!((sigma - 6.0).abs() < 1e-6, "4-day sigma = {}, expected 6.0", sigma);
+        assert!(
+            (sigma - 6.0).abs() < 1e-6,
+            "4-day sigma = {}, expected 6.0",
+            sigma
+        );
     }
 
     #[test]
@@ -3341,7 +3619,11 @@ mod tests {
         let config = ForecastErrorConfig::default(); // temp=3.0
         // sqrt(9) = 3.0 → 3.0 * 3.0 = 9.0
         let sigma = sigma_for_metric(&config, WeatherMetric::TemperatureMax, Some(9), true);
-        assert!((sigma - 9.0).abs() < 1e-6, "9-day sigma = {}, expected 9.0", sigma);
+        assert!(
+            (sigma - 9.0).abs() < 1e-6,
+            "9-day sigma = {}, expected 9.0",
+            sigma
+        );
     }
 
     #[test]
@@ -3349,7 +3631,11 @@ mod tests {
         let config = ForecastErrorConfig::default(); // temp=3.0
         // dynamic_sigma=false → always returns base regardless of days
         let sigma = sigma_for_metric(&config, WeatherMetric::TemperatureMax, Some(9), false);
-        assert!((sigma - 3.0).abs() < 1e-6, "disabled sigma = {}, expected 3.0", sigma);
+        assert!(
+            (sigma - 3.0).abs() < 1e-6,
+            "disabled sigma = {}, expected 3.0",
+            sigma
+        );
     }
 
     #[test]
@@ -3357,15 +3643,27 @@ mod tests {
         let config = ForecastErrorConfig::default(); // temp=3.0
         // None → defaults to 1 day → sqrt(1) = 1.0 → 3.0
         let sigma_none = sigma_for_metric(&config, WeatherMetric::TemperatureMax, None, true);
-        assert!((sigma_none - 3.0).abs() < 1e-6, "None sigma = {}, expected 3.0", sigma_none);
+        assert!(
+            (sigma_none - 3.0).abs() < 1e-6,
+            "None sigma = {}, expected 3.0",
+            sigma_none
+        );
 
         // 0 days → clamped to 1 → sqrt(1) = 1.0 → 3.0
         let sigma_zero = sigma_for_metric(&config, WeatherMetric::TemperatureMax, Some(0), true);
-        assert!((sigma_zero - 3.0).abs() < 1e-6, "0-day sigma = {}, expected 3.0", sigma_zero);
+        assert!(
+            (sigma_zero - 3.0).abs() < 1e-6,
+            "0-day sigma = {}, expected 3.0",
+            sigma_zero
+        );
 
         // Negative days → clamped to 1 → sqrt(1) = 1.0 → 3.0
         let sigma_neg = sigma_for_metric(&config, WeatherMetric::TemperatureMax, Some(-2), true);
-        assert!((sigma_neg - 3.0).abs() < 1e-6, "negative sigma = {}, expected 3.0", sigma_neg);
+        assert!(
+            (sigma_neg - 3.0).abs() < 1e-6,
+            "negative sigma = {}, expected 3.0",
+            sigma_neg
+        );
     }
 
     #[test]
@@ -3375,12 +3673,15 @@ mod tests {
             values: vec![95.0],
             dates: vec!["2025-07-01".into()],
             mean: 95.0,
-            std_dev: 0.0,   // Single day → no variance
+            std_dev: 0.0,             // Single day → no variance
             target_value: Some(95.0), // Date-specific
             model_spread: 0.0,
         };
         let sigma = effective_sigma(&forecast, 3.0);
-        assert_eq!(sigma, 3.0, "Date-specific sigma should equal forecast error only");
+        assert_eq!(
+            sigma, 3.0,
+            "Date-specific sigma should equal forecast error only"
+        );
 
         // Multi-day forecast combines both
         let multi_forecast = ForecastData {
@@ -3416,7 +3717,11 @@ mod tests {
         };
         let sigma = effective_sigma(&forecast, 3.0);
         // sqrt(9 + 16) = sqrt(25) = 5.0
-        assert!((sigma - 5.0).abs() < 1e-6, "sigma = {}, expected 5.0", sigma);
+        assert!(
+            (sigma - 5.0).abs() < 1e-6,
+            "sigma = {}, expected 5.0",
+            sigma
+        );
     }
 
     #[test]
@@ -3431,7 +3736,11 @@ mod tests {
             model_spread: 0.0,
         };
         let sigma = effective_sigma(&forecast, 3.0);
-        assert!((sigma - 3.0).abs() < 1e-6, "zero spread sigma = {}, expected 3.0", sigma);
+        assert!(
+            (sigma - 3.0).abs() < 1e-6,
+            "zero spread sigma = {}, expected 3.0",
+            sigma
+        );
     }
 
     #[test]
@@ -3448,7 +3757,12 @@ mod tests {
         let sigma = effective_sigma(&forecast, 3.0);
         // sqrt(25 + 9 + 16) = sqrt(50) ≈ 7.071
         let expected = 50.0_f64.sqrt();
-        assert!((sigma - expected).abs() < 1e-6, "multiday sigma = {}, expected {}", sigma, expected);
+        assert!(
+            (sigma - expected).abs() < 1e-6,
+            "multiday sigma = {}, expected {}",
+            sigma,
+            expected
+        );
     }
 
     #[test]
@@ -3470,13 +3784,26 @@ mod tests {
             target_value: Some(95.0),
             model_spread: 5.0,
         };
-        let prob_no = model_probability(&forecast_no_spread, 100.0, Comparison::Above, 3.0, WeatherMetric::TemperatureMax);
-        let prob_with = model_probability(&forecast_with_spread, 100.0, Comparison::Above, 3.0, WeatherMetric::TemperatureMax);
+        let prob_no = model_probability(
+            &forecast_no_spread,
+            100.0,
+            Comparison::Above,
+            3.0,
+            WeatherMetric::TemperatureMax,
+        );
+        let prob_with = model_probability(
+            &forecast_with_spread,
+            100.0,
+            Comparison::Above,
+            3.0,
+            WeatherMetric::TemperatureMax,
+        );
         // With spread, sigma is larger, so P(X>100) is closer to 0.5 (higher in this case since mean < threshold)
         assert!(
             prob_with > prob_no,
             "model_spread should push tail prob toward 0.5: {} > {}",
-            prob_with, prob_no
+            prob_with,
+            prob_no
         );
     }
 
@@ -3532,7 +3859,11 @@ mod tests {
 
         let size = if size < min_cost_size {
             let bumped = min_cost_size.min(remaining).min(available);
-            if bumped < min_cost_size { Decimal::ZERO } else { bumped }
+            if bumped < min_cost_size {
+                Decimal::ZERO
+            } else {
+                bumped
+            }
         } else {
             size
         };
@@ -3672,7 +4003,11 @@ mod tests {
         let no_ask: f64 = 0.70;
         let edge = no_model_prob - no_ask;
         assert!(edge > 0.0, "NO side should have positive edge: {}", edge);
-        assert!((edge - 0.20).abs() < 0.01, "Edge should be ~0.20, got {}", edge);
+        assert!(
+            (edge - 0.20).abs() < 0.01,
+            "Edge should be ~0.20, got {}",
+            edge
+        );
     }
 
     // ──── CDF Dispatcher Tests ────
@@ -3703,8 +4038,8 @@ mod tests {
 
     // ──── Exit Tests ────
 
-    use pa_core::types::{Outcome, PriceLevel, TokenInfo};
     use alloy::primitives::{B256, U256};
+    use pa_core::types::{Outcome, PriceLevel, TokenInfo};
 
     fn make_weather_market(question: &str) -> MarketInfo {
         MarketInfo {
@@ -3746,8 +4081,14 @@ mod tests {
     fn make_weather_book(token_id: U256, best_bid: Decimal) -> OrderBook {
         OrderBook {
             token_id,
-            bids: vec![PriceLevel { price: best_bid, size: dec!(500) }],
-            asks: vec![PriceLevel { price: best_bid + dec!(0.02), size: dec!(500) }],
+            bids: vec![PriceLevel {
+                price: best_bid,
+                size: dec!(500),
+            }],
+            asks: vec![PriceLevel {
+                price: best_bid + dec!(0.02),
+                size: dec!(500),
+            }],
             timestamp: Utc::now(),
         }
     }
@@ -3757,7 +4098,7 @@ mod tests {
         held: Vec<(U256, Decimal, Decimal)>,
     ) -> WeatherAlphaStrategy {
         let config = WeatherConfig {
-            min_edge_bps: 500, // 5%
+            min_edge_bps: 500,    // 5%
             max_spread_bps: 1200, // 12%
             max_position_pct: dec!(0.50),
             kelly_fraction: dec!(0.25),
@@ -3778,12 +4119,14 @@ mod tests {
         WeatherAlphaStrategy::new(
             config,
             Decimal::ZERO,
-            Box::new(move |tid| books.get(&tid).cloned()),
-            Box::new(|| Decimal::MAX),
-            Box::new(|_| Decimal::ZERO),
-            vec![],
-            Box::new(move || held.clone()),
-            Box::new(|| dec!(200)), // test balance $200
+            WeatherAlphaDeps {
+                get_orderbook: Box::new(move |tid| books.get(&tid).cloned()),
+                get_available_capital: Box::new(|| Decimal::MAX),
+                get_position: Box::new(|_| Decimal::ZERO),
+                get_held_positions: Box::new(move || held.clone()),
+                get_balance: Box::new(|| dec!(200)), // test balance $200
+                neg_risk_events: vec![],
+            },
         )
     }
 
@@ -3796,7 +4139,10 @@ mod tests {
 
         let mut books = HashMap::new();
         books.insert(token_id, make_weather_book(token_id, dec!(0.99)));
-        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.01)));
+        books.insert(
+            U256::from(2u64),
+            make_weather_book(U256::from(2u64), dec!(0.01)),
+        );
 
         let held = vec![(token_id, dec!(50), dec!(0.30))];
         let strategy = make_weather_strategy(books, held);
@@ -3805,12 +4151,13 @@ mod tests {
         assert_eq!(exits.len(), 1);
         assert!(exits[0].question.starts_with("[EXIT]"));
         match &exits[0].execution_plan {
-            ExecutionPlan::DirectionalBuy { side, price, size, .. } => {
+            ExecutionPlan::DirectionalBuy {
+                side, price, size, ..
+            } => {
                 assert_eq!(*side, TradeSide::Sell);
                 assert_eq!(*price, dec!(0.99));
                 assert_eq!(*size, dec!(50));
             }
-            _ => panic!("Expected DirectionalBuy with Sell side"),
         }
     }
 
@@ -3819,8 +4166,14 @@ mod tests {
         let question = "Will the temperature in NYC exceed 100F this summer?";
         let market = make_weather_market(question);
         let mut books = HashMap::new();
-        books.insert(U256::from(1u64), make_weather_book(U256::from(1u64), dec!(0.60)));
-        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.40)));
+        books.insert(
+            U256::from(1u64),
+            make_weather_book(U256::from(1u64), dec!(0.60)),
+        );
+        books.insert(
+            U256::from(2u64),
+            make_weather_book(U256::from(2u64), dec!(0.40)),
+        );
 
         let strategy = make_weather_strategy(books, vec![]);
 
@@ -3838,7 +4191,10 @@ mod tests {
 
         let mut books = HashMap::new();
         books.insert(token_id, make_weather_book(token_id, dec!(0.70)));
-        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.30)));
+        books.insert(
+            U256::from(2u64),
+            make_weather_book(U256::from(2u64), dec!(0.30)),
+        );
 
         let held = vec![(token_id, dec!(50), dec!(0.30))];
         let strategy = make_weather_strategy(books, held);
@@ -3849,19 +4205,22 @@ mod tests {
         let cache_key = WeatherAlphaStrategy::question_hash(question);
         {
             let mut cache = strategy.forecast_cache.lock().unwrap();
-            cache.insert(cache_key, CachedForecast {
-                forecast: ForecastData {
-                    values: vec![70.0],
-                    dates: vec!["2025-07-15".into()],
-                    mean: 70.0,
-                    std_dev: 5.0,
-                    target_value: Some(70.0),
-                    model_spread: 0.0,
+            cache.insert(
+                cache_key,
+                CachedForecast {
+                    forecast: ForecastData {
+                        values: vec![70.0],
+                        dates: vec!["2025-07-15".into()],
+                        mean: 70.0,
+                        std_dev: 5.0,
+                        target_value: Some(70.0),
+                        model_spread: 0.0,
+                    },
+                    fetched_at: Instant::now(),
+                    previous_mean: None,
+                    is_fresh_signal: true,
                 },
-                fetched_at: Instant::now(),
-                previous_mean: None,
-                is_fresh_signal: true,
-            });
+            );
         }
 
         let exits = strategy.scan_exits(&[market]).await;
@@ -3878,7 +4237,10 @@ mod tests {
 
         let mut books = HashMap::new();
         books.insert(token_id, make_weather_book(token_id, dec!(0.10)));
-        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.90)));
+        books.insert(
+            U256::from(2u64),
+            make_weather_book(U256::from(2u64), dec!(0.90)),
+        );
 
         let held = vec![(token_id, dec!(50), dec!(0.08))];
         let strategy = make_weather_strategy(books, held);
@@ -3889,19 +4251,22 @@ mod tests {
         let cache_key = WeatherAlphaStrategy::question_hash(question);
         {
             let mut cache = strategy.forecast_cache.lock().unwrap();
-            cache.insert(cache_key, CachedForecast {
-                forecast: ForecastData {
-                    values: vec![99.0],
-                    dates: vec!["2025-07-15".into()],
-                    mean: 99.0,
-                    std_dev: 3.0,
-                    target_value: Some(99.0),
-                    model_spread: 0.0,
+            cache.insert(
+                cache_key,
+                CachedForecast {
+                    forecast: ForecastData {
+                        values: vec![99.0],
+                        dates: vec!["2025-07-15".into()],
+                        mean: 99.0,
+                        std_dev: 3.0,
+                        target_value: Some(99.0),
+                        model_spread: 0.0,
+                    },
+                    fetched_at: Instant::now(),
+                    previous_mean: None,
+                    is_fresh_signal: true,
                 },
-                fetched_at: Instant::now(),
-                previous_mean: None,
-                is_fresh_signal: true,
-            });
+            );
         }
 
         let exits = strategy.scan_exits(&[market]).await;
@@ -3918,7 +4283,10 @@ mod tests {
 
         let mut books = HashMap::new();
         books.insert(token_id, make_weather_book(token_id, dec!(0.70)));
-        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.30)));
+        books.insert(
+            U256::from(2u64),
+            make_weather_book(U256::from(2u64), dec!(0.30)),
+        );
 
         // Build strategy with forecast_change_detection=true
         let config = WeatherConfig {
@@ -3931,7 +4299,7 @@ mod tests {
             exit_buffer_bps: 50,
             capital_efficiency_threshold: dec!(0.98),
             dynamic_sigma: false,
-            forecast_change_detection: true,   // ENABLED
+            forecast_change_detection: true, // ENABLED
             forecast_change_threshold: 0.5,
             max_entry_price: dec!(0.15),
             profit_take_threshold: dec!(0.45),
@@ -3945,12 +4313,14 @@ mod tests {
         let strategy = WeatherAlphaStrategy::new(
             config,
             Decimal::ZERO,
-            Box::new(move |tid| books_arc.get(&tid).cloned()),
-            Box::new(|| Decimal::MAX),
-            Box::new(|_| Decimal::ZERO),
-            vec![],
-            Box::new(move || held_clone.clone()),
-            Box::new(|| dec!(200)), // test balance $200
+            WeatherAlphaDeps {
+                get_orderbook: Box::new(move |tid| books_arc.get(&tid).cloned()),
+                get_available_capital: Box::new(|| Decimal::MAX),
+                get_position: Box::new(|_| Decimal::ZERO),
+                get_held_positions: Box::new(move || held_clone.clone()),
+                get_balance: Box::new(|| dec!(200)), // test balance $200
+                neg_risk_events: vec![],
+            },
         );
 
         // Pre-populate cache: model_prob ≈ 0.0, is_fresh_signal = false
@@ -3958,23 +4328,30 @@ mod tests {
         let cache_key = WeatherAlphaStrategy::question_hash(question);
         {
             let mut cache = strategy.forecast_cache.lock().unwrap();
-            cache.insert(cache_key, CachedForecast {
-                forecast: ForecastData {
-                    values: vec![70.0],
-                    dates: vec!["2025-07-15".into()],
-                    mean: 70.0,
-                    std_dev: 5.0,
-                    target_value: Some(70.0),
-                    model_spread: 0.0,
+            cache.insert(
+                cache_key,
+                CachedForecast {
+                    forecast: ForecastData {
+                        values: vec![70.0],
+                        dates: vec!["2025-07-15".into()],
+                        mean: 70.0,
+                        std_dev: 5.0,
+                        target_value: Some(70.0),
+                        model_spread: 0.0,
+                    },
+                    fetched_at: Instant::now(),
+                    previous_mean: Some(70.0), // same as current → no change
+                    is_fresh_signal: false,    // NOT a fresh signal
                 },
-                fetched_at: Instant::now(),
-                previous_mean: Some(70.0),     // same as current → no change
-                is_fresh_signal: false,         // NOT a fresh signal
-            });
+            );
         }
 
         let exits = strategy.scan_exits(&[market]).await;
-        assert_eq!(exits.len(), 1, "Model reversal exit must fire even when is_fresh_signal=false");
+        assert_eq!(
+            exits.len(),
+            1,
+            "Model reversal exit must fire even when is_fresh_signal=false"
+        );
         assert!(exits[0].question.starts_with("[EXIT]"));
     }
 
@@ -3989,7 +4366,7 @@ mod tests {
             condition_id: B256::ZERO,
             question_id: B256::ZERO,
             question: question.to_string(),
-            neg_risk: true,  // NegRisk market!
+            neg_risk: true, // NegRisk market!
             neg_risk_market_id: None,
             tokens: vec![
                 TokenInfo {
@@ -4022,36 +4399,47 @@ mod tests {
 
         let mut books = HashMap::new();
         books.insert(token_id, make_weather_book(token_id, dec!(0.50)));
-        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.50)));
+        books.insert(
+            U256::from(2u64),
+            make_weather_book(U256::from(2u64), dec!(0.50)),
+        );
 
         let held = vec![(token_id, dec!(10), dec!(0.50))]; // bought YES at 0.50
         let strategy = make_weather_strategy(books, held);
 
         // Pre-populate cache: forecast 70°F (far from 84-85 range)
         // Use location-based cache key (same as get_forecast_by_location)
-        let cache_key = WeatherAlphaStrategy::location_hash("Miami", WeatherMetric::TemperatureMax, None);
+        let cache_key =
+            WeatherAlphaStrategy::location_hash("Miami", WeatherMetric::TemperatureMax, None);
         {
             let mut cache = strategy.forecast_cache.lock().unwrap();
-            cache.insert(cache_key, CachedForecast {
-                forecast: ForecastData {
-                    values: vec![70.0],
-                    dates: vec!["2026-02-22".into()],
-                    mean: 70.0,
-                    std_dev: 3.0,
-                    target_value: Some(70.0),
-                    model_spread: 0.0,
+            cache.insert(
+                cache_key,
+                CachedForecast {
+                    forecast: ForecastData {
+                        values: vec![70.0],
+                        dates: vec!["2026-02-22".into()],
+                        mean: 70.0,
+                        std_dev: 3.0,
+                        target_value: Some(70.0),
+                        model_spread: 0.0,
+                    },
+                    fetched_at: Instant::now(),
+                    previous_mean: None,
+                    is_fresh_signal: true,
                 },
-                fetched_at: Instant::now(),
-                previous_mean: None,
-                is_fresh_signal: true,
-            });
+            );
         }
 
         let exits = strategy.scan_exits(&[market]).await;
         // P(84 ≤ X ≤ 85 | mean=70, sigma=3) is tiny (~0.00003)
         // effective_prob ≈ 0.00003, best_bid = 0.50
         // 0.00003 < 0.50 - 0.005 → EXIT must fire
-        assert_eq!(exits.len(), 1, "NegRisk range exit should fire when forecast is far from range");
+        assert_eq!(
+            exits.len(),
+            1,
+            "NegRisk range exit should fire when forecast is far from range"
+        );
         assert!(exits[0].question.starts_with("[EXIT]"));
     }
 
@@ -4063,11 +4451,17 @@ mod tests {
         // Create order book with 20% spread (YES: bid=0.40, ask=0.50)
         let mut yes_book = make_weather_book(token_id, dec!(0.50));
         yes_book.bids.clear();
-        yes_book.bids.push(PriceLevel { price: dec!(0.40), size: dec!(100) });
+        yes_book.bids.push(PriceLevel {
+            price: dec!(0.40),
+            size: dec!(100),
+        });
 
         let mut no_book = make_weather_book(U256::from(2u64), dec!(0.60));
         no_book.bids.clear();
-        no_book.bids.push(PriceLevel { price: dec!(0.50), size: dec!(100) });
+        no_book.bids.push(PriceLevel {
+            price: dec!(0.50),
+            size: dec!(100),
+        });
 
         let mut books = HashMap::new();
         books.insert(token_id, yes_book);
@@ -4081,19 +4475,22 @@ mod tests {
         let cache_key = WeatherAlphaStrategy::question_hash(question);
         {
             let mut cache = strategy.forecast_cache.lock().unwrap();
-            cache.insert(cache_key, CachedForecast {
-                forecast: ForecastData {
-                    values: vec![110.0],
-                    dates: vec!["2026-03-05".into()],
-                    mean: 110.0,
-                    std_dev: 3.0,
-                    target_value: Some(110.0),
-                    model_spread: 0.0,
+            cache.insert(
+                cache_key,
+                CachedForecast {
+                    forecast: ForecastData {
+                        values: vec![110.0],
+                        dates: vec!["2026-03-05".into()],
+                        mean: 110.0,
+                        std_dev: 3.0,
+                        target_value: Some(110.0),
+                        model_spread: 0.0,
+                    },
+                    fetched_at: Instant::now(),
+                    previous_mean: None,
+                    is_fresh_signal: true,
                 },
-                fetched_at: Instant::now(),
-                previous_mean: None,
-                is_fresh_signal: true,
-            });
+            );
         }
 
         let market = make_weather_market(question);
@@ -4107,7 +4504,10 @@ mod tests {
         // Spread = (0.50 - 0.40) / 0.50 = 0.20 = 2000 bps > 1200 bps
         // Should be rejected despite strong edge
         let result = strategy.detect_weather_opportunity(&market, &parsed).await;
-        assert!(result.is_none(), "Market with 20% spread should be rejected (max 12%)");
+        assert!(
+            result.is_none(),
+            "Market with 20% spread should be rejected (max 12%)"
+        );
     }
 
     #[tokio::test]
@@ -4118,11 +4518,17 @@ mod tests {
         // Create order book with 8% spread (YES: bid=0.46, ask=0.50)
         let mut yes_book = make_weather_book(token_id, dec!(0.50));
         yes_book.bids.clear();
-        yes_book.bids.push(PriceLevel { price: dec!(0.46), size: dec!(100) });
+        yes_book.bids.push(PriceLevel {
+            price: dec!(0.46),
+            size: dec!(100),
+        });
 
         let mut no_book = make_weather_book(U256::from(2u64), dec!(0.54));
         no_book.bids.clear();
-        no_book.bids.push(PriceLevel { price: dec!(0.50), size: dec!(100) });
+        no_book.bids.push(PriceLevel {
+            price: dec!(0.50),
+            size: dec!(100),
+        });
 
         let mut books = HashMap::new();
         books.insert(token_id, yes_book);
@@ -4135,19 +4541,22 @@ mod tests {
         let cache_key = WeatherAlphaStrategy::question_hash(question);
         {
             let mut cache = strategy.forecast_cache.lock().unwrap();
-            cache.insert(cache_key, CachedForecast {
-                forecast: ForecastData {
-                    values: vec![110.0],
-                    dates: vec!["2026-03-05".into()],
-                    mean: 110.0,
-                    std_dev: 3.0,
-                    target_value: Some(110.0),
-                    model_spread: 0.0,
+            cache.insert(
+                cache_key,
+                CachedForecast {
+                    forecast: ForecastData {
+                        values: vec![110.0],
+                        dates: vec!["2026-03-05".into()],
+                        mean: 110.0,
+                        std_dev: 3.0,
+                        target_value: Some(110.0),
+                        model_spread: 0.0,
+                    },
+                    fetched_at: Instant::now(),
+                    previous_mean: None,
+                    is_fresh_signal: true,
                 },
-                fetched_at: Instant::now(),
-                previous_mean: None,
-                is_fresh_signal: true,
-            });
+            );
         }
 
         let market = make_weather_market(question);
@@ -4161,9 +4570,11 @@ mod tests {
         // Spread = (0.50 - 0.46) / 0.50 = 0.08 = 800 bps < 1200 bps
         // Should be accepted
         let result = strategy.detect_weather_opportunity(&market, &parsed).await;
-        assert!(result.is_some(), "Market with 8% spread should be accepted (max 12%)");
+        assert!(
+            result.is_some(),
+            "Market with 8% spread should be accepted (max 12%)"
+        );
     }
-
 
     #[tokio::test]
     async fn test_exit_celsius_neg_risk_converts_threshold() {
@@ -4171,7 +4582,8 @@ mod tests {
         // Without conversion: P(X >= 23) ≈ 1.0 → no exit (wrong!)
         // With conversion: P(X >= 73.4) ≈ 0.26 → exit fires (correct!)
         let token_id = U256::from(1u64);
-        let question = "Will the highest temperature in Wellington be 23°C or higher on February 22?";
+        let question =
+            "Will the highest temperature in Wellington be 23°C or higher on February 22?";
         let market = MarketInfo {
             condition_id: B256::ZERO,
             question_id: B256::ZERO,
@@ -4209,29 +4621,36 @@ mod tests {
 
         let mut books = HashMap::new();
         books.insert(token_id, make_weather_book(token_id, dec!(0.52)));
-        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.48)));
+        books.insert(
+            U256::from(2u64),
+            make_weather_book(U256::from(2u64), dec!(0.48)),
+        );
 
         let held = vec![(token_id, dec!(12.50), dec!(0.52))]; // bought YES at 0.52
         let strategy = make_weather_strategy(books, held);
 
         // Pre-populate cache: forecast 71.5°F (=21.9°C, below 23°C threshold)
         // Use location-based cache key
-        let cache_key = WeatherAlphaStrategy::location_hash("Wellington", WeatherMetric::TemperatureMax, None);
+        let cache_key =
+            WeatherAlphaStrategy::location_hash("Wellington", WeatherMetric::TemperatureMax, None);
         {
             let mut cache = strategy.forecast_cache.lock().unwrap();
-            cache.insert(cache_key, CachedForecast {
-                forecast: ForecastData {
-                    values: vec![71.5],
-                    dates: vec!["2026-02-22".into()],
-                    mean: 71.5,
-                    std_dev: 3.0,
-                    target_value: Some(71.5),
-                    model_spread: 0.0,
+            cache.insert(
+                cache_key,
+                CachedForecast {
+                    forecast: ForecastData {
+                        values: vec![71.5],
+                        dates: vec!["2026-02-22".into()],
+                        mean: 71.5,
+                        std_dev: 3.0,
+                        target_value: Some(71.5),
+                        model_spread: 0.0,
+                    },
+                    fetched_at: Instant::now(),
+                    previous_mean: None,
+                    is_fresh_signal: true,
                 },
-                fetched_at: Instant::now(),
-                previous_mean: None,
-                is_fresh_signal: true,
-            });
+            );
         }
 
         let exits = strategy.scan_exits(&[market]).await;
@@ -4239,7 +4658,11 @@ mod tests {
         // NegRisk uses parse_outcome_range: "23°C or higher" → lower=Some(23) → converted to 73.4
         // effective_prob ≈ 0.26, best_bid = 0.52
         // 0.26 < 0.52 - 0.005 = 0.515 → EXIT must fire
-        assert_eq!(exits.len(), 1, "Celsius NegRisk exit should fire with correct conversion");
+        assert_eq!(
+            exits.len(),
+            1,
+            "Celsius NegRisk exit should fire with correct conversion"
+        );
         assert!(exits[0].question.starts_with("[EXIT]"));
     }
 
@@ -4303,7 +4726,10 @@ mod tests {
         let token_id = U256::from(1u64);
         let mut books = HashMap::new();
         books.insert(token_id, make_weather_book(token_id, dec!(0.20)));
-        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.80)));
+        books.insert(
+            U256::from(2u64),
+            make_weather_book(U256::from(2u64), dec!(0.80)),
+        );
 
         let held = vec![];
         let books_arc = Arc::new(books);
@@ -4319,7 +4745,7 @@ mod tests {
             dynamic_sigma: false,
             forecast_change_detection: false,
             forecast_change_threshold: 0.5,
-            max_entry_price: dec!(0.15),  // Only buy below 15 cents
+            max_entry_price: dec!(0.15), // Only buy below 15 cents
             profit_take_threshold: dec!(0.45),
             max_position_usdc: dec!(2),
             noaa_user_agent: "test".to_string(),
@@ -4328,12 +4754,14 @@ mod tests {
         let strategy = WeatherAlphaStrategy::new(
             config,
             Decimal::ZERO,
-            Box::new(move |tid| books_arc.get(&tid).cloned()),
-            Box::new(|| Decimal::MAX),
-            Box::new(|_| Decimal::ZERO),
-            vec![],
-            Box::new(move || held.clone()),
-            Box::new(|| dec!(200)),
+            WeatherAlphaDeps {
+                get_orderbook: Box::new(move |tid| books_arc.get(&tid).cloned()),
+                get_available_capital: Box::new(|| Decimal::MAX),
+                get_position: Box::new(|_| Decimal::ZERO),
+                get_held_positions: Box::new(move || held.clone()),
+                get_balance: Box::new(|| dec!(200)),
+                neg_risk_events: vec![],
+            },
         );
 
         // Pre-populate cache: model says 80% (strong edge over 0.20 ask)
@@ -4341,25 +4769,31 @@ mod tests {
         let cache_key = WeatherAlphaStrategy::question_hash(question);
         {
             let mut cache = strategy.forecast_cache.lock().unwrap();
-            cache.insert(cache_key, CachedForecast {
-                forecast: ForecastData {
-                    values: vec![80.0],
-                    dates: vec!["2026-03-05".into()],
-                    mean: 80.0,
-                    std_dev: 3.0,
-                    target_value: Some(80.0),
-                    model_spread: 0.0,
+            cache.insert(
+                cache_key,
+                CachedForecast {
+                    forecast: ForecastData {
+                        values: vec![80.0],
+                        dates: vec!["2026-03-05".into()],
+                        mean: 80.0,
+                        std_dev: 3.0,
+                        target_value: Some(80.0),
+                        model_spread: 0.0,
+                    },
+                    fetched_at: Instant::now(),
+                    previous_mean: None,
+                    is_fresh_signal: true,
                 },
-                fetched_at: Instant::now(),
-                previous_mean: None,
-                is_fresh_signal: true,
-            });
+            );
         }
 
         let market = make_weather_market(question);
         let parsed = parse_weather_question(question).unwrap();
         let result = strategy.detect_weather_opportunity(&market, &parsed).await;
-        assert!(result.is_none(), "Token at 0.20 should be rejected (max_entry_price=0.15)");
+        assert!(
+            result.is_none(),
+            "Token at 0.20 should be rejected (max_entry_price=0.15)"
+        );
     }
 
     #[tokio::test]
@@ -4368,7 +4802,10 @@ mod tests {
         let token_id = U256::from(1u64);
         let mut books = HashMap::new();
         books.insert(token_id, make_weather_book(token_id, dec!(0.08)));
-        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.90)));
+        books.insert(
+            U256::from(2u64),
+            make_weather_book(U256::from(2u64), dec!(0.90)),
+        );
 
         let held = vec![];
         let books_arc = Arc::new(books);
@@ -4384,7 +4821,7 @@ mod tests {
             dynamic_sigma: false,
             forecast_change_detection: false,
             forecast_change_threshold: 0.5,
-            max_entry_price: dec!(0.15),  // Only buy below 15 cents
+            max_entry_price: dec!(0.15), // Only buy below 15 cents
             profit_take_threshold: dec!(0.45),
             max_position_usdc: dec!(100),
             noaa_user_agent: "test".to_string(),
@@ -4393,12 +4830,14 @@ mod tests {
         let strategy = WeatherAlphaStrategy::new(
             config,
             Decimal::ZERO,
-            Box::new(move |tid| books_arc.get(&tid).cloned()),
-            Box::new(|| Decimal::MAX),
-            Box::new(|_| Decimal::ZERO),
-            vec![],
-            Box::new(move || held.clone()),
-            Box::new(|| dec!(200)),
+            WeatherAlphaDeps {
+                get_orderbook: Box::new(move |tid| books_arc.get(&tid).cloned()),
+                get_available_capital: Box::new(|| Decimal::MAX),
+                get_position: Box::new(|_| Decimal::ZERO),
+                get_held_positions: Box::new(move || held.clone()),
+                get_balance: Box::new(|| dec!(200)),
+                neg_risk_events: vec![],
+            },
         );
 
         // Pre-populate cache: model says 80% (strong edge over 0.10 ask)
@@ -4406,25 +4845,31 @@ mod tests {
         let cache_key = WeatherAlphaStrategy::question_hash(question);
         {
             let mut cache = strategy.forecast_cache.lock().unwrap();
-            cache.insert(cache_key, CachedForecast {
-                forecast: ForecastData {
-                    values: vec![80.0],
-                    dates: vec!["2026-03-05".into()],
-                    mean: 80.0,
-                    std_dev: 3.0,
-                    target_value: Some(80.0),
-                    model_spread: 0.0,
+            cache.insert(
+                cache_key,
+                CachedForecast {
+                    forecast: ForecastData {
+                        values: vec![80.0],
+                        dates: vec!["2026-03-05".into()],
+                        mean: 80.0,
+                        std_dev: 3.0,
+                        target_value: Some(80.0),
+                        model_spread: 0.0,
+                    },
+                    fetched_at: Instant::now(),
+                    previous_mean: None,
+                    is_fresh_signal: true,
                 },
-                fetched_at: Instant::now(),
-                previous_mean: None,
-                is_fresh_signal: true,
-            });
+            );
         }
 
         let market = make_weather_market(question);
         let parsed = parse_weather_question(question).unwrap();
         let result = strategy.detect_weather_opportunity(&market, &parsed).await;
-        assert!(result.is_some(), "Token at 0.10 should be accepted (max_entry_price=0.15)");
+        assert!(
+            result.is_some(),
+            "Token at 0.10 should be accepted (max_entry_price=0.15)"
+        );
 
         // Regression: max_position_usdc=100 should size by shares at ask=0.10 => 1000 shares.
         let opp = result.unwrap();
@@ -4434,7 +4879,6 @@ mod tests {
                 assert_eq!(price, dec!(0.10));
                 assert_eq!(size, dec!(1000));
             }
-            _ => panic!("expected DirectionalBuy"),
         }
     }
 
@@ -4447,9 +4891,15 @@ mod tests {
         let mut books = HashMap::new();
         let mut book = make_weather_book(token_id, dec!(0.50));
         book.bids.clear();
-        book.bids.push(PriceLevel { price: dec!(0.50), size: dec!(100) });
+        book.bids.push(PriceLevel {
+            price: dec!(0.50),
+            size: dec!(100),
+        });
         books.insert(token_id, book);
-        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.50)));
+        books.insert(
+            U256::from(2u64),
+            make_weather_book(U256::from(2u64), dec!(0.50)),
+        );
 
         let held = vec![(token_id, dec!(20), dec!(0.10))]; // bought at 0.10
         let strategy = make_weather_strategy(books, held);
@@ -4457,7 +4907,11 @@ mod tests {
         let market = make_weather_market("Will the temperature in NYC exceed 100F this summer?");
         let exits = strategy.scan_exits(&[market]).await;
         // best_bid 0.50 >= profit_take_threshold 0.45 → should trigger
-        assert_eq!(exits.len(), 1, "Profit-take exit should fire when best_bid >= 0.45");
+        assert_eq!(
+            exits.len(),
+            1,
+            "Profit-take exit should fire when best_bid >= 0.45"
+        );
         assert!(exits[0].question.contains("[EXIT]"));
     }
 
@@ -4468,9 +4922,15 @@ mod tests {
         let mut books = HashMap::new();
         let mut book = make_weather_book(token_id, dec!(0.50));
         book.bids.clear();
-        book.bids.push(PriceLevel { price: dec!(0.40), size: dec!(100) });
+        book.bids.push(PriceLevel {
+            price: dec!(0.40),
+            size: dec!(100),
+        });
         books.insert(token_id, book);
-        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.60)));
+        books.insert(
+            U256::from(2u64),
+            make_weather_book(U256::from(2u64), dec!(0.60)),
+        );
 
         let held = vec![(token_id, dec!(20), dec!(0.10))]; // bought at 0.10
         let strategy = make_weather_strategy(books, held);
@@ -4480,19 +4940,22 @@ mod tests {
         let cache_key = WeatherAlphaStrategy::question_hash(question);
         {
             let mut cache = strategy.forecast_cache.lock().unwrap();
-            cache.insert(cache_key, CachedForecast {
-                forecast: ForecastData {
-                    values: vec![110.0],
-                    dates: vec!["2026-07-01".into()],
-                    mean: 110.0,
-                    std_dev: 3.0,
-                    target_value: Some(110.0),
-                    model_spread: 0.0,
+            cache.insert(
+                cache_key,
+                CachedForecast {
+                    forecast: ForecastData {
+                        values: vec![110.0],
+                        dates: vec!["2026-07-01".into()],
+                        mean: 110.0,
+                        std_dev: 3.0,
+                        target_value: Some(110.0),
+                        model_spread: 0.0,
+                    },
+                    fetched_at: Instant::now(),
+                    previous_mean: None,
+                    is_fresh_signal: true,
                 },
-                fetched_at: Instant::now(),
-                previous_mean: None,
-                is_fresh_signal: true,
-            });
+            );
         }
 
         let market = make_weather_market(question);
@@ -4500,7 +4963,11 @@ mod tests {
         // best_bid 0.40 < profit_take_threshold 0.45 → should NOT trigger profit-take
         // model_prob ≈ 1.0 (forecast 110 >> threshold 100), best_bid 0.40 → no model reversal
         // avg_cost 0.10, best_bid 0.40 → not a deep loss
-        assert_eq!(exits.len(), 0, "Should not exit when best_bid < profit_take_threshold");
+        assert_eq!(
+            exits.len(),
+            0,
+            "Should not exit when best_bid < profit_take_threshold"
+        );
     }
 
     // ──── Target City Filter Tests ────
@@ -4514,12 +4981,14 @@ mod tests {
         let strategy = WeatherAlphaStrategy::new(
             config,
             Decimal::ZERO,
-            Box::new(|_| None),
-            Box::new(|| Decimal::ZERO),
-            Box::new(|_| Decimal::ZERO),
-            vec![],
-            Box::new(|| vec![]),
-            Box::new(|| Decimal::ZERO),
+            WeatherAlphaDeps {
+                get_orderbook: Box::new(|_| None),
+                get_available_capital: Box::new(|| Decimal::ZERO),
+                get_position: Box::new(|_| Decimal::ZERO),
+                get_held_positions: Box::new(Vec::new),
+                get_balance: Box::new(|| Decimal::ZERO),
+                neg_risk_events: vec![],
+            },
         );
 
         assert!(strategy.is_target_city("New York"));
@@ -4538,12 +5007,14 @@ mod tests {
         let strategy = WeatherAlphaStrategy::new(
             config,
             Decimal::ZERO,
-            Box::new(|_| None),
-            Box::new(|| Decimal::ZERO),
-            Box::new(|_| Decimal::ZERO),
-            vec![],
-            Box::new(|| vec![]),
-            Box::new(|| Decimal::ZERO),
+            WeatherAlphaDeps {
+                get_orderbook: Box::new(|_| None),
+                get_available_capital: Box::new(|| Decimal::ZERO),
+                get_position: Box::new(|_| Decimal::ZERO),
+                get_held_positions: Box::new(Vec::new),
+                get_balance: Box::new(|| Decimal::ZERO),
+                neg_risk_events: vec![],
+            },
         );
 
         assert!(strategy.is_target_city("New York"));

@@ -1,9 +1,11 @@
-use async_trait::async_trait;
 use alloy::primitives::U256;
-use rust_decimal::Decimal;
+use async_trait::async_trait;
 use pa_core::config::RiskConfig;
 use pa_core::traits::RiskManager;
-use pa_core::types::{TradingOpportunity, ExecutionResult, RiskDecision, RiskRejectReason, StrategyType};
+use pa_core::types::{
+    ExecutionResult, RiskDecision, RiskRejectReason, StrategyType, TradingOpportunity,
+};
+use rust_decimal::Decimal;
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::limits::LimitsChecker;
@@ -51,7 +53,8 @@ impl RiskManagerImpl {
         strategy_type: Option<pa_core::types::StrategyType>,
         condition_id: Option<alloy::primitives::B256>,
     ) {
-        self.positions.sync_position(token_id, size, avg_cost, strategy_type, condition_id);
+        self.positions
+            .sync_position(token_id, size, avg_cost, strategy_type, condition_id);
     }
 
     /// Snapshot all current positions for persistence.
@@ -112,8 +115,14 @@ impl RiskManager for RiskManagerImpl {
         // Update positions from trades
         for trade in &result.trades {
             let is_buy = matches!(trade.side, pa_core::types::TradeSide::Buy);
-            self.positions
-                .update(trade.token_id, trade.filled_size, trade.price, is_buy, Some(result.strategy_type), Some(trade.condition_id));
+            self.positions.update(
+                trade.token_id,
+                trade.filled_size,
+                trade.price,
+                is_buy,
+                Some(result.strategy_type),
+                Some(trade.condition_id),
+            );
         }
     }
 
@@ -135,9 +144,9 @@ mod tests {
     use super::*;
     use alloy::primitives::B256;
     use chrono::Utc;
+    use pa_core::types::{ExecutionPlan, TradeSide};
     use rust_decimal_macros::dec;
     use uuid::Uuid;
-    use pa_core::types::{ExecutionPlan, TradeSide};
 
     fn test_config() -> RiskConfig {
         RiskConfig {
@@ -160,7 +169,12 @@ mod tests {
         B256::from(bytes)
     }
 
-    fn make_opp(condition_id: B256, strategy_type: StrategyType, size: Decimal, price: Decimal) -> TradingOpportunity {
+    fn make_opp(
+        condition_id: B256,
+        strategy_type: StrategyType,
+        size: Decimal,
+        price: Decimal,
+    ) -> TradingOpportunity {
         TradingOpportunity {
             id: Uuid::now_v7(),
             strategy_type,
@@ -192,7 +206,14 @@ mod tests {
         let rm = RiskManagerImpl::new(test_config());
 
         // Pre-load 90 shares in market cid(1) via position tracker
-        rm.positions.update(U256::from(10), dec!(90), dec!(0.50), true, Some(StrategyType::Weather), Some(cid(1)));
+        rm.positions.update(
+            U256::from(10),
+            dec!(90),
+            dec!(0.50),
+            true,
+            Some(StrategyType::Weather),
+            Some(cid(1)),
+        );
 
         // Now try to add 20 more → 90+20=110 > max_position_per_market=100
         let opp = make_opp(cid(1), StrategyType::Weather, dec!(20), dec!(0.50));
@@ -207,8 +228,22 @@ mod tests {
         let rm = RiskManagerImpl::new(test_config());
 
         // Pre-load: 100 shares @ $0.90 = $90, and another 100 @ $0.80 = $80 → total $170
-        rm.positions.update(U256::from(10), dec!(100), dec!(0.90), true, Some(StrategyType::Weather), Some(cid(1)));
-        rm.positions.update(U256::from(20), dec!(100), dec!(0.80), true, Some(StrategyType::Weather), Some(cid(2)));
+        rm.positions.update(
+            U256::from(10),
+            dec!(100),
+            dec!(0.90),
+            true,
+            Some(StrategyType::Weather),
+            Some(cid(1)),
+        );
+        rm.positions.update(
+            U256::from(20),
+            dec!(100),
+            dec!(0.80),
+            true,
+            Some(StrategyType::Weather),
+            Some(cid(2)),
+        );
 
         // New trade: 50 shares @ $0.80 = $40 → total exposure $210 > max_exposure_per_strategy=$200
         let opp = make_opp(cid(3), StrategyType::Weather, dec!(50), dec!(0.80));
@@ -223,9 +258,30 @@ mod tests {
         let rm = RiskManagerImpl::new(test_config());
 
         // Fill 3 markets (max_markets_per_strategy=3)
-        rm.positions.update(U256::from(10), dec!(5), dec!(0.50), true, Some(StrategyType::Weather), Some(cid(1)));
-        rm.positions.update(U256::from(20), dec!(5), dec!(0.50), true, Some(StrategyType::Weather), Some(cid(2)));
-        rm.positions.update(U256::from(30), dec!(5), dec!(0.50), true, Some(StrategyType::Weather), Some(cid(3)));
+        rm.positions.update(
+            U256::from(10),
+            dec!(5),
+            dec!(0.50),
+            true,
+            Some(StrategyType::Weather),
+            Some(cid(1)),
+        );
+        rm.positions.update(
+            U256::from(20),
+            dec!(5),
+            dec!(0.50),
+            true,
+            Some(StrategyType::Weather),
+            Some(cid(2)),
+        );
+        rm.positions.update(
+            U256::from(30),
+            dec!(5),
+            dec!(0.50),
+            true,
+            Some(StrategyType::Weather),
+            Some(cid(3)),
+        );
 
         // Try a 4th market → rejected
         let opp = make_opp(cid(4), StrategyType::Weather, dec!(5), dec!(0.50));
@@ -240,9 +296,30 @@ mod tests {
         let rm = RiskManagerImpl::new(test_config());
 
         // Fill 3 markets
-        rm.positions.update(U256::from(10), dec!(5), dec!(0.50), true, Some(StrategyType::Weather), Some(cid(1)));
-        rm.positions.update(U256::from(20), dec!(5), dec!(0.50), true, Some(StrategyType::Weather), Some(cid(2)));
-        rm.positions.update(U256::from(30), dec!(5), dec!(0.50), true, Some(StrategyType::Weather), Some(cid(3)));
+        rm.positions.update(
+            U256::from(10),
+            dec!(5),
+            dec!(0.50),
+            true,
+            Some(StrategyType::Weather),
+            Some(cid(1)),
+        );
+        rm.positions.update(
+            U256::from(20),
+            dec!(5),
+            dec!(0.50),
+            true,
+            Some(StrategyType::Weather),
+            Some(cid(2)),
+        );
+        rm.positions.update(
+            U256::from(30),
+            dec!(5),
+            dec!(0.50),
+            true,
+            Some(StrategyType::Weather),
+            Some(cid(3)),
+        );
 
         // Adding more to existing market cid(1) should NOT trigger market count check
         let opp = make_opp(cid(1), StrategyType::Weather, dec!(5), dec!(0.50));
@@ -255,9 +332,30 @@ mod tests {
         let rm = RiskManagerImpl::new(test_config());
 
         // Saturate all limits: fill 3 markets, max strategy exposure, max per-market
-        rm.positions.update(U256::from(10), dec!(95), dec!(0.70), true, Some(StrategyType::Weather), Some(cid(1)));
-        rm.positions.update(U256::from(20), dec!(95), dec!(0.70), true, Some(StrategyType::Weather), Some(cid(2)));
-        rm.positions.update(U256::from(30), dec!(95), dec!(0.70), true, Some(StrategyType::Weather), Some(cid(3)));
+        rm.positions.update(
+            U256::from(10),
+            dec!(95),
+            dec!(0.70),
+            true,
+            Some(StrategyType::Weather),
+            Some(cid(1)),
+        );
+        rm.positions.update(
+            U256::from(20),
+            dec!(95),
+            dec!(0.70),
+            true,
+            Some(StrategyType::Weather),
+            Some(cid(2)),
+        );
+        rm.positions.update(
+            U256::from(30),
+            dec!(95),
+            dec!(0.70),
+            true,
+            Some(StrategyType::Weather),
+            Some(cid(3)),
+        );
 
         // A normal buy would be rejected (exceeds market position, strategy exposure, market count)
         let buy_opp = make_opp(cid(4), StrategyType::Weather, dec!(50), dec!(0.50));

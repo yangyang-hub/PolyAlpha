@@ -1,8 +1,8 @@
-use rust_decimal::Decimal;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Mutex;
 use chrono::{DateTime, Utc};
 use pa_core::config::RiskConfig;
+use rust_decimal::Decimal;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Circuit breaker that halts trading when loss thresholds are exceeded.
 pub struct CircuitBreaker {

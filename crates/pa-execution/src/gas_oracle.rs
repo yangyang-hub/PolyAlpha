@@ -27,9 +27,7 @@ impl GasOracle {
 
     /// Estimate gas cost in USD for a given gas limit.
     pub fn estimate_usd(&self, gas_limit: u64) -> Decimal {
-        let gas_cost_matic = Decimal::from(gas_limit)
-            * self.gas_price_gwei
-            / dec!(1_000_000_000); // Gwei to MATIC
+        let gas_cost_matic = Decimal::from(gas_limit) * self.gas_price_gwei / dec!(1_000_000_000); // Gwei to MATIC
         gas_cost_matic * self.matic_usd
     }
 

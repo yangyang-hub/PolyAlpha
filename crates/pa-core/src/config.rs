@@ -148,7 +148,9 @@ pub struct MarketFilterConfig {
     pub market_refresh_interval_secs: u64,
 }
 
-fn default_market_refresh_interval() -> u64 { 1800 }
+fn default_market_refresh_interval() -> u64 {
+    1800
+}
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct WeatherConfig {
@@ -200,15 +202,33 @@ pub struct WeatherConfig {
     pub target_cities: Vec<String>,
 }
 
-fn default_exit_buffer_bps() -> u32 { 50 }
-fn default_capital_efficiency_threshold() -> Decimal { Decimal::new(98, 2) } // 0.98
-fn default_max_spread_bps() -> u32 { 1200 } // 12% max spread
-fn default_true() -> bool { true }
-fn default_forecast_change_threshold() -> f64 { 0.5 }
-fn default_max_entry_price() -> Decimal { Decimal::new(15, 2) } // 0.15
-fn default_profit_take_threshold() -> Decimal { Decimal::new(45, 2) } // 0.45
-fn default_weather_max_position_usdc() -> Decimal { Decimal::new(2, 0) } // $2
-fn default_noaa_user_agent() -> String { "PolyAlpha/1.0".to_string() }
+fn default_exit_buffer_bps() -> u32 {
+    50
+}
+fn default_capital_efficiency_threshold() -> Decimal {
+    Decimal::new(98, 2)
+} // 0.98
+fn default_max_spread_bps() -> u32 {
+    1200
+} // 12% max spread
+fn default_true() -> bool {
+    true
+}
+fn default_forecast_change_threshold() -> f64 {
+    0.5
+}
+fn default_max_entry_price() -> Decimal {
+    Decimal::new(15, 2)
+} // 0.15
+fn default_profit_take_threshold() -> Decimal {
+    Decimal::new(45, 2)
+} // 0.45
+fn default_weather_max_position_usdc() -> Decimal {
+    Decimal::new(2, 0)
+} // $2
+fn default_noaa_user_agent() -> String {
+    "PolyAlpha/1.0".to_string()
+}
 fn default_target_cities() -> Vec<String> {
     vec![
         "New York".to_string(),
@@ -226,7 +246,7 @@ impl Default for WeatherConfig {
             min_edge_bps: 500,
             max_spread_bps: default_max_spread_bps(),
             max_position_pct: Decimal::new(50, 2), // 0.50 = 50% of balance
-            kelly_fraction: Decimal::new(25, 2), // 0.25 (quarter Kelly)
+            kelly_fraction: Decimal::new(25, 2),   // 0.25 (quarter Kelly)
             forecast_error: ForecastErrorConfig::default(),
             refresh_interval_secs: 120,
             exit_buffer_bps: default_exit_buffer_bps(),
@@ -257,10 +277,18 @@ pub struct ForecastErrorConfig {
     pub wind_sigma_mph: f64,
 }
 
-fn default_temp_sigma() -> f64 { 3.0 }
-fn default_precip_sigma() -> f64 { 0.3 }
-fn default_snow_sigma() -> f64 { 2.0 }
-fn default_wind_sigma() -> f64 { 5.0 }
+fn default_temp_sigma() -> f64 {
+    3.0
+}
+fn default_precip_sigma() -> f64 {
+    0.3
+}
+fn default_snow_sigma() -> f64 {
+    2.0
+}
+fn default_wind_sigma() -> f64 {
+    5.0
+}
 
 impl Default for ForecastErrorConfig {
     fn default() -> Self {
@@ -311,12 +339,24 @@ pub struct CryptoAlphaConfig {
     pub max_spread_bps: u32,
 }
 
-fn default_drift_decay() -> f64 { 0.0 }
-fn default_crypto_max_spread_bps() -> u32 { 1500 }
-fn default_crypto_min_edge() -> u32 { 500 }
-fn default_crypto_max_position_pct() -> Decimal { Decimal::new(50, 2) } // 0.50
-fn default_crypto_kelly() -> Decimal { Decimal::new(25, 2) }
-fn default_crypto_refresh() -> u64 { 300 }
+fn default_drift_decay() -> f64 {
+    0.0
+}
+fn default_crypto_max_spread_bps() -> u32 {
+    1500
+}
+fn default_crypto_min_edge() -> u32 {
+    500
+}
+fn default_crypto_max_position_pct() -> Decimal {
+    Decimal::new(50, 2)
+} // 0.50
+fn default_crypto_kelly() -> Decimal {
+    Decimal::new(25, 2)
+}
+fn default_crypto_refresh() -> u64 {
+    300
+}
 
 impl Default for CryptoAlphaConfig {
     fn default() -> Self {
@@ -372,12 +412,24 @@ pub struct EventCalendarConfig {
     pub static_events: Vec<StaticEventConfig>,
 }
 
-fn default_ec_refresh() -> u64 { 3600 }
-fn default_ec_pre_hours() -> u32 { 4 }
-fn default_ec_post_hours() -> u32 { 2 }
-fn default_ec_high_mult() -> Decimal { Decimal::new(25, 2) }   // 0.25
-fn default_ec_medium_mult() -> Decimal { Decimal::new(50, 2) } // 0.50
-fn default_ec_low_mult() -> Decimal { Decimal::new(75, 2) }    // 0.75
+fn default_ec_refresh() -> u64 {
+    3600
+}
+fn default_ec_pre_hours() -> u32 {
+    4
+}
+fn default_ec_post_hours() -> u32 {
+    2
+}
+fn default_ec_high_mult() -> Decimal {
+    Decimal::new(25, 2)
+} // 0.25
+fn default_ec_medium_mult() -> Decimal {
+    Decimal::new(50, 2)
+} // 0.50
+fn default_ec_low_mult() -> Decimal {
+    Decimal::new(75, 2)
+} // 0.75
 
 impl Default for EventCalendarConfig {
     fn default() -> Self {
@@ -519,21 +571,51 @@ pub struct LiquidityRewardsConfig {
     pub allow_neg_risk: bool,
 }
 
-fn default_lr_max_markets() -> usize { 10 }
-fn default_lr_max_position() -> Decimal { Decimal::from(100) }
-fn default_lr_max_total_exposure() -> Decimal { Decimal::from(500) }
-fn default_lr_market_refresh() -> u64 { 1800 }
-fn default_lr_quote_refresh() -> u64 { 60 }
-fn default_lr_requote_trigger() -> u32 { 30 }
-fn default_lr_requote_cooldown() -> u64 { 3 }
-fn default_lr_spread_fraction() -> Decimal { Decimal::new(80, 2) } // 0.80
-fn default_lr_min_order_size() -> Decimal { Decimal::from(5) }
-fn default_lr_skew() -> Decimal { Decimal::new(50, 2) } // 0.50
-fn default_lr_min_daily_rate() -> Decimal { Decimal::ONE }
-fn default_lr_fill_check() -> u64 { 10 }
-fn default_lr_cancel_depth() -> usize { 2 }
-fn default_lr_failed_cooldown() -> u64 { 60 }
-fn default_lr_market_mode() -> String { "auto".to_string() }
+fn default_lr_max_markets() -> usize {
+    10
+}
+fn default_lr_max_position() -> Decimal {
+    Decimal::from(100)
+}
+fn default_lr_max_total_exposure() -> Decimal {
+    Decimal::from(500)
+}
+fn default_lr_market_refresh() -> u64 {
+    1800
+}
+fn default_lr_quote_refresh() -> u64 {
+    60
+}
+fn default_lr_requote_trigger() -> u32 {
+    30
+}
+fn default_lr_requote_cooldown() -> u64 {
+    3
+}
+fn default_lr_spread_fraction() -> Decimal {
+    Decimal::new(80, 2)
+} // 0.80
+fn default_lr_min_order_size() -> Decimal {
+    Decimal::from(5)
+}
+fn default_lr_skew() -> Decimal {
+    Decimal::new(50, 2)
+} // 0.50
+fn default_lr_min_daily_rate() -> Decimal {
+    Decimal::ONE
+}
+fn default_lr_fill_check() -> u64 {
+    10
+}
+fn default_lr_cancel_depth() -> usize {
+    2
+}
+fn default_lr_failed_cooldown() -> u64 {
+    60
+}
+fn default_lr_market_mode() -> String {
+    "auto".to_string()
+}
 
 /// Per-market configuration override for liquidity rewards.
 ///
@@ -649,15 +731,33 @@ pub struct TrackedWalletConfig {
     pub weight: Decimal,
 }
 
-fn default_sm_follow_ratio() -> Decimal { Decimal::new(10, 2) } // 0.10
-fn default_sm_max_position() -> Decimal { Decimal::from(100) }
-fn default_sm_poll_interval() -> u64 { 30 }
-fn default_sm_signal_ttl() -> u64 { 300 }
-fn default_sm_onchain_poll() -> u64 { 4 }
-fn default_sm_discover_interval() -> u64 { 3600 }
-fn default_sm_min_score() -> Decimal { Decimal::new(5, 2) } // 0.05
-fn default_sm_max_wallets() -> usize { 20 }
-fn default_sm_wallet_weight() -> Decimal { Decimal::ONE }
+fn default_sm_follow_ratio() -> Decimal {
+    Decimal::new(10, 2)
+} // 0.10
+fn default_sm_max_position() -> Decimal {
+    Decimal::from(100)
+}
+fn default_sm_poll_interval() -> u64 {
+    30
+}
+fn default_sm_signal_ttl() -> u64 {
+    300
+}
+fn default_sm_onchain_poll() -> u64 {
+    4
+}
+fn default_sm_discover_interval() -> u64 {
+    3600
+}
+fn default_sm_min_score() -> Decimal {
+    Decimal::new(5, 2)
+} // 0.05
+fn default_sm_max_wallets() -> usize {
+    20
+}
+fn default_sm_wallet_weight() -> Decimal {
+    Decimal::ONE
+}
 
 impl Default for SmartMoneyConfig {
     fn default() -> Self {
@@ -785,8 +885,7 @@ impl Settings {
                 .ok()
                 .and_then(|s| s.parse::<u8>().ok())
                 .unwrap_or(0);
-            let proxy_wallet = std::env::var(format!("{prefix}PROXY_WALLET"))
-                .unwrap_or_default();
+            let proxy_wallet = std::env::var(format!("{prefix}PROXY_WALLET")).unwrap_or_default();
             let strategies = std::env::var(format!("{prefix}STRATEGIES"))
                 .unwrap_or_default()
                 .split(',')

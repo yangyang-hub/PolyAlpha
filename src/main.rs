@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::str::FromStr;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use alloy::signers::Signer as _;
@@ -21,12 +21,12 @@ use pa_core::traits::MarketDataFeed;
 use pa_core::traits::RiskManager as _;
 use pa_execution::clob_executor::ClobExecutor;
 use pa_execution::ctf_executor::CtfExecutor;
-use pa_execution::safe_redeemer::SafeRedeemer;
 use pa_execution::orchestrator::HybridOrchestrator;
+use pa_execution::safe_redeemer::SafeRedeemer;
+use pa_market_data::data_api::PositionLoader;
+use pa_market_data::event_calendar::EventCalendarService;
 use pa_market_data::gamma_feed::GammaFeed;
 use pa_market_data::service::MarketDataService;
-use pa_market_data::event_calendar::EventCalendarService;
-use pa_market_data::data_api::PositionLoader;
 use pa_monitor::api::ApiState;
 use pa_risk::manager::RiskManagerImpl;
 use pa_storage::config_store::ConfigStore;
@@ -68,7 +68,7 @@ async fn fetch_clob_rewards(
     clob: &ClobExecutor,
 ) -> anyhow::Result<Vec<pa_strategy::liquidity_rewards::ClobRewardData>> {
     let mut all_rewards = Vec::new();
-    let mut next_cursor: Option<String> = None;  // API expects None for first page
+    let mut next_cursor: Option<String> = None; // API expects None for first page
 
     tracing::debug!("Fetching CLOB rewards with next_cursor={:?}", next_cursor);
 
@@ -85,14 +85,12 @@ async fn fetch_clob_rewards(
                 return Ok(all_rewards); // Return what we have so far
             }
         };
-        
+
         for reward in page.data {
             // Sum up daily rates from all reward configs
-            let total_daily_rate: Decimal = reward.rewards_config
-                .iter()
-                .map(|r| r.rate_per_day)
-                .sum();
-            
+            let total_daily_rate: Decimal =
+                reward.rewards_config.iter().map(|r| r.rate_per_day).sum();
+
             all_rewards.push(pa_strategy::liquidity_rewards::ClobRewardData {
                 condition_id: reward.condition_id,
                 // CLOB API returns spread as percentage (e.g. 4.5 = 4.5%),
@@ -102,22 +100,21 @@ async fn fetch_clob_rewards(
                 total_daily_rate,
             });
         }
-        
+
         // Check if there's a next page (LTE= is the termination marker from API)
         if page.next_cursor.is_empty() || page.next_cursor == "LTE=" {
             break;
         }
         next_cursor = Some(page.next_cursor.clone());
     }
-    
+
     tracing::info!(
         count = all_rewards.len(),
         "LR: Fetched CLOB rewards markets from API"
     );
-    
+
     Ok(all_rewards)
 }
-
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -127,7 +124,9 @@ async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new("info,polymarket_client_sdk=warn,polymarket_client_sdk::serde_helpers=error")
+            EnvFilter::new(
+                "info,polymarket_client_sdk=warn,polymarket_client_sdk::serde_helpers=error",
+            )
         }))
         .with(fmt::layer().with_target(true).with_thread_ids(true))
         .init();
@@ -208,15 +207,15 @@ async fn main() -> Result<()> {
 
     // --- Initialize market data ---
     let market_data = Arc::new(
-        MarketDataService::new(&settings)
-            .context("Failed to initialize market data service")?
+        MarketDataService::new(&settings).context("Failed to initialize market data service")?,
     );
     tracing::info!("Market data service initialized");
 
     // --- Start health/metrics/config API server ---
     let ws_connected = market_data.ws_feed_ws_connected().await;
-    let lr_runtime_status: Arc<tokio::sync::RwLock<pa_monitor::api::LrRuntimeStatus>> =
-        Arc::new(tokio::sync::RwLock::new(pa_monitor::api::LrRuntimeStatus::default()));
+    let lr_runtime_status: Arc<tokio::sync::RwLock<pa_monitor::api::LrRuntimeStatus>> = Arc::new(
+        tokio::sync::RwLock::new(pa_monitor::api::LrRuntimeStatus::default()),
+    );
     let shared_positions: Arc<tokio::sync::RwLock<Vec<pa_monitor::api::PositionApiEntry>>> =
         Arc::new(tokio::sync::RwLock::new(Vec::new()));
     let api_state = Arc::new(ApiState {
@@ -224,15 +223,13 @@ async fn main() -> Result<()> {
         config_store,
         config_tx,
         start_time: Utc::now(),
-        health_checks: vec![
-            (
-                "websocket",
-                Box::new({
-                    let ws = Arc::clone(&ws_connected);
-                    move || ws.load(Ordering::Relaxed)
-                }),
-            ),
-        ],
+        health_checks: vec![(
+            "websocket",
+            Box::new({
+                let ws = Arc::clone(&ws_connected);
+                move || ws.load(Ordering::Relaxed)
+            }),
+        )],
         lr_status: Some(Arc::clone(&lr_runtime_status)),
         positions: Arc::clone(&shared_positions),
     });
@@ -290,7 +287,10 @@ async fn main() -> Result<()> {
     let neg_risk_events = GammaFeed::group_neg_risk_events(&markets);
     tracing::info!(
         neg_risk_events = neg_risk_events.len(),
-        neg_risk_outcomes = neg_risk_events.iter().map(|e| e.markets.len()).sum::<usize>(),
+        neg_risk_outcomes = neg_risk_events
+            .iter()
+            .map(|e| e.markets.len())
+            .sum::<usize>(),
         "NegRisk events discovered"
     );
 
@@ -298,7 +298,10 @@ async fn main() -> Result<()> {
     let binary_event_groups = GammaFeed::group_binary_events(&markets);
     tracing::info!(
         binary_event_groups = binary_event_groups.len(),
-        grouped_markets = binary_event_groups.iter().map(|g| g.markets.len()).sum::<usize>(),
+        grouped_markets = binary_event_groups
+            .iter()
+            .map(|g| g.markets.len())
+            .sum::<usize>(),
         "Binary event groups discovered"
     );
 
@@ -400,7 +403,6 @@ async fn main() -> Result<()> {
         pa_monitor::metrics::ACTIVE_SUBSCRIPTIONS.set(token_ids.len() as f64);
     }
 
-
     // --- Build per-account contexts ---
     let mut account_contexts: Vec<AccountContext> = Vec::new();
 
@@ -436,8 +438,13 @@ async fn main() -> Result<()> {
             }
             wallet_address
         } else {
-            acct_config.proxy_wallet.parse::<alloy::primitives::Address>()
-                .context(format!("Invalid proxy_wallet for account {}", acct_config.name))?
+            acct_config
+                .proxy_wallet
+                .parse::<alloy::primitives::Address>()
+                .context(format!(
+                    "Invalid proxy_wallet for account {}",
+                    acct_config.name
+                ))?
         };
 
         tracing::info!(
@@ -449,39 +456,45 @@ async fn main() -> Result<()> {
         );
 
         // Authenticate with CLOB
-        let clob = match ClobExecutor::connect(
-            &settings.clob.host, signer, acct_config.signature_type,
-        ).await {
-            Ok(c) => {
-                tracing::info!(account = %acct_config.name, "CLOB authenticated");
-                Some(c)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    account = %acct_config.name,
-                    error = %e,
-                    "CLOB authentication failed — account in OBSERVE-ONLY mode"
-                );
-                None
-            }
-        };
+        let clob =
+            match ClobExecutor::connect(&settings.clob.host, signer, acct_config.signature_type)
+                .await
+            {
+                Ok(c) => {
+                    tracing::info!(account = %acct_config.name, "CLOB authenticated");
+                    Some(c)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        account = %acct_config.name,
+                        error = %e,
+                        "CLOB authentication failed — account in OBSERVE-ONLY mode"
+                    );
+                    None
+                }
+            };
 
         let trading_enabled = clob.is_some();
         let executor: Arc<dyn pa_core::traits::Executor> = if let Some(clob) = clob {
             let provider = alloy::providers::ProviderBuilder::new()
                 .connect(&settings.chain.rpc_url)
                 .await
-                .context(format!("Failed to connect RPC for account {}", acct_config.name))?;
-            let ctf = CtfExecutor::with_neg_risk(provider, settings.chain.chain_id)
-                .context(format!("Failed to create CTF executor for account {}", acct_config.name))?;
+                .context(format!(
+                    "Failed to connect RPC for account {}",
+                    acct_config.name
+                ))?;
+            let ctf =
+                CtfExecutor::with_neg_risk(provider, settings.chain.chain_id).context(format!(
+                    "Failed to create CTF executor for account {}",
+                    acct_config.name
+                ))?;
             Arc::new(HybridOrchestrator::new(clob, ctf))
         } else {
             Arc::new(DryRunExecutor)
         };
 
         // Query initial USDC balance
-        let usdc_balance: Arc<ArcSwap<Decimal>> =
-            Arc::new(ArcSwap::from_pointee(Decimal::ZERO));
+        let usdc_balance: Arc<ArcSwap<Decimal>> = Arc::new(ArcSwap::from_pointee(Decimal::ZERO));
         match executor.get_balance().await {
             Ok(bal) => {
                 usdc_balance.store(Arc::new(bal));
@@ -520,10 +533,8 @@ async fn main() -> Result<()> {
         // Ensure held position markets are in the shared markets list
         if !api_positions.is_empty() {
             let markets_snapshot = shared_markets.read().await;
-            let known_condition_ids: HashSet<_> = markets_snapshot
-                .iter()
-                .map(|m| m.condition_id)
-                .collect();
+            let known_condition_ids: HashSet<_> =
+                markets_snapshot.iter().map(|m| m.condition_id).collect();
             let missing_condition_ids: Vec<_> = api_positions
                 .iter()
                 .map(|p| p.condition_id)
@@ -567,7 +578,8 @@ async fn main() -> Result<()> {
         let initial_positions: Vec<_> = api_positions
             .iter()
             .map(|p| {
-                let strategy_type = infer_strategy_type(p.token_id, &markets_snapshot, &neg_risk_events);
+                let strategy_type =
+                    infer_strategy_type(p.token_id, &markets_snapshot, &neg_risk_events);
                 if strategy_type.is_some() {
                     tracing::debug!(
                         account = %acct_config.name,
@@ -577,7 +589,8 @@ async fn main() -> Result<()> {
                         "Position tagged"
                     );
                 } else {
-                    let question = markets_snapshot.iter()
+                    let question = markets_snapshot
+                        .iter()
                         .find(|m| m.tokens.iter().any(|t| t.token_id == p.token_id))
                         .map(|m| m.question.as_str())
                         .unwrap_or("<market not found>");
@@ -589,7 +602,13 @@ async fn main() -> Result<()> {
                         "UNTAGGED position — strategy inference failed"
                     );
                 }
-                (p.token_id, p.size, p.avg_price, strategy_type, Some(p.condition_id))
+                (
+                    p.token_id,
+                    p.size,
+                    p.avg_price,
+                    strategy_type,
+                    Some(p.condition_id),
+                )
             })
             .collect();
         drop(markets_snapshot);
@@ -695,24 +714,27 @@ async fn main() -> Result<()> {
 
         // --- Strategy engine ---
         // Determine which strategies this account should run
-        let enabled_strategies: Vec<String> = settings.strategy.enabled.iter()
+        let enabled_strategies: Vec<String> = settings
+            .strategy
+            .enabled
+            .iter()
             .filter(|s| acct_strategies.contains(s))
             .cloned()
             .collect();
 
         if !enabled_strategies.is_empty() {
-            let make_capital_fn = |bal: Arc<ArcSwap<Decimal>>|
-             -> Box<dyn Fn() -> Decimal + Send + Sync> {
-                Box::new(move || {
-                    let balance = **bal.load();
-                    balance.max(Decimal::ZERO)
-                })
-            };
+            let make_capital_fn =
+                |bal: Arc<ArcSwap<Decimal>>| -> Box<dyn Fn() -> Decimal + Send + Sync> {
+                    Box::new(move || {
+                        let balance = **bal.load();
+                        balance.max(Decimal::ZERO)
+                    })
+                };
 
-            let make_balance_fn = |bal: Arc<ArcSwap<Decimal>>|
-             -> Box<dyn Fn() -> Decimal + Send + Sync> {
-                Box::new(move || **bal.load())
-            };
+            let make_balance_fn =
+                |bal: Arc<ArcSwap<Decimal>>| -> Box<dyn Fn() -> Decimal + Send + Sync> {
+                    Box::new(move || **bal.load())
+                };
 
             let mut strategies: Vec<Box<dyn pa_core::traits::Strategy>> = Vec::new();
 
@@ -723,12 +745,18 @@ async fn main() -> Result<()> {
                 let weather_strategy = pa_strategy::weather::WeatherAlphaStrategy::new(
                     settings.weather.clone(),
                     dec!(0.00),
-                    Box::new(move |token_id| weather_cache.get(&token_id)),
-                    make_capital_fn(Arc::clone(&ctx.usdc_balance)),
-                    Box::new(move |tid: alloy::primitives::U256| rm_pos.get_position_size(&tid)),
-                    neg_risk_events.clone(),
-                    Box::new(move || rm_held.positions_by_strategy(pa_core::types::StrategyType::Weather)),
-                    make_balance_fn(Arc::clone(&ctx.usdc_balance)),
+                    pa_strategy::weather::WeatherAlphaDeps {
+                        get_orderbook: Box::new(move |token_id| weather_cache.get(&token_id)),
+                        get_available_capital: make_capital_fn(Arc::clone(&ctx.usdc_balance)),
+                        get_position: Box::new(move |tid: alloy::primitives::U256| {
+                            rm_pos.get_position_size(&tid)
+                        }),
+                        get_held_positions: Box::new(move || {
+                            rm_held.positions_by_strategy(pa_core::types::StrategyType::Weather)
+                        }),
+                        get_balance: make_balance_fn(Arc::clone(&ctx.usdc_balance)),
+                        neg_risk_events: neg_risk_events.clone(),
+                    },
                 );
                 strategies.push(Box::new(weather_strategy));
             }
@@ -740,13 +768,20 @@ async fn main() -> Result<()> {
                 let crypto = pa_strategy::crypto_alpha::CryptoAlphaStrategy::new(
                     settings.crypto_alpha.clone(),
                     dec!(0.00),
-                    Box::new(move |token_id| crypto_cache.get(&token_id)),
-                    make_capital_fn(Arc::clone(&ctx.usdc_balance)),
-                    Box::new(move |tid: alloy::primitives::U256| rm_pos_crypto.get_position_size(&tid)),
-                    neg_risk_events.clone(),
-                    binary_event_groups.clone(),
-                    Box::new(move || rm_held_crypto.positions_by_strategy(pa_core::types::StrategyType::CryptoAlpha)),
-                    make_balance_fn(Arc::clone(&ctx.usdc_balance)),
+                    pa_strategy::crypto_alpha::CryptoAlphaDeps {
+                        get_orderbook: Box::new(move |token_id| crypto_cache.get(&token_id)),
+                        get_available_capital: make_capital_fn(Arc::clone(&ctx.usdc_balance)),
+                        get_position: Box::new(move |tid: alloy::primitives::U256| {
+                            rm_pos_crypto.get_position_size(&tid)
+                        }),
+                        get_held_positions: Box::new(move || {
+                            rm_held_crypto
+                                .positions_by_strategy(pa_core::types::StrategyType::CryptoAlpha)
+                        }),
+                        get_balance: make_balance_fn(Arc::clone(&ctx.usdc_balance)),
+                        neg_risk_events: neg_risk_events.clone(),
+                        binary_event_groups: binary_event_groups.clone(),
+                    },
                 );
                 strategies.push(Box::new(crypto));
             }
@@ -758,18 +793,31 @@ async fn main() -> Result<()> {
 
                 // Build token_to_condition map from discovered markets
                 let sm_markets_snapshot = shared_markets.read().await;
-                let sm_token_to_cid: Arc<std::sync::RwLock<std::collections::HashMap<alloy::primitives::U256, alloy::primitives::B256>>> =
-                    Arc::new(std::sync::RwLock::new(
-                        sm_markets_snapshot.iter()
-                            .flat_map(|m| m.tokens.iter().map(|t| (t.token_id, m.condition_id)))
-                            .collect()
-                    ));
+                let sm_token_to_cid: Arc<
+                    std::sync::RwLock<
+                        std::collections::HashMap<alloy::primitives::U256, alloy::primitives::B256>,
+                    >,
+                > = Arc::new(std::sync::RwLock::new(
+                    sm_markets_snapshot
+                        .iter()
+                        .flat_map(|m| m.tokens.iter().map(|t| (t.token_id, m.condition_id)))
+                        .collect(),
+                ));
 
                 // Markets lookup shared with strategy
-                let sm_markets: Arc<std::sync::RwLock<std::collections::HashMap<alloy::primitives::B256, pa_core::types::MarketInfo>>> =
-                    Arc::new(std::sync::RwLock::new(
-                        sm_markets_snapshot.iter().map(|m| (m.condition_id, m.clone())).collect()
-                    ));
+                let sm_markets: Arc<
+                    std::sync::RwLock<
+                        std::collections::HashMap<
+                            alloy::primitives::B256,
+                            pa_core::types::MarketInfo,
+                        >,
+                    >,
+                > = Arc::new(std::sync::RwLock::new(
+                    sm_markets_snapshot
+                        .iter()
+                        .map(|m| (m.condition_id, m.clone()))
+                        .collect(),
+                ));
                 drop(sm_markets_snapshot);
 
                 // Create WalletTracker
@@ -782,13 +830,19 @@ async fn main() -> Result<()> {
                 let smart_money = pa_strategy::smart_money::SmartMoneyStrategy::new(
                     settings.smart_money.clone(),
                     dec!(0.00),
-                    Box::new(move |token_id| sm_cache.get(&token_id)),
-                    make_capital_fn(Arc::clone(&ctx.usdc_balance)),
-                    Box::new(move |tid: alloy::primitives::U256| rm_pos_sm.get_position_size(&tid)),
-                    Box::new(move || rm_held_sm.positions_by_strategy(pa_core::types::StrategyType::SmartMoney)),
-                    make_balance_fn(Arc::clone(&ctx.usdc_balance)),
-                    sm_signals,
-                    Arc::clone(&sm_markets),
+                    pa_strategy::smart_money::SmartMoneyStrategyDeps {
+                        get_orderbook: Box::new(move |token_id| sm_cache.get(&token_id)),
+                        get_available_capital: make_capital_fn(Arc::clone(&ctx.usdc_balance)),
+                        get_position: Box::new(move |tid: alloy::primitives::U256| {
+                            rm_pos_sm.get_position_size(&tid)
+                        }),
+                        get_held_positions: Box::new(move || {
+                            rm_held_sm
+                                .positions_by_strategy(pa_core::types::StrategyType::SmartMoney)
+                        }),
+                        signals: sm_signals,
+                        markets: Arc::clone(&sm_markets),
+                    },
                 );
                 strategies.push(Box::new(smart_money));
 
@@ -816,24 +870,29 @@ async fn main() -> Result<()> {
                     strategies,
                     ctx.executor.clone(),
                     ctx.risk_manager.clone(),
-                    settings.strategy.scan_interval_ms,
-                    event_calendar,
-                    Box::new(move |token_id| engine_cache.get(&token_id)),
-                    make_capital_fn(Arc::clone(&ctx.usdc_balance)),
-                    Box::new(move || {
-                        engine_rm_all.snapshot_positions()
-                            .into_iter()
-                            .map(|(token_id, entry)| pa_strategy::engine::StopLossPosition {
-                                token_id,
-                                size: entry.size,
-                                avg_cost: entry.avg_cost,
-                                strategy_type: entry.strategy_type,
-                                condition_id: entry.condition_id,
-                            })
-                            .collect()
-                    }),
-                    settings.risk.min_order_usdc,
-                    settings.strategy.max_market_end_days,
+                    pa_strategy::engine::StrategyEngineDeps {
+                        get_orderbook: Box::new(move |token_id| engine_cache.get(&token_id)),
+                        get_available_capital: make_capital_fn(Arc::clone(&ctx.usdc_balance)),
+                        get_all_positions: Box::new(move || {
+                            engine_rm_all
+                                .snapshot_positions()
+                                .into_iter()
+                                .map(|(token_id, entry)| pa_strategy::engine::StopLossPosition {
+                                    token_id,
+                                    size: entry.size,
+                                    avg_cost: entry.avg_cost,
+                                    strategy_type: entry.strategy_type,
+                                    condition_id: entry.condition_id,
+                                })
+                                .collect()
+                        }),
+                    },
+                    pa_strategy::engine::StrategyEngineOptions {
+                        scan_interval_ms: settings.strategy.scan_interval_ms,
+                        event_calendar,
+                        min_order_usdc: settings.risk.min_order_usdc,
+                        max_market_end_days: settings.strategy.max_market_end_days,
+                    },
                 );
 
                 let engine_shared = Arc::clone(&shared_markets);
@@ -884,13 +943,14 @@ async fn main() -> Result<()> {
                         return;
                     }
                 };
-                let lr_clob = match ClobExecutor::connect(&lr_clob_host, lr_signer, lr_sig_type).await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::error!(account = %lr_name, error = %e, "LR: CLOB auth failed");
-                        return;
-                    }
-                };
+                let lr_clob =
+                    match ClobExecutor::connect(&lr_clob_host, lr_signer, lr_sig_type).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::error!(account = %lr_name, error = %e, "LR: CLOB auth failed");
+                            return;
+                        }
+                    };
                 tracing::info!(account = %lr_name, "LR: CLOB authenticated, starting liquidity rewards");
 
                 // Query actual USDC balance to cap exposure
@@ -917,10 +977,22 @@ async fn main() -> Result<()> {
                     std::collections::HashMap<String, LrOrderMeta>,
                 > = std::collections::HashMap::new();
 
-                let mut last_quoted_mid: std::collections::HashMap<alloy::primitives::U256, Decimal> = std::collections::HashMap::new();
-                let mut token_to_condition: std::collections::HashMap<alloy::primitives::U256, alloy::primitives::B256> = std::collections::HashMap::new();
-                let mut last_quote_time: std::collections::HashMap<alloy::primitives::B256, std::time::Instant> = std::collections::HashMap::new();
-                let mut cooldown_map: std::collections::HashMap<(alloy::primitives::U256, bool, Decimal), std::time::Instant> = std::collections::HashMap::new();
+                let mut last_quoted_mid: std::collections::HashMap<
+                    alloy::primitives::U256,
+                    Decimal,
+                > = std::collections::HashMap::new();
+                let mut token_to_condition: std::collections::HashMap<
+                    alloy::primitives::U256,
+                    alloy::primitives::B256,
+                > = std::collections::HashMap::new();
+                let mut last_quote_time: std::collections::HashMap<
+                    alloy::primitives::B256,
+                    std::time::Instant,
+                > = std::collections::HashMap::new();
+                let mut cooldown_map: std::collections::HashMap<
+                    (alloy::primitives::U256, bool, Decimal),
+                    std::time::Instant,
+                > = std::collections::HashMap::new();
                 let cooldown_duration = Duration::from_secs(lr_config.failed_cooldown_secs);
                 let mut cached_balance = effective_max_exposure; // Start with effective cap, refreshed each tick
 
@@ -932,23 +1004,34 @@ async fn main() -> Result<()> {
                         Vec::new()
                     }
                 };
-                
+
                 let markets_init = lr_shared.read().await;
-                let mut active_candidates = pa_strategy::liquidity_rewards::select_reward_markets_hybrid(
-                    &markets_init, &clob_rewards, &lr_config,
-                );
+                let mut active_candidates =
+                    pa_strategy::liquidity_rewards::select_reward_markets_hybrid(
+                        &markets_init,
+                        &clob_rewards,
+                        &lr_config,
+                    );
                 drop(markets_init);
-                let mut cid_to_candidate_idx: std::collections::HashMap<alloy::primitives::B256, usize> = std::collections::HashMap::new();
+                let mut cid_to_candidate_idx: std::collections::HashMap<
+                    alloy::primitives::B256,
+                    usize,
+                > = std::collections::HashMap::new();
 
                 let mut lr_update_rx = lr_update_rx;
 
-                let mut fallback_interval = tokio::time::interval(Duration::from_secs(lr_config.quote_refresh_secs));
-                let mut market_interval = tokio::time::interval(Duration::from_secs(lr_config.market_refresh_secs));
+                let mut fallback_interval =
+                    tokio::time::interval(Duration::from_secs(lr_config.quote_refresh_secs));
+                let mut market_interval =
+                    tokio::time::interval(Duration::from_secs(lr_config.market_refresh_secs));
                 let requote_cooldown = Duration::from_secs(lr_config.requote_cooldown_secs);
                 let fill_check_enabled = lr_config.fill_check_secs > 0;
-                let mut fill_check_interval = tokio::time::interval(Duration::from_secs(
-                    if fill_check_enabled { lr_config.fill_check_secs } else { 86400 },
-                ));
+                let mut fill_check_interval =
+                    tokio::time::interval(Duration::from_secs(if fill_check_enabled {
+                        lr_config.fill_check_secs
+                    } else {
+                        86400
+                    }));
 
                 // Initial mapping + quoting
                 {
@@ -963,13 +1046,21 @@ async fn main() -> Result<()> {
                     }
 
                     // Count total sides being quoted for balance splitting
-                    let sides_being_quoted: u32 = active_candidates.iter()
+                    let sides_being_quoted: u32 = active_candidates
+                        .iter()
                         .map(|c| {
-                            let eff = pa_strategy::liquidity_rewards::effective_market_config(&lr_config, &c.market.condition_id);
+                            let eff = pa_strategy::liquidity_rewards::effective_market_config(
+                                &lr_config,
+                                &c.market.condition_id,
+                            );
                             let mut sides = 0u32;
                             if c.market.tokens.len() == 2 {
-                                if eff.quote_yes { sides += 1; }
-                                if eff.quote_no { sides += 1; }
+                                if eff.quote_yes {
+                                    sides += 1;
+                                }
+                                if eff.quote_no {
+                                    sides += 1;
+                                }
                             } else {
                                 sides += c.market.tokens.len() as u32;
                             }
@@ -983,19 +1074,33 @@ async fn main() -> Result<()> {
                     let mut total_exposure = Decimal::ZERO;
                     for candidate in &active_candidates {
                         let (metas, exp, yes_mid, no_mid) = lr_quote_one_market(
-                            &candidate.market, &lr_config, &lr_cache, &lr_rm, &lr_clob, total_exposure,
-                            candidate.clob_rewards_max_spread, candidate.clob_rewards_min_size,
-                            effective_max_exposure, cached_balance, sides_being_quoted,
-                            &cooldown_map, cooldown_duration,
-                        ).await;
+                            &candidate.market,
+                            &lr_config,
+                            &lr_cache,
+                            &lr_rm,
+                            &lr_clob,
+                            total_exposure,
+                            candidate.clob_rewards_max_spread,
+                            candidate.clob_rewards_min_size,
+                            effective_max_exposure,
+                            cached_balance,
+                            sides_being_quoted,
+                            &cooldown_map,
+                            cooldown_duration,
+                        )
+                        .await;
                         total_exposure += exp;
                         let cid = candidate.market.condition_id;
                         if !metas.is_empty() {
                             outstanding_orders.insert(cid, metas.into_iter().collect());
                         }
                         if candidate.market.tokens.len() >= 2 {
-                            if let Some(m) = yes_mid { last_quoted_mid.insert(candidate.market.tokens[0].token_id, m); }
-                            if let Some(m) = no_mid { last_quoted_mid.insert(candidate.market.tokens[1].token_id, m); }
+                            if let Some(m) = yes_mid {
+                                last_quoted_mid.insert(candidate.market.tokens[0].token_id, m);
+                            }
+                            if let Some(m) = no_mid {
+                                last_quoted_mid.insert(candidate.market.tokens[1].token_id, m);
+                            }
                         }
                         let now = std::time::Instant::now();
                         last_quote_time.insert(cid, now);
@@ -1274,7 +1379,7 @@ async fn main() -> Result<()> {
                                     Vec::new()
                                 }
                             };
-                            
+
                             let markets_snapshot = lr_shared.read().await;
                             active_candidates = pa_strategy::liquidity_rewards::select_reward_markets_hybrid(
                                 &markets_snapshot, &clob_rewards, &lr_config,
@@ -1838,10 +1943,12 @@ async fn main() -> Result<()> {
 
     // --- Periodic API position snapshot refresh (every 30s) ---
     {
-        let snap_risk_managers: Vec<Arc<RiskManagerImpl>> = account_contexts.iter()
+        let snap_risk_managers: Vec<Arc<RiskManagerImpl>> = account_contexts
+            .iter()
             .map(|ctx| Arc::clone(&ctx.risk_manager_impl))
             .collect();
-        let snap_balances: Vec<Arc<ArcSwap<Decimal>>> = account_contexts.iter()
+        let snap_balances: Vec<Arc<ArcSwap<Decimal>>> = account_contexts
+            .iter()
             .map(|ctx| Arc::clone(&ctx.usdc_balance))
             .collect();
         let snap_markets = Arc::clone(&shared_markets);
@@ -1939,7 +2046,8 @@ async fn main() -> Result<()> {
         let refresh_enabled_strategies = settings.strategy.enabled.clone();
         let refresh_ws_max = settings.market_filter.ws_max_instruments;
         // Collect all accounts' risk managers for held token aggregation
-        let refresh_risk_managers: Vec<Arc<RiskManagerImpl>> = account_contexts.iter()
+        let refresh_risk_managers: Vec<Arc<RiskManagerImpl>> = account_contexts
+            .iter()
             .map(|ctx| Arc::clone(&ctx.risk_manager_impl))
             .collect();
 
@@ -2082,9 +2190,17 @@ async fn lr_quote_one_market(
     effective_max_exposure: Decimal,
     cached_balance: Decimal,
     sides_being_quoted: u32,
-    cooldown_map: &std::collections::HashMap<(alloy::primitives::U256, bool, Decimal), std::time::Instant>,
+    cooldown_map: &std::collections::HashMap<
+        (alloy::primitives::U256, bool, Decimal),
+        std::time::Instant,
+    >,
     cooldown_duration: Duration,
-) -> (Vec<(String, LrOrderMeta)>, Decimal, Option<Decimal>, Option<Decimal>) {
+) -> (
+    Vec<(String, LrOrderMeta)>,
+    Decimal,
+    Option<Decimal>,
+    Option<Decimal>,
+) {
     let cid = market.condition_id;
     let eff = pa_strategy::liquidity_rewards::effective_market_config(config, &cid);
 
@@ -2105,26 +2221,44 @@ async fn lr_quote_one_market(
         pairs
     } else {
         // NegRisk: quote each token
-        market.tokens.iter().map(|t| (t.token_id, true, true)).collect()
+        market
+            .tokens
+            .iter()
+            .map(|t| (t.token_id, true, true))
+            .collect()
     };
 
     for (idx, &(tid, is_yes_side, _do_ask)) in token_pairs.iter().enumerate() {
         let position = rm.get_position_size(&tid);
-        let Some(book) = cache.get(&tid) else { continue };
+        let Some(book) = cache.get(&tid) else {
+            continue;
+        };
         let Some(mid) = book.midpoint() else { continue };
 
-        if idx == 0 { first_mid_out = Some(mid); }
-        if idx == 1 { second_mid_out = Some(mid); }
+        if idx == 0 {
+            first_mid_out = Some(mid);
+        }
+        if idx == 1 {
+            second_mid_out = Some(mid);
+        }
 
         let quote_opt = if eff.order_depth_level > 0 {
             pa_strategy::liquidity_rewards::compute_depth_quotes(
-                &book, eff.order_depth_level,
-                rewards_max_spread, position, config, rewards_min_size,
+                &book,
+                eff.order_depth_level,
+                rewards_max_spread,
+                position,
+                config,
+                rewards_min_size,
             )
         } else {
             pa_strategy::liquidity_rewards::compute_quotes(
-                mid, rewards_max_spread, position,
-                config, rewards_min_size, market.tick_size,
+                mid,
+                rewards_max_spread,
+                position,
+                config,
+                rewards_min_size,
+                market.tick_size,
             )
         };
 
@@ -2140,7 +2274,8 @@ async fn lr_quote_one_market(
 
         // ── Bid (buy) ──
         let remaining_pos = (eff.max_position_per_market - position).max(Decimal::ZERO);
-        let remaining_exp = (effective_max_exposure - current_exposure - exposure_added).max(Decimal::ZERO);
+        let remaining_exp =
+            (effective_max_exposure - current_exposure - exposure_added).max(Decimal::ZERO);
         let max_from_exp = if quote.bid_price > Decimal::ZERO {
             remaining_exp / quote.bid_price
         } else {
@@ -2148,11 +2283,16 @@ async fn lr_quote_one_market(
         };
 
         let balance_size = pa_strategy::liquidity_rewards::balance_aware_size(
-            quote.bid_price, cached_balance, sides_being_quoted,
-            eff.max_position_per_market, remaining_exp, config.min_order_size,
+            quote.bid_price,
+            cached_balance,
+            sides_being_quoted,
+            eff.max_position_per_market,
+            remaining_exp,
+            config.min_order_size,
         );
 
-        let bid_size = quote.size
+        let bid_size = quote
+            .size
             .min(remaining_pos)
             .min(max_from_exp)
             .min(balance_size.max(quote.size)); // Use balance cap if available, else original
@@ -2164,19 +2304,31 @@ async fn lr_quote_one_market(
 
         let bid_cooldown_key = (tid, true, quote.bid_price);
         let bid_on_cooldown = cooldown_map.get(&bid_cooldown_key).is_some_and(|&t| {
-            pa_strategy::liquidity_rewards::is_order_on_cooldown(t, std::time::Instant::now(), cooldown_duration)
+            pa_strategy::liquidity_rewards::is_order_on_cooldown(
+                t,
+                std::time::Instant::now(),
+                cooldown_duration,
+            )
         });
 
         if bid_size >= config.min_order_size && !bid_on_cooldown {
-            match clob.buy_limit_post_only(tid, quote.bid_price, bid_size).await {
+            match clob
+                .buy_limit_post_only(tid, quote.bid_price, bid_size)
+                .await
+            {
                 Ok(r) if !r.order_id.is_empty() => {
                     pa_monitor::metrics::LR_ORDERS_PLACED.inc();
                     exposure_added += bid_size * quote.bid_price;
-                    order_metas.push((r.order_id, LrOrderMeta {
-                        token_id: tid, is_buy: true,
-                        price: quote.bid_price, size: bid_size,
-                        last_synced_matched: Decimal::ZERO,
-                    }));
+                    order_metas.push((
+                        r.order_id,
+                        LrOrderMeta {
+                            token_id: tid,
+                            is_buy: true,
+                            price: quote.bid_price,
+                            size: bid_size,
+                            last_synced_matched: Decimal::ZERO,
+                        },
+                    ));
                 }
                 Ok(_) => {}
                 Err(e) => tracing::debug!(error = %e, market = %cid, "LR: bid failed for {}", tid),
@@ -2188,20 +2340,34 @@ async fn lr_quote_one_market(
             let sell_size = quote.size.min(position);
             let ask_cooldown_key = (tid, false, quote.ask_price);
             let ask_on_cooldown = cooldown_map.get(&ask_cooldown_key).is_some_and(|&t| {
-                pa_strategy::liquidity_rewards::is_order_on_cooldown(t, std::time::Instant::now(), cooldown_duration)
+                pa_strategy::liquidity_rewards::is_order_on_cooldown(
+                    t,
+                    std::time::Instant::now(),
+                    cooldown_duration,
+                )
             });
             if sell_size >= config.min_order_size && !ask_on_cooldown {
-                match clob.sell_limit_post_only(tid, quote.ask_price, sell_size).await {
+                match clob
+                    .sell_limit_post_only(tid, quote.ask_price, sell_size)
+                    .await
+                {
                     Ok(r) if !r.order_id.is_empty() => {
                         pa_monitor::metrics::LR_ORDERS_PLACED.inc();
-                        order_metas.push((r.order_id, LrOrderMeta {
-                            token_id: tid, is_buy: false,
-                            price: quote.ask_price, size: sell_size,
-                            last_synced_matched: Decimal::ZERO,
-                        }));
+                        order_metas.push((
+                            r.order_id,
+                            LrOrderMeta {
+                                token_id: tid,
+                                is_buy: false,
+                                price: quote.ask_price,
+                                size: sell_size,
+                                last_synced_matched: Decimal::ZERO,
+                            },
+                        ));
                     }
                     Ok(_) => {}
-                    Err(e) => tracing::debug!(error = %e, market = %cid, "LR: ask failed for {}", tid),
+                    Err(e) => {
+                        tracing::debug!(error = %e, market = %cid, "LR: ask failed for {}", tid)
+                    }
                 }
             }
         }
@@ -2223,7 +2389,8 @@ fn build_position_snapshot(
     use std::collections::HashMap;
 
     // Build token_id → (question, outcome, condition_id) lookup
-    let mut token_map: HashMap<alloy::primitives::U256, (&str, &str, alloy::primitives::B256)> = HashMap::new();
+    let mut token_map: HashMap<alloy::primitives::U256, (&str, &str, alloy::primitives::B256)> =
+        HashMap::new();
     for m in markets {
         for t in &m.tokens {
             let outcome = match t.outcome {
@@ -2240,11 +2407,14 @@ fn build_position_snapshot(
             if pe.size < dec!(0.1) {
                 continue;
             }
-            let (question, outcome, _cid) = token_map.get(&token_id)
-                .copied()
-                .unwrap_or(("", "", alloy::primitives::B256::ZERO));
+            let (question, outcome, _cid) = token_map.get(&token_id).copied().unwrap_or((
+                "",
+                "",
+                alloy::primitives::B256::ZERO,
+            ));
 
-            let current_price = cache.get(&token_id)
+            let current_price = cache
+                .get(&token_id)
                 .and_then(|ob| ob.bids.first().map(|b| b.price));
 
             let unrealized_pnl = current_price.map(|p| pe.size * (p - pe.avg_cost));
@@ -2263,8 +2433,16 @@ fn build_position_snapshot(
                 cost_basis: pe.size * pe.avg_cost,
                 strategy: strategy_name.map(|s| s.to_string()),
                 condition_id: pe.condition_id.map(|c| format!("{:#x}", c)),
-                question: if question.is_empty() { None } else { Some(question.to_string()) },
-                outcome: if outcome.is_empty() { None } else { Some(outcome.to_string()) },
+                question: if question.is_empty() {
+                    None
+                } else {
+                    Some(question.to_string())
+                },
+                outcome: if outcome.is_empty() {
+                    None
+                } else {
+                    Some(outcome.to_string())
+                },
                 current_price,
                 unrealized_pnl,
             });
@@ -2273,7 +2451,10 @@ fn build_position_snapshot(
     entries
 }
 
-fn seed_market_cache(cache: &pa_market_data::cache::OrderBookCache, m: &pa_core::types::MarketInfo) -> bool {
+fn seed_market_cache(
+    cache: &pa_market_data::cache::OrderBookCache,
+    m: &pa_core::types::MarketInfo,
+) -> bool {
     if m.tokens.len() < 2 {
         return false;
     }
@@ -2305,8 +2486,14 @@ fn seed_market_cache(cache: &pa_market_data::cache::OrderBookCache, m: &pa_core:
         m.tokens[0].token_id,
         pa_core::types::OrderBook {
             token_id: m.tokens[0].token_id,
-            bids: vec![pa_core::types::PriceLevel { price: yes_bid, size: dec!(1000) }],
-            asks: vec![pa_core::types::PriceLevel { price: yes_ask, size: dec!(1000) }],
+            bids: vec![pa_core::types::PriceLevel {
+                price: yes_bid,
+                size: dec!(1000),
+            }],
+            asks: vec![pa_core::types::PriceLevel {
+                price: yes_ask,
+                size: dec!(1000),
+            }],
             timestamp: Utc::now(),
         },
     );
@@ -2315,8 +2502,14 @@ fn seed_market_cache(cache: &pa_market_data::cache::OrderBookCache, m: &pa_core:
         m.tokens[1].token_id,
         pa_core::types::OrderBook {
             token_id: m.tokens[1].token_id,
-            bids: vec![pa_core::types::PriceLevel { price: no_bid, size: dec!(1000) }],
-            asks: vec![pa_core::types::PriceLevel { price: no_ask, size: dec!(1000) }],
+            bids: vec![pa_core::types::PriceLevel {
+                price: no_bid,
+                size: dec!(1000),
+            }],
+            asks: vec![pa_core::types::PriceLevel {
+                price: no_ask,
+                size: dec!(1000),
+            }],
             timestamp: Utc::now(),
         },
     );
@@ -2342,13 +2535,12 @@ fn build_ws_token_list(
             continue;
         }
 
-        let yes_price = m.gamma_best_ask
-            .and_then(|p| p.to_f64())
-            .or_else(|| {
-                m.outcome_prices.as_ref()
-                    .and_then(|p| p.first().copied())
-                    .and_then(|p| p.to_f64())
-            });
+        let yes_price = m.gamma_best_ask.and_then(|p| p.to_f64()).or_else(|| {
+            m.outcome_prices
+                .as_ref()
+                .and_then(|p| p.first().copied())
+                .and_then(|p| p.to_f64())
+        });
 
         if let Some(yp) = yes_price {
             if yp < 0.05 || yp > 0.95 {
@@ -2381,12 +2573,20 @@ fn build_ws_token_list(
     }
 
     for (yes_tid, no_tid, _) in &strategy_mid {
-        if !token_ids.contains(yes_tid) { token_ids.push(*yes_tid); }
-        if !token_ids.contains(no_tid) { token_ids.push(*no_tid); }
+        if !token_ids.contains(yes_tid) {
+            token_ids.push(*yes_tid);
+        }
+        if !token_ids.contains(no_tid) {
+            token_ids.push(*no_tid);
+        }
     }
     for (yes_tid, no_tid, _) in &general_mid {
-        if !token_ids.contains(yes_tid) { token_ids.push(*yes_tid); }
-        if !token_ids.contains(no_tid) { token_ids.push(*no_tid); }
+        if !token_ids.contains(yes_tid) {
+            token_ids.push(*yes_tid);
+        }
+        if !token_ids.contains(no_tid) {
+            token_ids.push(*no_tid);
+        }
     }
 
     let neg_risk_token_ids: Vec<_> = markets
@@ -2416,9 +2616,10 @@ fn infer_strategy_type(
 
     // Check NegRisk events first (weather and crypto both use them)
     for event in neg_risk_events {
-        let has_token = event.markets.iter().any(|m| {
-            m.tokens.iter().any(|t| t.token_id == token_id)
-        });
+        let has_token = event
+            .markets
+            .iter()
+            .any(|m| m.tokens.iter().any(|t| t.token_id == token_id));
         if has_token {
             if pa_strategy::weather::parse_weather_event_title(&event.title).is_some() {
                 return Some(StrategyType::Weather);

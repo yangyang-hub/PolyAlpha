@@ -4,7 +4,7 @@ use axum::extract::State;
 use axum::response::Json;
 use axum::{Router, routing::get};
 use chrono::{DateTime, Utc};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 
 /// Health check function: returns true if the dependency is healthy.
@@ -52,10 +52,7 @@ async fn health_handler(State(state): State<Arc<HealthState>>) -> Json<Value> {
         if !ok {
             all_ok = false;
         }
-        checks.insert(
-            name.to_string(),
-            json!(if ok { "ok" } else { "error" }),
-        );
+        checks.insert(name.to_string(), json!(if ok { "ok" } else { "error" }));
     }
 
     let status = if all_ok { "healthy" } else { "degraded" };
@@ -68,7 +65,9 @@ async fn health_handler(State(state): State<Arc<HealthState>>) -> Json<Value> {
     }))
 }
 
-async fn readiness_handler(State(state): State<Arc<HealthState>>) -> (axum::http::StatusCode, Json<Value>) {
+async fn readiness_handler(
+    State(state): State<Arc<HealthState>>,
+) -> (axum::http::StatusCode, Json<Value>) {
     let all_ok = state.checks.iter().all(|(_, check)| check());
 
     if all_ok {

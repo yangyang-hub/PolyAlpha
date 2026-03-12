@@ -1,10 +1,10 @@
 use alloy::primitives::U256;
 use async_trait::async_trait;
 
-use crate::types::{
-    TradingOpportunity, ExecutionResult, MarketInfo, OrderBook, RiskDecision, StrategyType,
-};
 use crate::Result;
+use crate::types::{
+    ExecutionResult, MarketInfo, OrderBook, RiskDecision, StrategyType, TradingOpportunity,
+};
 
 /// Market data feed providing real-time order book data.
 #[async_trait]

@@ -5,7 +5,7 @@
 //! call must originate FROM the Safe. This module encodes CTF calldata and routes it
 //! through `GnosisSafe.execTransaction()` using ETH_SIGN signatures (v > 30).
 
-use alloy::primitives::{Address, Bytes, B256, U256, address};
+use alloy::primitives::{Address, B256, Bytes, U256, address};
 use alloy::providers::Provider;
 use alloy::signers::Signer;
 use alloy::signers::local::PrivateKeySigner;
@@ -143,7 +143,8 @@ impl<P: Provider + Clone> SafeRedeemer<P> {
         }
         .abi_encode();
 
-        self.exec_through_safe(CONDITIONAL_TOKENS, Bytes::from(calldata)).await
+        self.exec_through_safe(CONDITIONAL_TOKENS, Bytes::from(calldata))
+            .await
     }
 
     /// Redeem a NegRisk market position.
@@ -168,7 +169,8 @@ impl<P: Provider + Clone> SafeRedeemer<P> {
         }
         .abi_encode();
 
-        self.exec_through_safe(NEG_RISK_ADAPTER, Bytes::from(calldata)).await
+        self.exec_through_safe(NEG_RISK_ADAPTER, Bytes::from(calldata))
+            .await
     }
 
     /// Execute an arbitrary call through the GnosisSafe's `execTransaction`.
@@ -177,28 +179,28 @@ impl<P: Provider + Clone> SafeRedeemer<P> {
     /// 1. Compute safeTxHash via `getTransactionHash()`
     /// 2. Sign with EIP-191: `sign_message(safeTxHash)` → adds "\x19Ethereum Signed Message:\n32" prefix
     /// 3. Set v = ecdsa_v + 4 (27→31, 28→32) to indicate eth_sign mode
-    async fn exec_through_safe(
-        &self,
-        to: Address,
-        data: Bytes,
-    ) -> anyhow::Result<TxResult> {
+    async fn exec_through_safe(&self, to: Address, data: Bytes) -> anyhow::Result<TxResult> {
         let zero = U256::ZERO;
         let zero_addr = Address::ZERO;
 
         // 1. Get current nonce and compute the EIP-712 Safe transaction hash
         let nonce = self.safe.nonce().call().await?;
-        let safe_tx_hash = self.safe.getTransactionHash(
-            to,
-            zero,
-            data.clone(),
-            0u8,
-            zero,
-            zero,
-            zero,
-            zero_addr,
-            zero_addr,
-            nonce,
-        ).call().await?;
+        let safe_tx_hash = self
+            .safe
+            .getTransactionHash(
+                to,
+                zero,
+                data.clone(),
+                0u8,
+                zero,
+                zero,
+                zero,
+                zero_addr,
+                zero_addr,
+                nonce,
+            )
+            .call()
+            .await?;
 
         tracing::debug!(
             to = %to,
@@ -223,22 +225,24 @@ impl<P: Provider + Clone> SafeRedeemer<P> {
         sig_bytes[64] = sig_raw[64] + 4; // 27→31 or 28→32 for eth_sign mode
 
         // Send execTransaction through the Safe
-        let receipt = self.safe.execTransaction(
-            to,
-            zero,
-            data,
-            0u8,
-            zero,
-            zero,
-            zero,
-            zero_addr,
-            zero_addr,
-            Bytes::from(sig_bytes.to_vec()),
-        )
-        .send()
-        .await?
-        .get_receipt()
-        .await?;
+        let receipt = self
+            .safe
+            .execTransaction(
+                to,
+                zero,
+                data,
+                0u8,
+                zero,
+                zero,
+                zero,
+                zero_addr,
+                zero_addr,
+                Bytes::from(sig_bytes.to_vec()),
+            )
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
 
         tracing::info!(
             tx_hash = %receipt.transaction_hash,
