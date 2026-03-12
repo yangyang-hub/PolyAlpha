@@ -1261,6 +1261,14 @@ pub struct WeatherAlphaStrategy {
 }
 
 impl WeatherAlphaStrategy {
+    /// Convert a USDC budget into share size at a given token ask price.
+    fn shares_from_usdc_budget(usdc_budget: Decimal, ask_price: Decimal) -> Decimal {
+        if ask_price <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+        usdc_budget / ask_price
+    }
+
     pub fn new(
         config: WeatherConfig,
         gas_cost_usd: Decimal,
@@ -1448,7 +1456,10 @@ impl WeatherAlphaStrategy {
                 let edge = model_prob - yes_ask;
                 if edge > Decimal::ZERO {
                     let effective_max = (self.get_balance)() * self.config.max_position_pct;
-                    let size = effective_max.min((self.get_available_capital)());
+                    let size = Self::shares_from_usdc_budget(
+                        effective_max.min((self.get_available_capital)()),
+                        yes_ask,
+                    );
                     
                     if size > Decimal::ZERO {
                         let est = self.profit_calc.directional_buy_profit(
@@ -1486,7 +1497,10 @@ impl WeatherAlphaStrategy {
                 let edge = model_prob - no_ask;
                 if edge > Decimal::ZERO {
                     let effective_max = (self.get_balance)() * self.config.max_position_pct;
-                    let size = effective_max.min((self.get_available_capital)());
+                    let size = Self::shares_from_usdc_budget(
+                        effective_max.min((self.get_available_capital)()),
+                        no_ask,
+                    );
                     
                     if size > Decimal::ZERO {
                         let est = self.profit_calc.directional_buy_profit(
@@ -1637,14 +1651,17 @@ impl WeatherAlphaStrategy {
                     continue;
                 }
 
-                let size = surround_size_per_bin.min((self.get_available_capital)());
+                let size = Self::shares_from_usdc_budget(
+                    surround_size_per_bin.min((self.get_available_capital)()),
+                    yes_ask,
+                );
                 if size <= Decimal::ZERO {
                     continue;
                 }
 
                 let existing_cost = (self.get_position)(market.tokens[0].token_id) * yes_ask;
                 let remaining = (surround_size_per_bin - existing_cost).max(Decimal::ZERO);
-                let final_size = size.min(remaining);
+                let final_size = size.min(Self::shares_from_usdc_budget(remaining, yes_ask));
 
                 if final_size <= Decimal::ZERO {
                     continue;
@@ -1923,7 +1940,7 @@ impl WeatherAlphaStrategy {
         let available = (self.get_available_capital)();
         let existing_cost = (self.get_position)(token_id) * ask_price;
         let remaining = (max_usdc - existing_cost).max(Decimal::ZERO);
-        let size = max_usdc.min(remaining).min(available);
+        let size = Self::shares_from_usdc_budget(max_usdc.min(remaining).min(available), ask_price);
 
         // After capping, verify we still meet CLOB minimum ($1.00 cost).
         // E.g. at price $0.019, min_cost_size=53 but available may only allow 2 shares.
@@ -2251,7 +2268,7 @@ impl WeatherAlphaStrategy {
         let available = (self.get_available_capital)();
         let existing_cost = (self.get_position)(token_id) * ask_price;
         let remaining = (max_usdc - existing_cost).max(Decimal::ZERO);
-        let size = max_usdc.min(remaining).min(available);
+        let size = Self::shares_from_usdc_budget(max_usdc.min(remaining).min(available), ask_price);
 
         // After capping, verify we still meet CLOB minimum ($1.00 cost).
         // E.g. at price $0.019, min_cost_size=53 but available may only allow 2 shares.
@@ -4347,10 +4364,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_price_ceiling_accepts_cheap() {
-        // Token priced at 0.10, max_entry_price=0.15 → should accept
+        // Token ask priced at 0.10 (bid=0.08), max_entry_price=0.15 → should accept
         let token_id = U256::from(1u64);
         let mut books = HashMap::new();
-        books.insert(token_id, make_weather_book(token_id, dec!(0.10)));
+        books.insert(token_id, make_weather_book(token_id, dec!(0.08)));
         books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.90)));
 
         let held = vec![];
@@ -4408,6 +4425,17 @@ mod tests {
         let parsed = parse_weather_question(question).unwrap();
         let result = strategy.detect_weather_opportunity(&market, &parsed).await;
         assert!(result.is_some(), "Token at 0.10 should be accepted (max_entry_price=0.15)");
+
+        // Regression: max_position_usdc=100 should size by shares at ask=0.10 => 1000 shares.
+        let opp = result.unwrap();
+        assert_eq!(opp.size, dec!(1000));
+        match opp.execution_plan {
+            ExecutionPlan::DirectionalBuy { size, price, .. } => {
+                assert_eq!(price, dec!(0.10));
+                assert_eq!(size, dec!(1000));
+            }
+            _ => panic!("expected DirectionalBuy"),
+        }
     }
 
     // ──── Profit-Take Exit Tests ────
@@ -4527,24 +4555,32 @@ mod tests {
 
     #[test]
     fn test_fixed_sizing_caps_at_max() {
-        // max_position_usdc = $2, no existing position → size = $2
+        // max_position_usdc = $2 at price=0.5 → size = 4 shares
         let max_usdc = dec!(2);
+        let ask_price = dec!(0.5);
         let existing_cost = Decimal::ZERO;
         let available = dec!(1000);
         let remaining = (max_usdc - existing_cost).max(Decimal::ZERO);
-        let size = max_usdc.min(remaining).min(available);
-        assert_eq!(size, dec!(2));
+        let size = WeatherAlphaStrategy::shares_from_usdc_budget(
+            max_usdc.min(remaining).min(available),
+            ask_price,
+        );
+        assert_eq!(size, dec!(4));
     }
 
     #[test]
     fn test_fixed_sizing_position_aware() {
-        // max_position_usdc = $2, existing $1.50 → remaining $0.50
+        // max_position_usdc = $2, existing $1.50 → remaining $0.50 @ price=0.5 => 1 share
         let max_usdc = dec!(2);
+        let ask_price = dec!(0.5);
         let existing_cost = dec!(1.5);
         let available = dec!(1000);
         let remaining = (max_usdc - existing_cost).max(Decimal::ZERO);
-        let size = max_usdc.min(remaining).min(available);
-        assert_eq!(size, dec!(0.5));
+        let size = WeatherAlphaStrategy::shares_from_usdc_budget(
+            max_usdc.min(remaining).min(available),
+            ask_price,
+        );
+        assert_eq!(size, dec!(1));
     }
 
     #[test]
