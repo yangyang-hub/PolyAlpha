@@ -59,20 +59,19 @@ impl<P: alloy::providers::Provider + Clone> HybridOrchestrator<P> {
             token_id,
             condition_id,
             side,
-            price,
-            size,
+            price: order.avg_price,
+            size: order.posted_size,
             filled_size: order.filled_size,
             fee: Decimal::ZERO,
             tx_type: TxType::ClobOrder,
             tx_hash: None,
         }];
 
-        let status = if order.filled_size == size {
-            ExecutionStatus::Success
-        } else if order.filled_size > Decimal::ZERO {
-            ExecutionStatus::PartialFill
-        } else {
-            ExecutionStatus::NoFill
+        let status = match order.status {
+            crate::clob_executor::OrderFillStatus::Filled => ExecutionStatus::Success,
+            crate::clob_executor::OrderFillStatus::PartialFill => ExecutionStatus::PartialFill,
+            crate::clob_executor::OrderFillStatus::NoFill
+            | crate::clob_executor::OrderFillStatus::Rejected => ExecutionStatus::NoFill,
         };
 
         Ok(ExecutionResult {

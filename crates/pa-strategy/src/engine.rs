@@ -106,26 +106,6 @@ impl StrategyEngine {
         Decimal::new(s_rounded as i64, 2)
     }
 
-    fn min_cost_adjusted_size(price: Decimal) -> Decimal {
-        if price <= Decimal::ZERO {
-            return Decimal::ZERO;
-        }
-
-        let (s_step, numer, denom) = Self::cost_precision_step(price);
-        if numer == 0 || s_step == 0 {
-            return Decimal::ZERO;
-        }
-
-        let target = denom * 100;
-        let min_s = (target + numer - 1) / numer;
-        let s = ((min_s + s_step - 1) / s_step) * s_step;
-        if s > 5000 {
-            return Decimal::ZERO;
-        }
-
-        Decimal::new(s as i64, 2)
-    }
-
     fn is_executable_directional_order(side: TradeSide, price: Decimal, size: Decimal) -> bool {
         if price <= Decimal::ZERO || size <= Decimal::ZERO {
             return false;
@@ -134,24 +114,10 @@ impl StrategyEngine {
         match side {
             TradeSide::Buy => {
                 let requested_size = size.round_dp(2);
-                let mut adjusted = Self::adjust_size_for_cost_precision(price, requested_size);
+                let adjusted = Self::adjust_size_for_cost_precision(price, requested_size);
                 if adjusted <= Decimal::ZERO {
-                    let min_size = Self::min_cost_adjusted_size(price);
-                    let max_cost = requested_size * price * Decimal::from(5u32);
-                    if min_size > Decimal::ZERO && min_size * price <= max_cost {
-                        adjusted = min_size;
-                    } else {
-                        return false;
-                    }
+                    return false;
                 }
-
-                if price * adjusted < Decimal::ONE {
-                    let bumped = Self::min_cost_adjusted_size(price);
-                    if bumped > Decimal::ZERO && bumped <= requested_size.max(adjusted) {
-                        adjusted = bumped;
-                    }
-                }
-
                 price * adjusted >= Decimal::ONE
             }
             TradeSide::Sell => {
@@ -1374,6 +1340,17 @@ mod tests {
         )]));
 
         let opp = make_opp(TradeSide::Buy, dec!(0.001), dec!(5));
+        assert!(engine.validate_execution_freshness(&opp, &[]).is_none());
+    }
+
+    #[test]
+    fn test_validate_execution_freshness_rejects_buy_that_would_need_upward_bump() {
+        let engine = make_engine(HashMap::from([(
+            U256::from(1u64),
+            make_book(U256::from(1u64), &[(dec!(0.05), dec!(100))], &[(dec!(0.054), dec!(100))]),
+        )]));
+
+        let opp = make_opp(TradeSide::Buy, dec!(0.054), dec!(4.84));
         assert!(engine.validate_execution_freshness(&opp, &[]).is_none());
     }
 

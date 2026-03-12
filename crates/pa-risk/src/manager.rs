@@ -1,11 +1,14 @@
 use alloy::primitives::U256;
 use async_trait::async_trait;
+use dashmap::DashMap;
 use pa_core::config::RiskConfig;
 use pa_core::traits::RiskManager;
 use pa_core::types::{
     ExecutionResult, RiskDecision, RiskRejectReason, StrategyType, TradingOpportunity,
 };
 use rust_decimal::Decimal;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::limits::LimitsChecker;
@@ -15,6 +18,7 @@ use crate::position::PositionTracker;
 /// Composite risk manager combining position tracking, limits, and circuit breaker.
 pub struct RiskManagerImpl {
     positions: PositionTracker,
+    recent_external_clears: Arc<DashMap<U256, Instant>>,
     limits: LimitsChecker,
     circuit_breaker: CircuitBreaker,
     pnl: PnlTracker,
@@ -25,6 +29,7 @@ impl RiskManagerImpl {
     pub fn new(config: RiskConfig) -> Self {
         Self {
             positions: PositionTracker::new(),
+            recent_external_clears: Arc::new(DashMap::new()),
             limits: LimitsChecker::new(config.clone()),
             circuit_breaker: CircuitBreaker::new(&config),
             pnl: PnlTracker::new(),
@@ -53,6 +58,14 @@ impl RiskManagerImpl {
         strategy_type: Option<pa_core::types::StrategyType>,
         condition_id: Option<alloy::primitives::B256>,
     ) {
+        if size > Decimal::ZERO {
+            self.recent_external_clears.remove(&token_id);
+        } else {
+            self.recent_external_clears.insert(
+                token_id,
+                Instant::now() + Duration::from_secs(300),
+            );
+        }
         self.positions
             .sync_position(token_id, size, avg_cost, strategy_type, condition_id);
     }
@@ -80,6 +93,16 @@ impl RiskManager for RiskManagerImpl {
         // Only the circuit breaker applies to exits.
         if opp.execution_plan.is_exit() {
             return RiskDecision::Approve;
+        }
+
+        if let Some(token_id) = opp.execution_plan.token_id() {
+            if let Some(entry) = self.recent_external_clears.get(&token_id) {
+                if Instant::now() < *entry.value() {
+                    return RiskDecision::Reject(RiskRejectReason::RecentlyExternallyCleared);
+                }
+                drop(entry);
+                self.recent_external_clears.remove(&token_id);
+            }
         }
 
         // Per-market accumulated position check
@@ -325,6 +348,43 @@ mod tests {
         let opp = make_opp(cid(1), StrategyType::Weather, dec!(5), dec!(0.50));
         // Should pass market count check (already in market), may pass all checks
         assert_eq!(rm.check_pre_trade(&opp), RiskDecision::Approve);
+    }
+
+    #[test]
+    fn test_recently_cleared_token_is_temporarily_blocked_from_reentry() {
+        let rm = RiskManagerImpl::new(test_config());
+        let token_id = U256::from(42);
+
+        rm.sync_position(
+            token_id,
+            Decimal::ZERO,
+            Decimal::ZERO,
+            Some(StrategyType::Weather),
+            Some(cid(1)),
+        );
+
+        let opp = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::Weather,
+            condition_id: cid(1),
+            question: "Test".into(),
+            spread: dec!(0.05),
+            estimated_profit: dec!(1.0),
+            size: dec!(10),
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id,
+                side: TradeSide::Buy,
+                price: dec!(0.50),
+                size: dec!(10),
+                condition_id: cid(1),
+            },
+        };
+
+        assert_eq!(
+            rm.check_pre_trade(&opp),
+            RiskDecision::Reject(RiskRejectReason::RecentlyExternallyCleared),
+        );
     }
 
     #[test]

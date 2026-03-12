@@ -333,6 +333,12 @@ impl ExecutionPlan {
         }
     }
 
+    pub fn token_id(&self) -> Option<U256> {
+        match self {
+            ExecutionPlan::DirectionalBuy { token_id, .. } => Some(*token_id),
+        }
+    }
+
     /// Estimated USDC cost to execute this plan (price × size for each leg).
     pub fn estimated_cost(&self) -> Decimal {
         match self {
@@ -412,6 +418,7 @@ pub enum RiskRejectReason {
     ExceedsStrategyExposure,
     ExceedsStrategyMarketCount,
     InsufficientDepth,
+    RecentlyExternallyCleared,
 }
 
 // ──── Profit Estimation ────
