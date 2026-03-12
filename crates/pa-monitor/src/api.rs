@@ -54,6 +54,14 @@ pub struct PositionApiEntry {
     pub unrealized_pnl: Option<Decimal>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountStatusEntry {
+    pub name: String,
+    pub strategies: Vec<String>,
+    pub private_key_env: String,
+    pub private_key_present: bool,
+}
+
 /// Shared API state for all Axum handlers.
 pub struct ApiState {
     pub config: Arc<ArcSwap<Settings>>,
@@ -71,6 +79,7 @@ pub struct ApiState {
 pub fn build_router(state: Arc<ApiState>) -> Router {
     let api_routes = Router::new()
         .route("/api/config", get(get_all_config))
+        .route("/api/config/meta/{section}", get(get_section_meta))
         .route("/api/config/{section}", get(get_section).put(put_section))
         .route("/api/config/history/{section}", get(get_history))
         .route("/api/status", get(get_status))
@@ -182,6 +191,20 @@ async fn get_section(
     }
 }
 
+/// GET /api/config/meta/:section — UI metadata for a config section.
+async fn get_section_meta(Path(section): Path<String>) -> (axum::http::StatusCode, Json<Value>) {
+    match section.as_str() {
+        "weather" => (
+            axum::http::StatusCode::OK,
+            Json(json!({
+                "target_cities_options": pa_core::weather::noaa_supported_location_names(),
+                "target_cities_empty_means_all": true,
+            })),
+        ),
+        _ => (axum::http::StatusCode::OK, Json(json!({}))),
+    }
+}
+
 /// PUT /api/config/:section — update section, validate, save to DB, hot reload.
 async fn put_section(
     State(state): State<Arc<ApiState>>,
@@ -248,6 +271,15 @@ async fn put_section(
             }
         }
 
+        if let Err(e) = new_settings.reapply_env_overrides() {
+            tracing::error!(error = %e, "Failed to re-apply environment overrides");
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("Failed to re-apply env overrides: {}", e)})),
+            );
+        }
+        new_settings.merge_account_strategies_into_enabled();
+
         state.config.store(Arc::new(new_settings));
         let _ = state.config_tx.send(new_version as u64);
 
@@ -290,6 +322,14 @@ async fn put_section(
             );
         }
     }
+
+    if let Err(e) = new_settings.reapply_env_overrides() {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Failed to re-apply env overrides: {}", e)})),
+        );
+    }
+    new_settings.merge_account_strategies_into_enabled();
 
     state.config.store(Arc::new(new_settings));
     let _ = state.config_tx.send(0);
@@ -341,6 +381,20 @@ async fn get_history(
 async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
     let uptime_secs = (Utc::now() - state.start_time).num_seconds();
     let settings = state.config.load();
+    let accounts = settings.resolved_accounts();
+    let account_status: Vec<AccountStatusEntry> = accounts
+        .iter()
+        .map(|account| AccountStatusEntry {
+            name: account.name.clone(),
+            strategies: account.strategies.clone(),
+            private_key_env: account.private_key_env.clone(),
+            private_key_present: std::env::var(&account.private_key_env).is_ok(),
+        })
+        .collect();
+    let ready_accounts = account_status
+        .iter()
+        .filter(|account| account.private_key_present)
+        .count();
 
     Json(json!({
         "uptime_seconds": uptime_secs,
@@ -349,6 +403,10 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         "health_port": settings.monitor.health_port,
         "lr_enabled": settings.liquidity_rewards.enabled,
         "event_calendar_enabled": settings.event_calendar.enabled,
+        "accounts_configured": account_status.len(),
+        "accounts_ready": ready_accounts,
+        "trading_ready": ready_accounts > 0,
+        "accounts": account_status,
     }))
 }
 

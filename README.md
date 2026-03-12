@@ -373,13 +373,17 @@ ws_max_instruments = 500
 market_refresh_interval_secs = 1800
 
 [weather]
-min_edge_bps = 500
-max_position_usdc = 50.0
+min_edge_bps = 700
+max_spread_bps = 1800
+max_position_usdc = 5.0
 kelly_fraction = 0.25
 dynamic_sigma = true
-ensemble_enabled = false
+forecast_change_detection = false
+forecast_change_threshold = 0.35
+max_entry_price = 0.30
 exit_buffer_bps = 50
 capital_efficiency_threshold = 0.98
+target_cities = []
 
 [weather.forecast_error]
 temperature_sigma_f = 3.0
@@ -426,7 +430,9 @@ failed_cooldown_secs = 60
 
 | 变量 | 说明 | 必填 |
 |------|------|------|
-| `POLYMARKET_PRIVATE_KEY` | Polygon 钱包私钥（hex 格式） | 是 |
+| `POLYMARKET_PRIVATE_KEY` | 账户私钥环境变量示例，供 `[[accounts]]` / `PA_ACCOUNT_<N>_PRIVATE_KEY_ENV` 引用 | 按账户配置 |
+| `PA_ACCOUNT_1_NAME` | 第一个交易账户名；设置后启用 env 多账户配置 | 否 |
+| `PA_ACCOUNT_1_PRIVATE_KEY_ENV` | 第一个交易账户引用的私钥环境变量名，例如 `POLYMARKET_PRIVATE_KEY` | 按账户配置 |
 | `PA_DATABASE__URL` | PostgreSQL 连接字符串 | 仅回测 |
 | `PA_CHAIN__RPC_URL` | Polygon RPC 节点 URL | 否 |
 | `PA_CLOB__PROXY_WALLET` | GnosisSafe 代理钱包地址 | 推荐 |

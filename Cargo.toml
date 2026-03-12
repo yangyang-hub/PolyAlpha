@@ -119,6 +119,7 @@ clap = { workspace = true }
 arc-swap = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
+reqwest = { workspace = true }
 
 [profile.release]
 lto = "thin"

@@ -5,6 +5,7 @@ use pa_core::types::{
     ExecutionPlan, MarketInfo, OrderBook, RiskDecision, StrategyType, TradeSide, TradingOpportunity,
 };
 use pa_market_data::event_calendar::EventCalendarService;
+use crate::profitability::ProfitCalculator;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::HashMap;
@@ -69,6 +70,223 @@ pub struct StrategyEngine {
 }
 
 impl StrategyEngine {
+    fn strategy_metric_label(strategy: StrategyType) -> &'static str {
+        match strategy {
+            StrategyType::Weather => "weather",
+            StrategyType::CryptoAlpha => "crypto_alpha",
+            StrategyType::LiquidityRewards => "liquidity_rewards",
+            StrategyType::SmartMoney => "smart_money",
+        }
+    }
+
+    fn refresh_estimated_profit(
+        original: &TradingOpportunity,
+        adjusted: &mut TradingOpportunity,
+        fee_rate_bps: u32,
+    ) -> bool {
+        let calc = ProfitCalculator::new(Decimal::ZERO);
+
+        let (
+            ExecutionPlan::DirectionalBuy {
+                side: original_side,
+                price: original_price,
+                size: original_size,
+                ..
+            },
+            ExecutionPlan::DirectionalBuy {
+                side: adjusted_side,
+                price: adjusted_price,
+                size: adjusted_size,
+                ..
+            },
+        ) = (&original.execution_plan, &adjusted.execution_plan);
+
+        if original_size <= &Decimal::ZERO || adjusted_size <= &Decimal::ZERO || original_side != adjusted_side
+        {
+            return false;
+        }
+
+        match adjusted_side {
+            TradeSide::Buy => {
+                let original_fee = calc.capped_fee(*original_price, fee_rate_bps);
+                let implied_prob =
+                    *original_price + original_fee + (original.estimated_profit / *original_size);
+                let est = calc.directional_buy_profit(
+                    *adjusted_price,
+                    implied_prob,
+                    *adjusted_size,
+                    fee_rate_bps,
+                );
+                adjusted.estimated_profit = est.net_profit;
+                adjusted.spread = implied_prob - *adjusted_price;
+                est.net_profit > Decimal::ZERO
+            }
+            TradeSide::Sell => {
+                let original_fee = calc.capped_fee(*original_price, fee_rate_bps);
+                let implied_avg_cost =
+                    *original_price - original_fee - (original.estimated_profit / *original_size);
+                let est = calc.directional_sell_profit(
+                    *adjusted_price,
+                    implied_avg_cost,
+                    *adjusted_size,
+                    fee_rate_bps,
+                );
+                adjusted.estimated_profit = est.net_profit;
+                adjusted.spread = *adjusted_price - implied_avg_cost;
+                true
+            }
+        }
+    }
+
+    fn validate_execution_freshness(
+        &self,
+        opp: &TradingOpportunity,
+        markets: &[MarketInfo],
+    ) -> Option<TradingOpportunity> {
+        let mut adjusted = opp.clone();
+        let strategy_label = Self::strategy_metric_label(opp.strategy_type);
+
+        match &mut adjusted.execution_plan {
+            ExecutionPlan::DirectionalBuy {
+                token_id,
+                side,
+                price,
+                size,
+                ..
+            } => {
+                let book = match (self.get_orderbook)(*token_id) {
+                    Some(book) => book,
+                    None => {
+                        tracing::debug!(id = %opp.id, token_id = %token_id, "Freshness rejected: no order book");
+                        pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+                        pa_monitor::metrics::EXECUTION_FRESHNESS_REJECTIONS
+                            .with_label_values(&[strategy_label, "missing_orderbook"])
+                            .inc();
+                        return None;
+                    }
+                };
+
+                match side {
+                    TradeSide::Buy => {
+                        let best_ask = match book.best_ask() {
+                            Some(level) => level.price,
+                            None => {
+                                tracing::debug!(id = %opp.id, token_id = %token_id, "Freshness rejected: no ask liquidity");
+                                pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+                                pa_monitor::metrics::EXECUTION_FRESHNESS_REJECTIONS
+                                    .with_label_values(&[strategy_label, "missing_ask"])
+                                    .inc();
+                                return None;
+                            }
+                        };
+
+                        if best_ask > *price {
+                            tracing::debug!(
+                                id = %opp.id,
+                                token_id = %token_id,
+                                original_limit = %price,
+                                current_best_ask = %best_ask,
+                                "Freshness rejected: ask moved above limit"
+                            );
+                            pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+                            pa_monitor::metrics::EXECUTION_FRESHNESS_REJECTIONS
+                                .with_label_values(&[strategy_label, "ask_above_limit"])
+                                .inc();
+                            return None;
+                        }
+
+                        let walk = match book.walk_book(TradeSide::Buy, *size) {
+                            Some(walk) if walk.filled >= *size && walk.worst_price <= *price => walk,
+                            _ => {
+                                tracing::debug!(
+                                    id = %opp.id,
+                                    token_id = %token_id,
+                                    size = %size,
+                                    limit = %price,
+                                    "Freshness rejected: insufficient executable ask depth"
+                                );
+                                pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+                                pa_monitor::metrics::EXECUTION_FRESHNESS_REJECTIONS
+                                    .with_label_values(&[strategy_label, "insufficient_ask_depth"])
+                                    .inc();
+                                return None;
+                            }
+                        };
+                        let _ = walk;
+                    }
+                    TradeSide::Sell => {
+                        let best_bid = match book.best_bid() {
+                            Some(level) => level.price,
+                            None => {
+                                tracing::debug!(id = %opp.id, token_id = %token_id, "Freshness rejected: no bid liquidity");
+                                pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+                                pa_monitor::metrics::EXECUTION_FRESHNESS_REJECTIONS
+                                    .with_label_values(&[strategy_label, "missing_bid"])
+                                    .inc();
+                                return None;
+                            }
+                        };
+
+                        let bid_depth = book.available_depth(TradeSide::Sell, best_bid);
+                        let capped_size = (*size).min(bid_depth).round_dp(2);
+                        if capped_size < dec!(0.01) {
+                            tracing::debug!(
+                                id = %opp.id,
+                                token_id = %token_id,
+                                best_bid = %best_bid,
+                                bid_depth = %bid_depth,
+                                "Freshness rejected: no sellable bid depth"
+                            );
+                            pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+                            pa_monitor::metrics::EXECUTION_FRESHNESS_REJECTIONS
+                                .with_label_values(&[strategy_label, "insufficient_bid_depth"])
+                                .inc();
+                            return None;
+                        }
+
+                        if capped_size < *size {
+                            tracing::debug!(
+                                id = %opp.id,
+                                token_id = %token_id,
+                                original_size = %size,
+                                capped_size = %capped_size,
+                                "Freshness scaling exit to current bid depth"
+                            );
+                            pa_monitor::metrics::EXECUTION_FRESHNESS_SCALED
+                                .with_label_values(&[strategy_label, "sell"])
+                                .inc();
+                            *size = capped_size;
+                            adjusted.size = capped_size;
+                        }
+
+                        *price = best_bid;
+                    }
+                }
+            }
+        }
+
+        let fee_rate_bps = markets
+            .iter()
+            .find(|market| market.condition_id == adjusted.condition_id)
+            .map(|market| market.fee_rate_bps)
+            .unwrap_or(200);
+
+        if !Self::refresh_estimated_profit(opp, &mut adjusted, fee_rate_bps) {
+            tracing::debug!(
+                id = %opp.id,
+                condition_id = %opp.condition_id,
+                "Freshness rejected: estimated profit no longer positive"
+            );
+            pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+            pa_monitor::metrics::EXECUTION_FRESHNESS_REJECTIONS
+                .with_label_values(&[strategy_label, "non_positive_profit"])
+                .inc();
+            return None;
+        }
+
+        Some(adjusted)
+    }
+
     pub fn new(
         strategies: Vec<Box<dyn Strategy>>,
         executor: Arc<dyn Executor>,
@@ -277,6 +495,14 @@ impl StrategyEngine {
                             Some(validated) => validated,
                             None => {
                                 self.set_cooldown(opp.condition_id, opp.strategy_type, 60);
+                                continue;
+                            }
+                        };
+
+                        let opp = match self.validate_execution_freshness(&opp, markets) {
+                            Some(validated) => validated,
+                            None => {
+                                self.set_cooldown(opp.condition_id, opp.strategy_type, 30);
                                 continue;
                             }
                         };
@@ -836,6 +1062,178 @@ fn scale_execution_plan_size(plan: &mut ExecutionPlan, multiplier: Decimal) {
     match plan {
         ExecutionPlan::DirectionalBuy { size, .. } => {
             *size = (*size * multiplier).round_dp(2);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::B256;
+    use async_trait::async_trait;
+    use pa_core::types::{ExecutionResult, ExecutionStatus, OrderBook, PriceLevel, TradeRecord, TxType};
+    use rust_decimal_macros::dec;
+    use std::collections::HashMap;
+
+    struct NoopStrategy;
+
+    #[async_trait]
+    impl Strategy for NoopStrategy {
+        fn name(&self) -> &str {
+            "noop"
+        }
+
+        fn strategy_type(&self) -> StrategyType {
+            StrategyType::Weather
+        }
+
+        async fn scan(&self, _markets: &[MarketInfo]) -> pa_core::Result<Vec<TradingOpportunity>> {
+            Ok(vec![])
+        }
+    }
+
+    struct NoopExecutor;
+
+    #[async_trait]
+    impl Executor for NoopExecutor {
+        async fn execute(&self, _opportunity: &TradingOpportunity) -> pa_core::Result<ExecutionResult> {
+            Ok(ExecutionResult {
+                opportunity_id: Uuid::now_v7(),
+                strategy_type: StrategyType::Weather,
+                status: ExecutionStatus::Success,
+                trades: vec![TradeRecord {
+                    id: Uuid::now_v7(),
+                    token_id: U256::from(1u64),
+                    condition_id: B256::ZERO,
+                    side: TradeSide::Buy,
+                    price: dec!(0.10),
+                    size: dec!(1),
+                    filled_size: dec!(1),
+                    fee: Decimal::ZERO,
+                    tx_type: TxType::ClobOrder,
+                    tx_hash: None,
+                }],
+                realized_profit: Decimal::ZERO,
+                total_fees: Decimal::ZERO,
+                total_gas: Decimal::ZERO,
+                executed_at: Utc::now(),
+            })
+        }
+
+        async fn cancel_all(&self) -> pa_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct NoopRiskManager;
+
+    impl RiskManager for NoopRiskManager {
+        fn check_pre_trade(&self, _opportunity: &TradingOpportunity) -> RiskDecision {
+            RiskDecision::Approve
+        }
+
+        fn update_position(&self, _result: &ExecutionResult) {}
+
+        fn is_circuit_broken(&self) -> bool {
+            false
+        }
+
+        fn total_exposure(&self) -> Decimal {
+            Decimal::ZERO
+        }
+
+        fn reset_daily(&self) {}
+    }
+
+    fn make_engine(books: HashMap<U256, OrderBook>) -> StrategyEngine {
+        let books = Arc::new(books);
+        StrategyEngine::new(
+            vec![Box::new(NoopStrategy)],
+            Arc::new(NoopExecutor),
+            Arc::new(NoopRiskManager),
+            StrategyEngineDeps {
+                get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
+                get_available_capital: Box::new(|| dec!(1000)),
+                get_all_positions: Box::new(Vec::new),
+            },
+            StrategyEngineOptions {
+                scan_interval_ms: 1000,
+                event_calendar: None,
+                min_order_usdc: dec!(1),
+                max_market_end_days: None,
+            },
+        )
+    }
+
+    fn make_book(token_id: U256, bids: &[(Decimal, Decimal)], asks: &[(Decimal, Decimal)]) -> OrderBook {
+        OrderBook {
+            token_id,
+            bids: bids
+                .iter()
+                .map(|(price, size)| PriceLevel {
+                    price: *price,
+                    size: *size,
+                })
+                .collect(),
+            asks: asks
+                .iter()
+                .map(|(price, size)| PriceLevel {
+                    price: *price,
+                    size: *size,
+                })
+                .collect(),
+            timestamp: Utc::now(),
+        }
+    }
+
+    fn make_opp(side: TradeSide, price: Decimal, size: Decimal) -> TradingOpportunity {
+        TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::Weather,
+            condition_id: B256::ZERO,
+            question: "test".into(),
+            spread: dec!(0.10),
+            estimated_profit: dec!(1),
+            size,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(1u64),
+                side,
+                price,
+                size,
+                condition_id: B256::ZERO,
+            },
+        }
+    }
+
+    #[test]
+    fn test_validate_execution_freshness_rejects_buy_if_ask_moved_above_limit() {
+        let engine = make_engine(HashMap::from([(
+            U256::from(1u64),
+            make_book(U256::from(1u64), &[(dec!(0.09), dec!(10))], &[(dec!(0.12), dec!(10))]),
+        )]));
+
+        let opp = make_opp(TradeSide::Buy, dec!(0.10), dec!(5));
+        let validated = engine.validate_execution_freshness(&opp, &[]);
+        assert!(validated.is_none());
+    }
+
+    #[test]
+    fn test_validate_execution_freshness_scales_exit_to_bid_depth() {
+        let engine = make_engine(HashMap::from([(
+            U256::from(1u64),
+            make_book(U256::from(1u64), &[(dec!(0.40), dec!(3.25))], &[(dec!(0.45), dec!(10))]),
+        )]));
+
+        let opp = make_opp(TradeSide::Sell, dec!(0.40), dec!(5));
+        let validated = engine.validate_execution_freshness(&opp, &[]).unwrap();
+        assert_eq!(validated.size, dec!(3.25));
+        match validated.execution_plan {
+            ExecutionPlan::DirectionalBuy { side, price, size, .. } => {
+                assert_eq!(side, TradeSide::Sell);
+                assert_eq!(price, dec!(0.40));
+                assert_eq!(size, dec!(3.25));
+            }
         }
     }
 }

@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { updateSection } from "../api";
+import { updateSection, type SectionMeta } from "../api";
 
 interface Props {
   title: string;
   section: string;
   data: Record<string, unknown>;
+  meta?: SectionMeta;
   onSaved?: () => void;
   onHistory?: () => void;
 }
@@ -119,7 +120,7 @@ const FIELD_HINTS: Record<string, Record<string, string>> = {
   },
 };
 
-export default function ConfigSection({ title, section, data, onSaved, onHistory }: Props) {
+export default function ConfigSection({ title, section, data, meta, onSaved, onHistory }: Props) {
   const [form, setForm] = useState<Record<string, unknown>>({ ...data });
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
@@ -138,8 +139,11 @@ export default function ConfigSection({ title, section, data, onSaved, onHistory
   async function handleSave() {
     setSaving(true);
     try {
-      await updateSection(section, form);
-      showToast("保存成功", true);
+      const result = await updateSection(section, form);
+      showToast(
+        result.persisted ? "保存成功，已持久化" : "保存成功，仅当前进程生效，重启后会丢失",
+        result.persisted,
+      );
       onSaved?.();
     } catch (e) {
       showToast(`保存失败: ${e instanceof Error ? e.message : e}`, false);
@@ -172,8 +176,10 @@ export default function ConfigSection({ title, section, data, onSaved, onHistory
           {Object.entries(form).map(([key, value]) => (
             <FieldEditor
               key={key}
+              section={section}
               fieldKey={key}
               value={value}
+              meta={meta}
               hint={hints[key]}
               onChange={(v) => setValue(key, v)}
             />
@@ -192,13 +198,17 @@ export default function ConfigSection({ title, section, data, onSaved, onHistory
 }
 
 function FieldEditor({
+  section,
   fieldKey,
   value,
+  meta,
   hint,
   onChange,
 }: {
+  section: string;
   fieldKey: string;
   value: unknown;
+  meta?: SectionMeta;
   hint?: string;
   onChange: (v: unknown) => void;
 }) {
@@ -241,6 +251,63 @@ function FieldEditor({
   if (Array.isArray(value)) {
     const isStringArray = value.every((v) => typeof v === "string");
     if (isStringArray) {
+      if (section === "weather" && fieldKey === "target_cities") {
+        const selected = value as string[];
+        const options = Array.isArray(meta?.target_cities_options)
+          ? (meta?.target_cities_options as string[])
+          : [];
+        if (options.length > 0) {
+          const toggleCity = (city: string) => {
+            onChange(
+              selected.includes(city)
+                ? selected.filter((item) => item !== city)
+                : [...selected, city],
+            );
+          };
+
+          return (
+            <div className="form-control sm:col-span-2">
+              <span className="label-text text-xs opacity-70">{label}</span>
+              {hint && <span className="label-text-alt text-xs opacity-40">{hint}</span>}
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="btn btn-xs"
+                  onClick={() => onChange([])}
+                >
+                  留空允许全部
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-xs"
+                  onClick={() => onChange([...options])}
+                >
+                  填入全部城市
+                </button>
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
+                {options.map((city) => {
+                  const active = selected.includes(city);
+                  return (
+                    <button
+                      key={city}
+                      type="button"
+                      className={`btn btn-sm justify-start ${active ? "btn-primary" : "btn-outline"}`}
+                      onClick={() => toggleCity(city)}
+                    >
+                      {city}
+                    </button>
+                  );
+                })}
+              </div>
+              <span className="label-text-alt text-xs opacity-50">
+                当前选择 {selected.length} 个城市。留空表示允许所有 NOAA 覆盖城市。
+              </span>
+            </div>
+          );
+        }
+      }
+
       return (
         <label className="form-control sm:col-span-2">
           <span className="label-text text-xs opacity-70">{label}</span>

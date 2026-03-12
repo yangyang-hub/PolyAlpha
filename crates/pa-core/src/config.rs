@@ -1,5 +1,6 @@
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Top-level application settings, loaded from config files + env vars.
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -23,8 +24,8 @@ pub struct Settings {
     pub liquidity_rewards: LiquidityRewardsConfig,
     #[serde(default)]
     pub smart_money: SmartMoneyConfig,
-    /// Named trading accounts. When empty, a single "default" account is created
-    /// from `POLYMARKET_PRIVATE_KEY` env var + `clob.signature_type` + `clob.proxy_wallet`.
+    /// Named trading accounts. Trading is disabled unless accounts are provided
+    /// via `PA_ACCOUNT_<N>_*` environment variables or TOML `[[accounts]]` sections.
     #[serde(default)]
     pub accounts: Vec<AccountConfig>,
 }
@@ -209,41 +210,34 @@ fn default_capital_efficiency_threshold() -> Decimal {
     Decimal::new(98, 2)
 } // 0.98
 fn default_max_spread_bps() -> u32 {
-    1200
-} // 12% max spread
+    1800
+} // 18% max spread
 fn default_true() -> bool {
     true
 }
 fn default_forecast_change_threshold() -> f64 {
-    0.5
+    0.35
 }
 fn default_max_entry_price() -> Decimal {
-    Decimal::new(15, 2)
-} // 0.15
+    Decimal::new(30, 2)
+} // 0.30
 fn default_profit_take_threshold() -> Decimal {
     Decimal::new(45, 2)
 } // 0.45
 fn default_weather_max_position_usdc() -> Decimal {
-    Decimal::new(2, 0)
-} // $2
+    Decimal::new(5, 0)
+} // $5
 fn default_noaa_user_agent() -> String {
     "PolyAlpha/1.0".to_string()
 }
 fn default_target_cities() -> Vec<String> {
-    vec![
-        "New York".to_string(),
-        "Chicago".to_string(),
-        "Los Angeles".to_string(),
-        "Houston".to_string(),
-        "Phoenix".to_string(),
-        "Miami".to_string(),
-    ]
+    vec![]
 }
 
 impl Default for WeatherConfig {
     fn default() -> Self {
         Self {
-            min_edge_bps: 500,
+            min_edge_bps: 700,
             max_spread_bps: default_max_spread_bps(),
             max_position_pct: Decimal::new(50, 2), // 0.50 = 50% of balance
             kelly_fraction: Decimal::new(25, 2),   // 0.25 (quarter Kelly)
@@ -252,7 +246,7 @@ impl Default for WeatherConfig {
             exit_buffer_bps: default_exit_buffer_bps(),
             capital_efficiency_threshold: default_capital_efficiency_threshold(),
             dynamic_sigma: default_true(),
-            forecast_change_detection: true,
+            forecast_change_detection: false,
             forecast_change_threshold: default_forecast_change_threshold(),
             max_entry_price: default_max_entry_price(),
             profit_take_threshold: default_profit_take_threshold(),
@@ -818,12 +812,53 @@ impl Settings {
         Ok(settings.try_deserialize()?)
     }
 
+    /// Re-apply `PA_` environment variable overrides onto an existing Settings value.
+    ///
+    /// This is needed when other layers (e.g. DB-backed UI overrides) are applied
+    /// after `Settings::load()`, because runtime semantics require env vars to stay
+    /// the highest-priority source.
+    pub fn reapply_env_overrides(&mut self) -> crate::Result<()> {
+        let env_cfg = config::Config::builder()
+            .add_source(
+                config::Environment::with_prefix("PA")
+                    .separator("__")
+                    .try_parsing(true)
+                    .convert_case(config::Case::Snake),
+            )
+            .build()?;
+
+        let env_value: Value = env_cfg.try_deserialize()?;
+        if env_value.is_null() {
+            return Ok(());
+        }
+
+        let mut base_value = serde_json::to_value(&*self)
+            .map_err(|e| config::ConfigError::Message(format!("serialize settings: {e}")))?;
+        merge_json_value(&mut base_value, env_value);
+        *self = serde_json::from_value(base_value)
+            .map_err(|e| config::ConfigError::Message(format!("deserialize settings: {e}")))?;
+        Ok(())
+    }
+
+    /// Merge strategies referenced by configured accounts into the global enabled list.
+    ///
+    /// This keeps discovery/status views aligned with the strategies that can actually
+    /// run on at least one configured account.
+    pub fn merge_account_strategies_into_enabled(&mut self) {
+        for account in self.resolved_accounts() {
+            for strategy in account.strategies {
+                if !self.strategy.enabled.contains(&strategy) {
+                    self.strategy.enabled.push(strategy);
+                }
+            }
+        }
+    }
+
     /// Resolve the effective list of accounts.
     ///
     /// Priority (highest to lowest):
     /// 1. Environment variables `PA_ACCOUNT_<N>_*` (e.g. `PA_ACCOUNT_1_NAME=main`)
     /// 2. TOML `[[accounts]]` sections
-    /// 3. Legacy fallback: single "default" account from `POLYMARKET_PRIVATE_KEY`
     ///
     /// Environment variable format:
     /// ```text
@@ -851,19 +886,7 @@ impl Settings {
             return self.accounts.clone();
         }
 
-        // Priority 3: legacy single-account fallback
-        let mut strategies = self.strategy.enabled.clone();
-        if self.liquidity_rewards.enabled {
-            strategies.push("liquidity_rewards".to_string());
-        }
-
-        vec![AccountConfig {
-            name: "default".to_string(),
-            private_key_env: "POLYMARKET_PRIVATE_KEY".to_string(),
-            signature_type: self.clob.signature_type,
-            proxy_wallet: self.clob.proxy_wallet.clone(),
-            strategies,
-        }]
+        Vec::new()
     }
 
     /// Parse accounts from `PA_ACCOUNT_<N>_*` environment variables.
@@ -902,5 +925,23 @@ impl Settings {
             });
         }
         accounts
+    }
+}
+
+fn merge_json_value(base: &mut Value, overlay: Value) {
+    match (base, overlay) {
+        (Value::Object(base_map), Value::Object(overlay_map)) => {
+            for (key, overlay_value) in overlay_map {
+                match base_map.get_mut(&key) {
+                    Some(base_value) => merge_json_value(base_value, overlay_value),
+                    None => {
+                        base_map.insert(key, overlay_value);
+                    }
+                }
+            }
+        }
+        (base_slot, overlay_value) => {
+            *base_slot = overlay_value;
+        }
     }
 }

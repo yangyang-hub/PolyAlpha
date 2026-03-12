@@ -1,7 +1,37 @@
 import { useCallback } from "react";
 import { fetchPositions, fetchMetrics, type PositionEntry } from "../api";
 import { usePolling } from "../hooks/usePolling";
-import { parseMetrics } from "../lib/metrics";
+import { metricSeriesByName, parseMetrics } from "../lib/metrics";
+
+const REJECTION_LABELS: Record<string, string> = {
+  unsupported_city: "城市不在 NOAA 覆盖范围",
+  geocode_failed: "城市坐标解析失败",
+  forecast_fetch_failed: "NOAA 预报拉取失败",
+  forecast_not_fresh: "预报变化不显著",
+  invalid_token_count: "市场 token 结构异常",
+  missing_both_books: "双边 orderbook 都缺失",
+  missing_yes_ask: "YES 卖盘缺失",
+  missing_no_ask: "NO 卖盘缺失",
+  missing_yes_bid: "YES 买盘缺失",
+  missing_no_bid: "NO 买盘缺失",
+  spread_too_wide: "价差过宽",
+  price_above_max_entry: "价格高于入场上限",
+  no_positive_edge: "模型没有正 edge",
+  no_tradable_side: "没有可交易方向",
+  edge_too_small: "edge 低于阈值",
+  size_below_min_order: "下单金额低于最小要求",
+  non_positive_profit: "预期净利润不为正",
+};
+
+const FRESHNESS_REJECTION_LABELS: Record<string, string> = {
+  missing_orderbook: "执行前缺少 orderbook",
+  missing_ask: "执行前无卖盘",
+  ask_above_limit: "执行前 ask 已高于原限价",
+  insufficient_ask_depth: "执行前 ask 深度不足",
+  missing_bid: "执行前无买盘",
+  insufficient_bid_depth: "执行前 bid 深度不足",
+  non_positive_profit: "执行前重算后净利润不再为正",
+};
 
 export default function WeatherStrategy() {
   const posFetcher = useCallback(() => fetchPositions("weather"), []);
@@ -10,6 +40,30 @@ export default function WeatherStrategy() {
   const { data: metricsRaw } = usePolling<string>(metricsFetcher, 15000);
 
   const metrics = metricsRaw ? parseMetrics(metricsRaw) : null;
+  const rejectionRows = metricsRaw
+    ? metricSeriesByName(metricsRaw, "weather_rejections_total")
+        .map((sample) => ({
+          reason: sample.labels.reason ?? "unknown",
+          value: sample.value,
+        }))
+        .filter((row) => row.value > 0)
+        .sort((a, b) => b.value - a.value)
+    : [];
+  const freshnessRows = metricsRaw
+    ? metricSeriesByName(metricsRaw, "execution_freshness_rejections_total")
+        .filter((sample) => sample.labels.strategy === "weather")
+        .map((sample) => ({
+          reason: sample.labels.reason ?? "unknown",
+          value: sample.value,
+        }))
+        .filter((row) => row.value > 0)
+        .sort((a, b) => b.value - a.value)
+    : [];
+  const freshnessScaledSell = metricsRaw
+    ? metricSeriesByName(metricsRaw, "execution_freshness_scaled_total")
+        .filter((sample) => sample.labels.strategy === "weather" && sample.labels.side === "sell")
+        .reduce((sum, sample) => sum + sample.value, 0)
+    : 0;
 
   const totalCost = (positions ?? []).reduce((s, p) => s + Number(p.cost_basis), 0);
   const totalPnl = (positions ?? []).reduce((s, p) => s + Number(p.unrealized_pnl ?? 0), 0);
@@ -94,6 +148,89 @@ export default function WeatherStrategy() {
           <MetricCard label="深度缩量" value={metrics.get("depth_validation_scaled_total")} />
         </div>
       )}
+
+      {metrics && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <MetricCard label="执行前拦截" value={freshnessRows.reduce((sum, row) => sum + row.value, 0)} />
+          <MetricCard label="执行前卖出缩量" value={freshnessScaledSell} />
+          <MetricCard label="策略拒单总数" value={rejectionRows.reduce((sum, row) => sum + row.value, 0)} />
+          <MetricCard label="执行错误" value={metrics.get("execution_errors_total")} />
+        </div>
+      )}
+
+      <div className="card bg-base-200 shadow-sm">
+        <div className="card-body p-4">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="card-title text-base">拒单原因</h2>
+            <span className="text-xs opacity-60">来源: `/metrics` 中的 `weather_rejections_total`</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="table table-sm">
+              <thead>
+                <tr>
+                  <th>原因</th>
+                  <th>指标键</th>
+                  <th className="text-right">次数</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rejectionRows.map((row) => (
+                  <tr key={row.reason}>
+                    <td>{REJECTION_LABELS[row.reason] ?? row.reason}</td>
+                    <td className="font-mono text-xs opacity-70">{row.reason}</td>
+                    <td className="text-right">{row.value}</td>
+                  </tr>
+                ))}
+                {rejectionRows.length === 0 && (
+                  <tr>
+                    <td colSpan={3} className="text-center opacity-50">
+                      暂无拒单统计，或策略尚未完成一次有效扫描
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div className="card bg-base-200 shadow-sm">
+        <div className="card-body p-4">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="card-title text-base">执行前拦截</h2>
+            <span className="text-xs opacity-60">
+              来源: `/metrics` 中的 `execution_freshness_rejections_total`
+            </span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="table table-sm">
+              <thead>
+                <tr>
+                  <th>原因</th>
+                  <th>指标键</th>
+                  <th className="text-right">次数</th>
+                </tr>
+              </thead>
+              <tbody>
+                {freshnessRows.map((row) => (
+                  <tr key={row.reason}>
+                    <td>{FRESHNESS_REJECTION_LABELS[row.reason] ?? row.reason}</td>
+                    <td className="font-mono text-xs opacity-70">{row.reason}</td>
+                    <td className="text-right">{row.value}</td>
+                  </tr>
+                ))}
+                {freshnessRows.length === 0 && (
+                  <tr>
+                    <td colSpan={3} className="text-center opacity-50">
+                      暂无执行前拦截统计
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
 
       {/* Positions table */}
       <div className="card bg-base-200 shadow-sm">

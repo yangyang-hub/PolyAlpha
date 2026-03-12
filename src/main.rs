@@ -174,15 +174,9 @@ async fn main() -> Result<()> {
         None
     };
 
-    // --- ArcSwap for hot-reloadable config ---
-    let config_arc = Arc::new(ArcSwap::new(Arc::new(settings.clone())));
-    let (config_tx, _config_rx) = tokio::sync::watch::channel(0u64);
-
-    tracing::info!(
-        chain_id = settings.chain.chain_id,
-        clob_host = %settings.clob.host,
-        "Configuration loaded"
-    );
+    if let Err(e) = settings.reapply_env_overrides() {
+        tracing::warn!(error = %e, "Failed to re-apply environment config overrides");
+    }
 
     // --- Resolve trading accounts ---
     let resolved_accounts = settings.resolved_accounts();
@@ -192,15 +186,19 @@ async fn main() -> Result<()> {
         "Trading accounts resolved"
     );
 
-    // Merge per-account strategies into global enabled list so market discovery
-    // covers all required markets (e.g., LR needs general markets, not just weather/crypto).
-    for acct in &resolved_accounts {
-        for s in &acct.strategies {
-            if !settings.strategy.enabled.contains(s) {
-                settings.strategy.enabled.push(s.clone());
-            }
-        }
-    }
+    // Merge per-account strategies into the global enabled list so runtime status,
+    // discovery, and execution all observe the same effective strategy set.
+    settings.merge_account_strategies_into_enabled();
+
+    // --- ArcSwap for hot-reloadable config ---
+    let config_arc = Arc::new(ArcSwap::new(Arc::new(settings.clone())));
+    let (config_tx, _config_rx) = tokio::sync::watch::channel(0u64);
+
+    tracing::info!(
+        chain_id = settings.chain.chain_id,
+        clob_host = %settings.clob.host,
+        "Configuration loaded"
+    );
 
     // --- Global cancellation token ---
     let cancel = CancellationToken::new();

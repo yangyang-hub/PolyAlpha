@@ -16,6 +16,7 @@ use pa_core::traits::Strategy;
 use pa_core::types::{
     ExecutionPlan, MarketInfo, NegRiskEvent, OrderBook, StrategyType, TradeSide, TradingOpportunity,
 };
+use pa_core::weather::{NOAA_SUPPORTED_LOCATIONS, normalize_noaa_location_name};
 
 use crate::profitability::ProfitCalculator;
 
@@ -140,6 +141,20 @@ const KNOWN_CITIES: &[&str] = &[
     "Seoul",
 ];
 
+/// Alias-to-canonical mappings for common city variants seen in market titles.
+const CITY_ALIASES: &[(&str, &str)] = &[
+    ("new york city", "New York"),
+    ("nyc", "NYC"),
+    ("los angeles", "Los Angeles"),
+    ("l.a.", "LA"),
+    ("la", "LA"),
+    ("philly", "Philadelphia"),
+    ("san fran", "San Francisco"),
+    ("sf", "San Francisco"),
+    ("vegas", "Las Vegas"),
+    ("nola", "New Orleans"),
+];
+
 /// Check if `text` contains `word` as a whole word (not part of a larger word).
 pub(crate) fn contains_word(text: &str, word: &str) -> bool {
     for (i, _) in text.match_indices(word) {
@@ -261,6 +276,13 @@ fn extract_number(text: &str) -> Option<f64> {
 /// Extract a known city/location name from the question.
 fn extract_location(question: &str) -> Option<String> {
     let lower = question.to_lowercase();
+
+    for &(alias, canonical) in CITY_ALIASES {
+        if contains_word(&lower, alias) {
+            return Some(canonical.to_string());
+        }
+    }
+
     // Try known cities (longest match first for overlaps like "New York" vs "York")
     let mut best: Option<(&str, usize)> = None;
     for &city in KNOWN_CITIES {
@@ -298,6 +320,9 @@ fn extract_location(question: &str) -> Option<String> {
                 }
             }
             if !location.is_empty() {
+                if let Some(normalized) = normalize_noaa_location_name(&location) {
+                    return Some(normalized.to_string());
+                }
                 return Some(location);
             }
         }
@@ -734,34 +759,6 @@ pub struct ForecastData {
     pub model_spread: f64,
 }
 
-/// Hardcoded US city coordinates for NOAA lookup (NOAA has no geocoding API).
-const US_CITY_COORDS: &[(&str, f64, f64)] = &[
-    ("New York", 40.7128, -74.0060),
-    ("NYC", 40.7128, -74.0060),
-    ("Chicago", 41.8781, -87.6298),
-    ("Los Angeles", 34.0522, -118.2437),
-    ("LA", 34.0522, -118.2437),
-    ("Houston", 29.7604, -95.3698),
-    ("Phoenix", 33.4484, -112.0740),
-    ("Miami", 25.7617, -80.1918),
-    ("Philadelphia", 39.9526, -75.1652),
-    ("San Antonio", 29.4241, -98.4936),
-    ("San Diego", 32.7157, -117.1611),
-    ("Dallas", 32.7767, -96.7970),
-    ("Austin", 30.2672, -97.7431),
-    ("San Francisco", 37.7749, -122.4194),
-    ("Seattle", 47.6062, -122.3321),
-    ("Denver", 39.7392, -104.9903),
-    ("Nashville", 36.1627, -86.7816),
-    ("Portland", 45.5152, -122.6784),
-    ("Las Vegas", 36.1699, -115.1398),
-    ("Atlanta", 33.7490, -84.3880),
-    ("Minneapolis", 44.9778, -93.2650),
-    ("Tampa", 27.9506, -82.4572),
-    ("New Orleans", 29.9511, -90.0715),
-    ("Cleveland", 41.4993, -81.6944),
-];
-
 /// Cached NOAA grid point (office, gridX, gridY). Grid points never change.
 #[derive(Debug, Clone)]
 struct CachedGridPoint {
@@ -860,13 +857,19 @@ impl NoaaClient {
     /// Look up US city coordinates from the hardcoded table.
     /// Returns `Err` for non-US cities (NOAA only covers the US).
     pub fn geocode(location: &str) -> anyhow::Result<(f64, f64)> {
-        let loc_lower = location.to_lowercase();
-        for &(name, lat, lon) in US_CITY_COORDS {
+        let canonical = normalize_noaa_location_name(location).unwrap_or(location);
+        let loc_lower = canonical.to_lowercase();
+        for &(name, lat, lon) in NOAA_SUPPORTED_LOCATIONS {
             if loc_lower == name.to_lowercase() {
                 return Ok((lat, lon));
             }
         }
         Err(anyhow::anyhow!("City not in US lookup table: {}", location))
+    }
+
+    /// Returns true when the location exists in the hardcoded NOAA coverage table.
+    pub fn supports_location(location: &str) -> bool {
+        Self::geocode(location).is_ok()
     }
 
     /// Resolve lat/lon to NOAA grid point (office, gridX, gridY).
@@ -1360,6 +1363,14 @@ pub struct WeatherAlphaStrategy {
     scan_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
+#[derive(Clone, Copy)]
+struct SideCandidate {
+    token_id: U256,
+    ask_price: Decimal,
+    edge: Decimal,
+    effective_prob: Decimal,
+}
+
 pub struct WeatherAlphaDeps {
     pub get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
     pub get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
@@ -1370,6 +1381,12 @@ pub struct WeatherAlphaDeps {
 }
 
 impl WeatherAlphaStrategy {
+    fn record_rejection(reason: &'static str) {
+        pa_monitor::metrics::WEATHER_REJECTIONS
+            .with_label_values(&[reason])
+            .inc();
+    }
+
     /// Convert a USDC budget into share size at a given token ask price.
     fn shares_from_usdc_budget(usdc_budget: Decimal, ask_price: Decimal) -> Decimal {
         if ask_price <= Decimal::ZERO {
@@ -1423,13 +1440,18 @@ impl WeatherAlphaStrategy {
         hasher.finish()
     }
 
-    /// Check if a location is in the target cities list.
+    /// Check if a location is NOAA-supported and in the target cities list.
     ///
-    /// When target_cities is non-empty, only markets in these cities are scanned.
+    /// When target_cities is empty, all NOAA-supported cities pass.
+    /// When target_cities is non-empty, only NOAA-supported cities in that list are scanned.
     /// Supports city name aliases (NYC → New York, LA → Los Angeles).
     fn is_target_city(&self, location: &str) -> bool {
+        if !NoaaClient::supports_location(location) {
+            Self::record_rejection("unsupported_city");
+            return false;
+        }
         if self.config.target_cities.is_empty() {
-            return true; // No filter, all cities pass
+            return true; // No manual filter, any NOAA-supported city passes
         }
         let loc_lower = location.to_lowercase();
         self.config.target_cities.iter().any(|city| {
@@ -1446,6 +1468,69 @@ impl WeatherAlphaStrategy {
                     false
                 }
             }
+        })
+    }
+
+    fn evaluate_binary_side(
+        &self,
+        question: &str,
+        side_name: &'static str,
+        token_id: U256,
+        ask_price: Option<Decimal>,
+        bid_price: Option<Decimal>,
+        effective_prob: Decimal,
+    ) -> Option<SideCandidate> {
+        let ask_price = match ask_price {
+            Some(price) => price,
+            None => {
+                Self::record_rejection(match side_name {
+                    "yes" => "missing_yes_ask",
+                    _ => "missing_no_ask",
+                });
+                return None;
+            }
+        };
+
+        if let Some(bid_price) = bid_price {
+            let spread = if ask_price > Decimal::ZERO {
+                (ask_price - bid_price) / ask_price
+            } else {
+                Decimal::ONE
+            };
+            let spread_bps = (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX);
+            if spread_bps > self.config.max_spread_bps {
+                Self::record_rejection("spread_too_wide");
+                tracing::debug!(
+                    question = %question,
+                    side = side_name,
+                    spread_bps,
+                    max_allowed = self.config.max_spread_bps,
+                    "[Weather] Rejecting side: spread too wide"
+                );
+                return None;
+            }
+        } else {
+            Self::record_rejection(match side_name {
+                "yes" => "missing_yes_bid",
+                _ => "missing_no_bid",
+            });
+        }
+
+        if ask_price > self.config.max_entry_price {
+            Self::record_rejection("price_above_max_entry");
+            return None;
+        }
+
+        if effective_prob <= ask_price {
+            Self::record_rejection("no_positive_edge");
+            return None;
+        }
+
+        Some(SideCandidate {
+            token_id,
+            ask_price,
+            edge: effective_prob - ask_price,
+            effective_prob,
         })
     }
 
@@ -1865,6 +1950,7 @@ impl WeatherAlphaStrategy {
         let coords = match NoaaClient::geocode(&parsed.location) {
             Ok(c) => c,
             Err(e) => {
+                Self::record_rejection("geocode_failed");
                 tracing::warn!(
                     location = %parsed.location,
                     error = %e,
@@ -1888,6 +1974,7 @@ impl WeatherAlphaStrategy {
         {
             Ok(f) => f,
             Err(e) => {
+                Self::record_rejection("forecast_fetch_failed");
                 tracing::warn!(
                     location = %parsed.location,
                     metric = ?parsed.metric,
@@ -1955,6 +2042,7 @@ impl WeatherAlphaStrategy {
 
         // Skip if forecast hasn't changed significantly (when change detection is enabled)
         if self.config.forecast_change_detection && !is_fresh {
+            Self::record_rejection("forecast_not_fresh");
             return None;
         }
 
@@ -1983,45 +2071,18 @@ impl WeatherAlphaStrategy {
         // Determine which side to buy
         // YES token = tokens[0] (by convention)
         if market.tokens.len() < 2 {
+            Self::record_rejection("invalid_token_count");
             return None;
         }
 
         let yes_token = &market.tokens[0];
         let no_token = &market.tokens[1];
 
-        let yes_book = (self.get_orderbook)(yes_token.token_id)?;
-        let no_book = (self.get_orderbook)(no_token.token_id)?;
+        let yes_book = (self.get_orderbook)(yes_token.token_id);
+        let no_book = (self.get_orderbook)(no_token.token_id);
 
-        let yes_ask = yes_book.best_ask()?.price;
-        let no_ask = no_book.best_ask()?.price;
-        let yes_bid = yes_book.best_bid()?.price;
-        let no_bid = no_book.best_bid()?.price;
-
-        // Check bid-ask spread on both sides
-        let yes_spread = if yes_ask > Decimal::ZERO {
-            (yes_ask - yes_bid) / yes_ask
-        } else {
-            Decimal::ONE
-        };
-        let no_spread = if no_ask > Decimal::ZERO {
-            (no_ask - no_bid) / no_ask
-        } else {
-            Decimal::ONE
-        };
-        let max_spread = yes_spread.max(no_spread);
-        let spread_bps = {
-            use rust_decimal::prelude::ToPrimitive;
-            (max_spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
-        };
-
-        if spread_bps > self.config.max_spread_bps {
-            tracing::debug!(
-                question = %market.question,
-                yes_spread_bps = %((yes_spread * dec!(10000)).round()),
-                no_spread_bps = %((no_spread * dec!(10000)).round()),
-                max_allowed = self.config.max_spread_bps,
-                "[Weather] Rejecting: spread too wide"
-            );
+        if yes_book.is_none() && no_book.is_none() {
+            Self::record_rejection("missing_both_books");
             return None;
         }
 
@@ -2029,31 +2090,51 @@ impl WeatherAlphaStrategy {
         let model_prob_dec = Decimal::from_f64_retain(model_prob)?;
         let no_model_prob = Decimal::ONE - model_prob_dec;
 
-        // Compute edge on both sides and pick the larger one
-        // Only consider sides where the ask price is below max_entry_price
-        let yes_edge = if model_prob_dec > yes_ask && yes_ask <= self.config.max_entry_price {
-            Some(model_prob_dec - yes_ask)
-        } else {
-            None
-        };
-        let no_edge = if no_model_prob > no_ask && no_ask <= self.config.max_entry_price {
-            Some(no_model_prob - no_ask)
-        } else {
-            None
-        };
+        let yes_candidate = self.evaluate_binary_side(
+            &market.question,
+            "yes",
+            yes_token.token_id,
+            yes_book
+                .as_ref()
+                .and_then(|book| book.best_ask().map(|level| level.price)),
+            yes_book
+                .as_ref()
+                .and_then(|book| book.best_bid().map(|level| level.price)),
+            model_prob_dec,
+        );
+        let no_candidate = self.evaluate_binary_side(
+            &market.question,
+            "no",
+            no_token.token_id,
+            no_book
+                .as_ref()
+                .and_then(|book| book.best_ask().map(|level| level.price)),
+            no_book
+                .as_ref()
+                .and_then(|book| book.best_bid().map(|level| level.price)),
+            no_model_prob,
+        );
 
-        let (token_id, ask_price, edge, effective_prob) = match (yes_edge, no_edge) {
-            (Some(ye), Some(ne)) => {
-                if ye >= ne {
-                    (yes_token.token_id, yes_ask, ye, model_prob_dec)
+        let selected = match (yes_candidate, no_candidate) {
+            (Some(yes), Some(no)) => {
+                if yes.edge >= no.edge {
+                    yes
                 } else {
-                    (no_token.token_id, no_ask, ne, no_model_prob)
+                    no
                 }
             }
-            (Some(ye), None) => (yes_token.token_id, yes_ask, ye, model_prob_dec),
-            (None, Some(ne)) => (no_token.token_id, no_ask, ne, no_model_prob),
-            (None, None) => return None,
+            (Some(yes), None) => yes,
+            (None, Some(no)) => no,
+            (None, None) => {
+                Self::record_rejection("no_tradable_side");
+                return None;
+            }
         };
+
+        let token_id = selected.token_id;
+        let ask_price = selected.ask_price;
+        let edge = selected.edge;
+        let effective_prob = selected.effective_prob;
 
         // Check minimum edge threshold
         let edge_bps = {
@@ -2061,6 +2142,7 @@ impl WeatherAlphaStrategy {
             (edge * dec!(10000)).to_u32().unwrap_or(0)
         };
         if edge_bps < self.config.min_edge_bps {
+            Self::record_rejection("edge_too_small");
             return None;
         }
 
@@ -2074,6 +2156,7 @@ impl WeatherAlphaStrategy {
         // After capping, verify we still meet CLOB minimum ($1.00 cost).
         // E.g. at price $0.019, min_cost_size=53 but available may only allow 2 shares.
         if size <= Decimal::ZERO || (ask_price > Decimal::ZERO && size * ask_price < Decimal::ONE) {
+            Self::record_rejection("size_below_min_order");
             return None;
         }
 
@@ -2086,6 +2169,7 @@ impl WeatherAlphaStrategy {
         );
 
         if est.net_profit <= Decimal::ZERO {
+            Self::record_rejection("non_positive_profit");
             return None;
         }
 
@@ -2157,6 +2241,7 @@ impl WeatherAlphaStrategy {
         let coords = match NoaaClient::geocode(location) {
             Ok(c) => c,
             Err(e) => {
+                Self::record_rejection("geocode_failed");
                 tracing::warn!(location = %location, error = %e, "Failed to geocode for NegRisk weather");
                 return None;
             }
@@ -2170,6 +2255,7 @@ impl WeatherAlphaStrategy {
         {
             Ok(f) => f,
             Err(e) => {
+                Self::record_rejection("forecast_fetch_failed");
                 tracing::warn!(location = %location, metric = ?metric, error = %e, "Failed to fetch forecast from NOAA for NegRisk weather");
                 return None;
             }
@@ -2232,6 +2318,7 @@ impl WeatherAlphaStrategy {
 
         // Skip if forecast hasn't changed significantly (when change detection is enabled)
         if self.config.forecast_change_detection && !is_fresh {
+            Self::record_rejection("forecast_not_fresh");
             return None;
         }
 
@@ -2335,6 +2422,7 @@ impl WeatherAlphaStrategy {
             }
 
             if skip_market {
+                Self::record_rejection("spread_too_wide");
                 tracing::debug!(
                     outcome = %market.question,
                     max_allowed = self.config.max_spread_bps,
@@ -2375,7 +2463,13 @@ impl WeatherAlphaStrategy {
             }
         }
 
-        let (market, token_id, ask_price, effective_prob, edge) = best_candidate?;
+        let (market, token_id, ask_price, effective_prob, edge) = match best_candidate {
+            Some(candidate) => candidate,
+            None => {
+                Self::record_rejection("no_tradable_side");
+                return None;
+            }
+        };
 
         // Check minimum edge threshold
         let edge_bps = {
@@ -2383,6 +2477,7 @@ impl WeatherAlphaStrategy {
             (edge * dec!(10000)).to_u32().unwrap_or(0)
         };
         if edge_bps < self.config.min_edge_bps {
+            Self::record_rejection("edge_too_small");
             return None;
         }
 
@@ -2396,6 +2491,7 @@ impl WeatherAlphaStrategy {
         // After capping, verify we still meet CLOB minimum ($1.00 cost).
         // E.g. at price $0.019, min_cost_size=53 but available may only allow 2 shares.
         if size <= Decimal::ZERO || (ask_price > Decimal::ZERO && size * ask_price < Decimal::ONE) {
+            Self::record_rejection("size_below_min_order");
             return None;
         }
 
@@ -2408,6 +2504,7 @@ impl WeatherAlphaStrategy {
         );
 
         if est.net_profit <= Decimal::ZERO {
+            Self::record_rejection("non_positive_profit");
             return None;
         }
 
@@ -2927,6 +3024,24 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_new_york_city_alias() {
+        let q = "Will the highest temperature in New York City exceed 70°F on March 5?";
+        let parsed = parse_weather_question(q).unwrap();
+        assert_eq!(parsed.metric, WeatherMetric::TemperatureMax);
+        assert_eq!(parsed.threshold, 70.0);
+        assert_eq!(parsed.comparison, Comparison::Above);
+        assert_eq!(parsed.location, "New York");
+    }
+
+    #[test]
+    fn test_parse_sf_alias() {
+        let q = "Will the temperature in SF exceed 65 degrees tomorrow?";
+        let parsed = parse_weather_question(q).unwrap();
+        assert_eq!(parsed.threshold, 65.0);
+        assert_eq!(parsed.location, "San Francisco");
+    }
+
+    #[test]
     fn test_parse_non_weather() {
         assert!(parse_weather_question("Will Bitcoin reach $100k?").is_none());
         assert!(parse_weather_question("Will the Democrats win the election?").is_none());
@@ -3242,6 +3357,14 @@ mod tests {
             parse_weather_event_title("Highest temperature in NYC on Feb 14?").unwrap();
         assert_eq!(metric, WeatherMetric::TemperatureMax);
         assert_eq!(loc, "NYC");
+    }
+
+    #[test]
+    fn test_parse_weather_event_title_vegas_alias() {
+        let (metric, loc) =
+            parse_weather_event_title("Highest temperature in Vegas on Feb 14?").unwrap();
+        assert_eq!(metric, WeatherMetric::TemperatureMax);
+        assert_eq!(loc, "Las Vegas");
     }
 
     #[test]
@@ -4682,6 +4805,16 @@ mod tests {
     }
 
     #[test]
+    fn test_geocode_known_city_aliases() {
+        let (ny_lat, _) = NoaaClient::geocode("New York City").unwrap();
+        let (sf_lat, _) = NoaaClient::geocode("SF").unwrap();
+        let (vegas_lat, _) = NoaaClient::geocode("Vegas").unwrap();
+        assert!((ny_lat - 40.7128).abs() < 0.01);
+        assert!((sf_lat - 37.7749).abs() < 0.01);
+        assert!((vegas_lat - 36.1699).abs() < 0.01);
+    }
+
+    #[test]
     fn test_geocode_unknown_city() {
         assert!(NoaaClient::geocode("London").is_err());
         assert!(NoaaClient::geocode("Tokyo").is_err());
@@ -4882,6 +5015,121 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_single_side_pricing_accepts_missing_opposite_book() {
+        let token_id = U256::from(1u64);
+        let mut books = HashMap::new();
+        books.insert(token_id, make_weather_book(token_id, dec!(0.10)));
+
+        let held = vec![];
+        let books_arc = Arc::new(books);
+        let strategy = WeatherAlphaStrategy::new(
+            WeatherConfig {
+                min_edge_bps: 500,
+                max_spread_bps: 5000,
+                max_position_pct: dec!(0.50),
+                kelly_fraction: dec!(0.25),
+                forecast_error: ForecastErrorConfig::default(),
+                refresh_interval_secs: 3600,
+                exit_buffer_bps: 50,
+                capital_efficiency_threshold: dec!(0.98),
+                dynamic_sigma: false,
+                forecast_change_detection: false,
+                forecast_change_threshold: 0.5,
+                max_entry_price: dec!(0.30),
+                profit_take_threshold: dec!(0.45),
+                max_position_usdc: dec!(10),
+                noaa_user_agent: "test".to_string(),
+                target_cities: vec![],
+            },
+            Decimal::ZERO,
+            WeatherAlphaDeps {
+                get_orderbook: Box::new(move |tid| books_arc.get(&tid).cloned()),
+                get_available_capital: Box::new(|| Decimal::MAX),
+                get_position: Box::new(|_| Decimal::ZERO),
+                get_held_positions: Box::new(move || held.clone()),
+                get_balance: Box::new(|| dec!(200)),
+                neg_risk_events: vec![],
+            },
+        );
+
+        let question = "Will the temperature in NYC exceed 50°F on March 5?";
+        let cache_key = WeatherAlphaStrategy::question_hash(question);
+        {
+            let mut cache = strategy.forecast_cache.lock().unwrap();
+            cache.insert(
+                cache_key,
+                CachedForecast {
+                    forecast: ForecastData {
+                        values: vec![80.0],
+                        dates: vec!["2026-03-05".into()],
+                        mean: 80.0,
+                        std_dev: 3.0,
+                        target_value: Some(80.0),
+                        model_spread: 0.0,
+                    },
+                    fetched_at: Instant::now(),
+                    previous_mean: None,
+                    is_fresh_signal: true,
+                },
+            );
+        }
+
+        let market = make_weather_market(question);
+        let parsed = parse_weather_question(question).unwrap();
+        let result = strategy.detect_weather_opportunity(&market, &parsed).await;
+        assert!(
+            result.is_some(),
+            "Missing opposite order book should not block a strong single-side setup"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_single_side_pricing_accepts_missing_bid_on_tradable_side() {
+        let token_id = U256::from(1u64);
+        let mut yes_book = make_weather_book(token_id, dec!(0.10));
+        yes_book.bids.clear();
+        let mut books = HashMap::new();
+        books.insert(token_id, yes_book);
+        books.insert(
+            U256::from(2u64),
+            make_weather_book(U256::from(2u64), dec!(0.90)),
+        );
+
+        let held = vec![];
+        let strategy = make_weather_strategy(books, held);
+
+        let question = "Will the temperature in NYC exceed 50°F on March 5?";
+        let cache_key = WeatherAlphaStrategy::question_hash(question);
+        {
+            let mut cache = strategy.forecast_cache.lock().unwrap();
+            cache.insert(
+                cache_key,
+                CachedForecast {
+                    forecast: ForecastData {
+                        values: vec![80.0],
+                        dates: vec!["2026-03-05".into()],
+                        mean: 80.0,
+                        std_dev: 3.0,
+                        target_value: Some(80.0),
+                        model_spread: 0.0,
+                    },
+                    fetched_at: Instant::now(),
+                    previous_mean: None,
+                    is_fresh_signal: true,
+                },
+            );
+        }
+
+        let market = make_weather_market(question);
+        let parsed = parse_weather_question(question).unwrap();
+        let result = strategy.detect_weather_opportunity(&market, &parsed).await;
+        assert!(
+            result.is_some(),
+            "Missing bid on the tradable side should no longer force a rejection"
+        );
+    }
+
     // ──── Profit-Take Exit Tests ────
 
     #[tokio::test]
@@ -5018,8 +5266,9 @@ mod tests {
         );
 
         assert!(strategy.is_target_city("New York"));
-        assert!(strategy.is_target_city("London"));
-        assert!(strategy.is_target_city("Anywhere"));
+        assert!(strategy.is_target_city("Seattle"));
+        assert!(!strategy.is_target_city("London"));
+        assert!(!strategy.is_target_city("Anywhere"));
     }
 
     // ──── Fixed Sizing Tests ────

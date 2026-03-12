@@ -58,21 +58,21 @@ ws_max_instruments = 500
 market_refresh_interval_secs = 1800  # 30 min
 
 [weather]
-min_edge_bps = 1200
-max_spread_bps = 1200
+min_edge_bps = 700
+max_spread_bps = 1800
 max_position_pct = 0.50
 kelly_fraction = 0.25
 refresh_interval_secs = 120          # Every 2 minutes
 exit_buffer_bps = 50
 capital_efficiency_threshold = 0.98
 dynamic_sigma = true
-forecast_change_detection = true     # Trend detection enabled
-forecast_change_threshold = 0.5
-max_entry_price = 0.15               # Only buy tokens priced below 15 cents
+forecast_change_detection = false    # Disabled by default; weather forecasts usually change slowly
+forecast_change_threshold = 0.35
+max_entry_price = 0.30               # Allow moderately priced tokens instead of only extreme longshots
 profit_take_threshold = 0.45         # Sell when price rises above 45 cents
-max_position_usdc = 2.0              # Max $2 per trade
+max_position_usdc = 5.0              # Max $5 per trade
 noaa_user_agent = "PolyAlpha/1.0"
-target_cities = ["New York", "Chicago", "Los Angeles", "Houston", "Phoenix", "Miami"]
+target_cities = []
 
 [weather.forecast_error]
 temperature_sigma_f = 3.0
@@ -124,9 +124,7 @@ cancel_depth_level = 2      # cancel and re-quote when order reaches this depth
 
 # ──── Multi-Account Configuration ────
 # Define named accounts to run different strategies with different wallets.
-# If no [[accounts]] sections are defined, a single "default" account is created
-# from POLYMARKET_PRIVATE_KEY env var + clob.signature_type + clob.proxy_wallet,
-# running all enabled strategies.
+# Trading is disabled unless accounts are provided here or via PA_ACCOUNT_<N>_* env vars.
 #
 # [[accounts]]
 # name = "main"

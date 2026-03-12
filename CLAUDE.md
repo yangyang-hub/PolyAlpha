@@ -93,11 +93,16 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 
 关键结构: `Settings { chain, clob, gamma, strategy, risk, database, monitor, market_filter, weather, crypto_alpha, event_calendar, liquidity_rewards, smart_money, accounts }`
 
+账户模型:
+- 仅支持显式多账户配置
+- 账户来源优先级: `PA_ACCOUNT_<N>_*` 环境变量 > TOML `[[accounts]]`
+- 未配置任何账户时，不再回退到默认单账户钱包，程序会退出
+
 所有配置结构体 derive `Serialize` + `Deserialize`，支持通过 REST API 热更新。`Settings::redacted()` 返回隐藏敏感字段（RPC URL、私钥、API Key）的副本。
 
 `MarketFilterConfig` fields: `ws_max_instruments(500)`, `market_refresh_interval_secs(1800)`
 
-`WeatherConfig` fields: `min_edge_bps`, `max_spread_bps`, `max_position_pct`, `max_position_usdc(2.0)`, `kelly_fraction`, `forecast_error: ForecastErrorConfig`, `refresh_interval_secs(120)`, `dynamic_sigma(true)`, `forecast_change_detection(true)`, `forecast_change_threshold(0.5)`, `exit_buffer_bps(50)`, `capital_efficiency_threshold(0.98)`, `max_entry_price(0.15)`, `profit_take_threshold(0.45)`, `noaa_user_agent("PolyAlpha/1.0")`, `target_cities(["New York","Chicago","Los Angeles","Houston","Phoenix","Miami"])`
+`WeatherConfig` fields: `min_edge_bps`, `max_spread_bps`, `max_position_pct`, `max_position_usdc(5.0)`, `kelly_fraction`, `forecast_error: ForecastErrorConfig`, `refresh_interval_secs(120)`, `dynamic_sigma(true)`, `forecast_change_detection(false)`, `forecast_change_threshold(0.35)`, `exit_buffer_bps(50)`, `capital_efficiency_threshold(0.98)`, `max_entry_price(0.30)`, `profit_take_threshold(0.45)`, `noaa_user_agent("PolyAlpha/1.0")`, `target_cities([])`
 
 `ForecastErrorConfig` — 每指标预报误差σ: `temperature_sigma_f(3.0°F)`, `precipitation_sigma_in(0.3in)`, `snowfall_sigma_in(2.0in)`, `wind_sigma_mph(5.0mph)`
 
@@ -129,7 +134,7 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 3. 检测降水单位（"mm" vs "inch"，默认 inch）
 4. 调用 NOAA API（api.weather.gov，免费，需 User-Agent header，10s超时+指数退避重试）获取天气预报
 5. 使用分布CDF模型将预报转换为事件概率（温度→正态, 降水→对数正态, 风速→Weibull）
-6. 价格过滤: 只买价格低于 `max_entry_price`（默认 $0.15）的 token
+6. 价格过滤: 只买价格低于 `max_entry_price`（默认 $0.30）的 token
 7. 比较模型概率与市场价格，检查YES和NO两侧，取更大edge的一方买入
 
 **NegRisk 多结果模式** — 区间分布问题（如 "Highest temperature in NYC?"）：
@@ -143,7 +148,7 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 - 动态 sigma: `dynamic_sigma=true` 时 `sigma = base × √(max(1, days_to_event))`
 - 日期特定: `sigma = sqrt(forecast_error² + model_spread²)`
 - 多日模式: `sigma = sqrt(std_dev² + forecast_error² + model_spread²)`
-- 预报变化检测: `forecast_change_detection=true`（默认开启）时仅在 `|new - old| > threshold × sigma` 时交易
+- 预报变化检测: `forecast_change_detection=true` 时仅在 `|new - old| > threshold × sigma` 时交易；默认关闭
 
 **分布模型（CDF）**:
 - 温度: 正态分布 `normal_cdf(z)`
@@ -151,8 +156,8 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 - 风速: Weibull分布 `weibull_cdf(t, mean, sigma)` (k=2, Rayleigh)
 
 **共通逻辑**：
-- 仓位控制: 固定上限 `max_position_usdc`（默认 $2）+ position-aware sizing（减去已有仓位成本）
-- 入场过滤: `max_entry_price`（默认 0.15）— 只买低价 token（高赔率）
+- 仓位控制: 固定上限 `max_position_usdc`（默认 $5）+ position-aware sizing（减去已有仓位成本）
+- 入场过滤: `max_entry_price`（默认 0.30）— 允许中低价 token，而不只限极端长赔率
 - 止盈退出: `profit_take_threshold`（默认 0.45）— 价格涨到阈值以上自动卖出
 - 目标城市: `target_cities` 过滤，仅扫描配置的美国城市（支持别名: NYC→New York, LA→Los Angeles）
 - 执行: CLOB FOK 单边买入（`DirectionalBuy`），无链上操作

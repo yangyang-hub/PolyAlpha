@@ -18,6 +18,17 @@ export interface StatusResponse {
   health_port: number;
   lr_enabled: boolean;
   event_calendar_enabled: boolean;
+  accounts_configured: number;
+  accounts_ready: number;
+  trading_ready: boolean;
+  accounts: AccountStatusEntry[];
+}
+
+export interface AccountStatusEntry {
+  name: string;
+  strategies: string[];
+  private_key_env: string;
+  private_key_present: boolean;
 }
 
 export interface HistoryEntry {
@@ -51,6 +62,11 @@ export interface UpdateResult {
   version: number;
   status: string;
   persisted: boolean;
+}
+
+export interface SectionMeta {
+  target_cities_options?: string[];
+  target_cities_empty_means_all?: boolean;
 }
 
 export interface PositionEntry {
@@ -91,6 +107,10 @@ export function fetchConfig(): Promise<Record<string, unknown>> {
 
 export function fetchSection(section: string): Promise<Record<string, unknown>> {
   return get(`/api/config/${section}`);
+}
+
+export function fetchSectionMeta(section: string): Promise<SectionMeta> {
+  return get(`/api/config/meta/${section}`);
 }
 
 export async function updateSection(

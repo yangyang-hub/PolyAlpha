@@ -1,4 +1,4 @@
-use prometheus::{Gauge, Histogram, IntCounter, Registry, histogram_opts};
+use prometheus::{Gauge, Histogram, IntCounter, IntCounterVec, Registry, histogram_opts};
 use std::sync::LazyLock;
 
 /// Global Prometheus metrics registry.
@@ -20,6 +20,48 @@ pub static OPPORTUNITIES_REJECTED: LazyLock<IntCounter> = LazyLock::new(|| {
     let counter = IntCounter::new(
         "opportunities_rejected_total",
         "Opportunities rejected by risk checks",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
+/// Weather strategy rejection reasons.
+pub static WEATHER_REJECTIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let counter = IntCounterVec::new(
+        prometheus::Opts::new(
+            "weather_rejections_total",
+            "Weather strategy opportunities rejected by reason",
+        ),
+        &["reason"],
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
+/// Opportunities rejected during final execution freshness validation.
+pub static EXECUTION_FRESHNESS_REJECTIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let counter = IntCounterVec::new(
+        prometheus::Opts::new(
+            "execution_freshness_rejections_total",
+            "Opportunities rejected during execution freshness validation",
+        ),
+        &["strategy", "reason"],
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
+/// Opportunities scaled during final execution freshness validation.
+pub static EXECUTION_FRESHNESS_SCALED: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let counter = IntCounterVec::new(
+        prometheus::Opts::new(
+            "execution_freshness_scaled_total",
+            "Opportunities scaled during execution freshness validation",
+        ),
+        &["strategy", "side"],
     )
     .unwrap();
     REGISTRY.register(Box::new(counter.clone())).unwrap();
