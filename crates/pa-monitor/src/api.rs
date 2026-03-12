@@ -194,13 +194,34 @@ async fn get_section(
 /// GET /api/config/meta/:section — UI metadata for a config section.
 async fn get_section_meta(Path(section): Path<String>) -> (axum::http::StatusCode, Json<Value>) {
     match section.as_str() {
-        "weather" => (
-            axum::http::StatusCode::OK,
-            Json(json!({
-                "target_cities_options": pa_core::weather::noaa_supported_location_names(),
-                "target_cities_empty_means_all": true,
-            })),
-        ),
+        "weather" => {
+            let target_cities = pa_core::weather::noaa_supported_location_names();
+            let city_risk_tiers: std::collections::HashMap<&str, &str> = target_cities
+                .iter()
+                .map(|city| {
+                    let tier = match pa_core::weather::noaa_settlement_risk_tier(city) {
+                        pa_core::weather::SettlementRiskTier::Low => "low",
+                        pa_core::weather::SettlementRiskTier::Medium => "medium",
+                        pa_core::weather::SettlementRiskTier::High => "high",
+                    };
+                    (*city, tier)
+                })
+                .collect();
+
+            (
+                axum::http::StatusCode::OK,
+                Json(json!({
+                    "target_cities_options": target_cities,
+                    "target_cities_empty_means_all": true,
+                    "target_cities_risk_tiers": city_risk_tiers,
+                    "target_cities_sigma_multipliers": {
+                        "low": pa_core::weather::settlement_sigma_multiplier(pa_core::weather::SettlementRiskTier::Low),
+                        "medium": pa_core::weather::settlement_sigma_multiplier(pa_core::weather::SettlementRiskTier::Medium),
+                        "high": pa_core::weather::settlement_sigma_multiplier(pa_core::weather::SettlementRiskTier::High),
+                    },
+                })),
+            )
+        }
         _ => (axum::http::StatusCode::OK, Json(json!({}))),
     }
 }

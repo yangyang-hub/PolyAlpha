@@ -67,6 +67,8 @@ export interface UpdateResult {
 export interface SectionMeta {
   target_cities_options?: string[];
   target_cities_empty_means_all?: boolean;
+  target_cities_risk_tiers?: Record<string, "low" | "medium" | "high">;
+  target_cities_sigma_multipliers?: Record<string, number>;
 }
 
 export interface PositionEntry {

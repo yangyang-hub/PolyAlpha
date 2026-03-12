@@ -39,6 +39,13 @@ const NOAA_LOCATION_ALIASES: &[(&str, &str)] = &[
     ("nola", "New Orleans"),
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettlementRiskTier {
+    Low,
+    Medium,
+    High,
+}
+
 pub fn noaa_supported_location_names() -> &'static [&'static str] {
     &[
         "New York",
@@ -83,6 +90,35 @@ pub fn normalize_noaa_location_name(location: &str) -> Option<&'static str> {
     None
 }
 
+pub fn noaa_settlement_risk_tier(location: &str) -> SettlementRiskTier {
+    match normalize_noaa_location_name(location) {
+        Some(
+            "New York"
+            | "NYC"
+            | "Chicago"
+            | "Miami"
+            | "Seattle"
+            | "Atlanta"
+            | "Dallas"
+            | "Denver",
+        ) => SettlementRiskTier::Medium,
+        Some(_) => SettlementRiskTier::High,
+        None => SettlementRiskTier::High,
+    }
+}
+
+pub fn settlement_sigma_multiplier(tier: SettlementRiskTier) -> f64 {
+    match tier {
+        SettlementRiskTier::Low => 1.00,
+        SettlementRiskTier::Medium => 1.15,
+        SettlementRiskTier::High => 1.35,
+    }
+}
+
+pub fn settlement_sigma_multiplier_for_location(location: &str) -> f64 {
+    settlement_sigma_multiplier(noaa_settlement_risk_tier(location))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +141,39 @@ mod tests {
         assert!(names.contains(&"Los Angeles"));
         assert!(!names.contains(&"NYC"));
         assert!(!names.contains(&"LA"));
+    }
+
+    #[test]
+    fn test_noaa_settlement_risk_tier_verified_cities_are_medium() {
+        assert_eq!(
+            noaa_settlement_risk_tier("New York"),
+            SettlementRiskTier::Medium
+        );
+        assert_eq!(
+            noaa_settlement_risk_tier("Seattle"),
+            SettlementRiskTier::Medium
+        );
+        assert_eq!(
+            noaa_settlement_risk_tier("Dallas"),
+            SettlementRiskTier::Medium
+        );
+    }
+
+    #[test]
+    fn test_noaa_settlement_risk_tier_unverified_cities_are_high() {
+        assert_eq!(
+            noaa_settlement_risk_tier("San Francisco"),
+            SettlementRiskTier::High
+        );
+        assert_eq!(
+            noaa_settlement_risk_tier("Las Vegas"),
+            SettlementRiskTier::High
+        );
+    }
+
+    #[test]
+    fn test_settlement_sigma_multiplier_for_location_uses_aliases() {
+        assert_eq!(settlement_sigma_multiplier_for_location("NYC"), 1.15);
+        assert_eq!(settlement_sigma_multiplier_for_location("NOLA"), 1.35);
     }
 }

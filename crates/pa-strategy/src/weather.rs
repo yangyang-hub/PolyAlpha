@@ -16,7 +16,10 @@ use pa_core::traits::Strategy;
 use pa_core::types::{
     ExecutionPlan, MarketInfo, NegRiskEvent, OrderBook, StrategyType, TradeSide, TradingOpportunity,
 };
-use pa_core::weather::{NOAA_SUPPORTED_LOCATIONS, normalize_noaa_location_name};
+use pa_core::weather::{
+    NOAA_SUPPORTED_LOCATIONS, normalize_noaa_location_name,
+    noaa_settlement_risk_tier, settlement_sigma_multiplier_for_location,
+};
 
 use crate::profitability::ProfitCalculator;
 
@@ -74,6 +77,10 @@ pub fn sigma_for_metric(
     } else {
         base
     }
+}
+
+fn sigma_with_settlement_risk(location: &str, base_sigma: f64) -> f64 {
+    base_sigma * settlement_sigma_multiplier_for_location(location)
 }
 
 /// Known city names for location extraction.
@@ -1324,6 +1331,26 @@ fn is_significant_change(
     }
 }
 
+fn resolved_outcome_sides(
+    actual_value: f64,
+    threshold: f64,
+    comparison: Comparison,
+) -> (bool, bool) {
+    let yes = match comparison {
+        Comparison::Above => actual_value > threshold,
+        Comparison::AtLeast => actual_value >= threshold,
+        Comparison::Below => actual_value < threshold,
+        Comparison::AtMost => actual_value <= threshold,
+    };
+    let no = match comparison {
+        Comparison::Above => actual_value <= threshold,
+        Comparison::AtLeast => actual_value < threshold,
+        Comparison::Below => actual_value >= threshold,
+        Comparison::AtMost => actual_value > threshold,
+    };
+    (yes, no)
+}
+
 // ──── Cache Eviction ────
 
 /// Remove stale forecast cache entries older than `max_age_secs`.
@@ -1514,6 +1541,7 @@ impl WeatherAlphaStrategy {
                 "yes" => "missing_yes_bid",
                 _ => "missing_no_bid",
             });
+            return None;
         }
 
         if ask_price > self.config.max_entry_price {
@@ -1532,6 +1560,25 @@ impl WeatherAlphaStrategy {
             edge: effective_prob - ask_price,
             effective_prob,
         })
+    }
+
+    fn evaluate_neg_risk_side(
+        &self,
+        question: &str,
+        side_name: &'static str,
+        token_id: U256,
+        ask_price: Option<Decimal>,
+        bid_price: Option<Decimal>,
+        effective_prob: Decimal,
+    ) -> Option<SideCandidate> {
+        self.evaluate_binary_side(
+            question,
+            side_name,
+            token_id,
+            ask_price,
+            bid_price,
+            effective_prob,
+        )
     }
 
     // ──── Stale Liquidity Detection ────
@@ -1615,16 +1662,8 @@ impl WeatherAlphaStrategy {
             };
 
             // Determine if outcome is confirmed
-            let should_trigger_yes = match parsed.comparison {
-                Comparison::Above | Comparison::AtLeast => actual_value > parsed.threshold,
-                Comparison::Below | Comparison::AtMost => actual_value < parsed.threshold,
-            };
-
-            // For the opposite side, check if the threshold is definitively NOT met
-            let should_trigger_no = match parsed.comparison {
-                Comparison::Above | Comparison::AtLeast => actual_value <= parsed.threshold,
-                Comparison::Below | Comparison::AtMost => actual_value >= parsed.threshold,
-            };
+            let (should_trigger_yes, should_trigger_no) =
+                resolved_outcome_sides(actual_value, parsed.threshold, parsed.comparison);
 
             // Get order books for both sides
             if market.tokens.len() < 2 {
@@ -1804,11 +1843,14 @@ impl WeatherAlphaStrategy {
                 range
             };
 
-            let sigma = sigma_for_metric(
+            let sigma = sigma_with_settlement_risk(
+                location,
+                sigma_for_metric(
                 &self.config.forecast_error,
                 metric,
                 Some((target_date - today).num_days()),
                 self.config.dynamic_sigma,
+                ),
             );
             let prob_f64 = model_range_probability(&forecast, &range, sigma, metric);
             let model_prob = match Decimal::from_f64_retain(prob_f64) {
@@ -1851,14 +1893,17 @@ impl WeatherAlphaStrategy {
                 Some(b) => b,
                 None => continue,
             };
-            let yes_ask = match yes_book.best_ask() {
-                Some(l) => l.price,
-                None => continue,
-            };
+            let side = self.evaluate_neg_risk_side(
+                &market.question,
+                "yes",
+                market.tokens[0].token_id,
+                yes_book.best_ask().map(|l| l.price),
+                yes_book.best_bid().map(|l| l.price),
+                *model_prob,
+            );
 
-            if *model_prob > yes_ask {
-                let edge = *model_prob - yes_ask;
-                let edge_bps = (edge * dec!(10000)).to_u32().unwrap_or(0);
+            if let Some(side) = side {
+                let edge_bps = (side.edge * dec!(10000)).to_u32().unwrap_or(0);
 
                 if edge_bps < self.config.min_edge_bps {
                     continue;
@@ -1866,23 +1911,27 @@ impl WeatherAlphaStrategy {
 
                 let size = Self::shares_from_usdc_budget(
                     surround_size_per_bin.min((self.get_available_capital)()),
-                    yes_ask,
+                    side.ask_price,
                 );
                 if size <= Decimal::ZERO {
                     continue;
                 }
 
-                let existing_cost = (self.get_position)(market.tokens[0].token_id) * yes_ask;
+                let existing_cost =
+                    (self.get_position)(market.tokens[0].token_id) * side.ask_price;
                 let remaining = (surround_size_per_bin - existing_cost).max(Decimal::ZERO);
-                let final_size = size.min(Self::shares_from_usdc_budget(remaining, yes_ask));
+                let final_size =
+                    size.min(Self::shares_from_usdc_budget(remaining, side.ask_price));
 
-                if final_size <= Decimal::ZERO {
+                if final_size <= Decimal::ZERO
+                    || (side.ask_price > Decimal::ZERO && final_size * side.ask_price < Decimal::ONE)
+                {
                     continue;
                 }
 
                 let est = self.profit_calc.directional_buy_profit(
-                    yes_ask,
-                    *model_prob,
+                    side.ask_price,
+                    side.effective_prob,
                     final_size,
                     market.fee_rate_bps,
                 );
@@ -1896,14 +1945,14 @@ impl WeatherAlphaStrategy {
                     strategy_type: StrategyType::Weather,
                     condition_id: market.condition_id,
                     question: format!("[SURROUND] {} → {}", event.title, market.question),
-                    spread: edge,
+                    spread: side.edge,
                     estimated_profit: est.net_profit,
                     size: final_size,
                     detected_at: Utc::now(),
                     execution_plan: ExecutionPlan::DirectionalBuy {
                         token_id: market.tokens[0].token_id,
                         side: TradeSide::Buy,
-                        price: yes_ask,
+                        price: side.ask_price,
                         size: final_size,
                         condition_id: market.condition_id,
                     },
@@ -1990,8 +2039,10 @@ impl WeatherAlphaStrategy {
         let (previous_mean, is_fresh_signal) = {
             let cache = self.forecast_cache.lock().unwrap();
             let prev = cache.get(&key).and_then(|e| e.previous_mean);
-            let base_sigma =
-                sigma_for_metric(&self.config.forecast_error, parsed.metric, None, false);
+            let base_sigma = sigma_with_settlement_risk(
+                &parsed.location,
+                sigma_for_metric(&self.config.forecast_error, parsed.metric, None, false),
+            );
             let fresh = is_significant_change(
                 new_mean,
                 prev,
@@ -2047,11 +2098,20 @@ impl WeatherAlphaStrategy {
         }
 
         let days_to_event = target_date.map(|d| (d - Local::now().date_naive()).num_days());
-        let forecast_error_sigma = sigma_for_metric(
-            &self.config.forecast_error,
-            parsed.metric,
-            days_to_event,
-            self.config.dynamic_sigma,
+        let forecast_error_sigma = sigma_with_settlement_risk(
+            &parsed.location,
+            sigma_for_metric(
+                &self.config.forecast_error,
+                parsed.metric,
+                days_to_event,
+                self.config.dynamic_sigma,
+            ),
+        );
+        tracing::debug!(
+            location = %parsed.location,
+            settlement_risk = ?noaa_settlement_risk_tier(&parsed.location),
+            adjusted_sigma = forecast_error_sigma,
+            "Weather settlement-aware sigma applied"
         );
         // Convert °C threshold to °F since forecast is always in Fahrenheit
         let threshold =
@@ -2266,7 +2326,10 @@ impl WeatherAlphaStrategy {
         let (previous_mean, is_fresh_signal) = {
             let cache = self.forecast_cache.lock().unwrap();
             let prev = cache.get(&cache_key).and_then(|e| e.previous_mean);
-            let base_sigma = sigma_for_metric(&self.config.forecast_error, metric, None, false);
+            let base_sigma = sigma_with_settlement_risk(
+                location,
+                sigma_for_metric(&self.config.forecast_error, metric, None, false),
+            );
             let fresh = is_significant_change(
                 new_mean,
                 prev,
@@ -2323,11 +2386,14 @@ impl WeatherAlphaStrategy {
         }
 
         let days_to_event = target_date.map(|d| (d - Local::now().date_naive()).num_days());
-        let forecast_error_sigma = sigma_for_metric(
-            &self.config.forecast_error,
-            metric,
-            days_to_event,
-            self.config.dynamic_sigma,
+        let forecast_error_sigma = sigma_with_settlement_risk(
+            location,
+            sigma_for_metric(
+                &self.config.forecast_error,
+                metric,
+                days_to_event,
+                self.config.dynamic_sigma,
+            ),
         );
 
         // Evaluate each outcome market for edge (both YES and NO sides)
@@ -2386,79 +2452,44 @@ impl WeatherAlphaStrategy {
             let yes_book = (self.get_orderbook)(yes_token.token_id);
             let no_book = (self.get_orderbook)(no_token.token_id);
 
-            // Check bid-ask spread before evaluating edge
-            let mut skip_market = false;
-            if let Some(ref yb) = yes_book
-                && let (Some(ask), Some(bid)) = (yb.best_ask(), yb.best_bid())
-            {
-                let spread = if ask.price > Decimal::ZERO {
-                    (ask.price - bid.price) / ask.price
-                } else {
-                    Decimal::ONE
-                };
-                let spread_bps = {
-                    use rust_decimal::prelude::ToPrimitive;
-                    (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
-                };
-                if spread_bps > self.config.max_spread_bps {
-                    skip_market = true;
-                }
-            }
-            if let Some(ref nb) = no_book
-                && let (Some(ask), Some(bid)) = (nb.best_ask(), nb.best_bid())
-            {
-                let spread = if ask.price > Decimal::ZERO {
-                    (ask.price - bid.price) / ask.price
-                } else {
-                    Decimal::ONE
-                };
-                let spread_bps = {
-                    use rust_decimal::prelude::ToPrimitive;
-                    (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
-                };
-                if spread_bps > self.config.max_spread_bps {
-                    skip_market = true;
-                }
-            }
-
-            if skip_market {
-                Self::record_rejection("spread_too_wide");
-                tracing::debug!(
-                    outcome = %market.question,
-                    max_allowed = self.config.max_spread_bps,
-                    "[Weather NegRisk] Skipping: spread too wide"
-                );
-                continue;
-            }
-
-            // YES side check: only if ask price is below max_entry_price
-            if let Some(yes_book) = yes_book
-                && let Some(yes_ask_level) = yes_book.best_ask()
-            {
-                let yes_ask = yes_ask_level.price;
-                if model_prob > yes_ask && yes_ask <= self.config.max_entry_price {
-                    let edge = model_prob - yes_ask;
-                    if edge > best_edge {
-                        best_edge = edge;
-                        best_candidate =
-                            Some((market, yes_token.token_id, yes_ask, model_prob, edge));
-                    }
-                }
-            }
+            let yes_candidate = self.evaluate_neg_risk_side(
+                &market.question,
+                "yes",
+                yes_token.token_id,
+                yes_book
+                    .as_ref()
+                    .and_then(|book| book.best_ask().map(|level| level.price)),
+                yes_book
+                    .as_ref()
+                    .and_then(|book| book.best_bid().map(|level| level.price)),
+                model_prob,
+            );
 
             // NO side check: P(NOT this range) = 1 - model_prob
             let no_model_prob = Decimal::ONE - model_prob;
-            if let Some(no_book) = no_book
-                && let Some(no_ask_level) = no_book.best_ask()
-            {
-                let no_ask = no_ask_level.price;
-                if no_model_prob > no_ask && no_ask <= self.config.max_entry_price {
-                    let edge = no_model_prob - no_ask;
-                    if edge > best_edge {
-                        best_edge = edge;
-                        best_candidate =
-                            Some((market, no_token.token_id, no_ask, no_model_prob, edge));
-                    }
+            let no_candidate = self.evaluate_neg_risk_side(
+                &market.question,
+                "no",
+                no_token.token_id,
+                no_book
+                    .as_ref()
+                    .and_then(|book| book.best_ask().map(|level| level.price)),
+                no_book
+                    .as_ref()
+                    .and_then(|book| book.best_bid().map(|level| level.price)),
+                no_model_prob,
+            );
+
+            for side in [yes_candidate, no_candidate].into_iter().flatten() {
+                if side.edge > best_edge {
+                    best_edge = side.edge;
+                    best_candidate = Some((
+                        market,
+                        side.token_id,
+                        side.ask_price,
+                        side.effective_prob,
+                        side.edge,
+                    ));
                 }
             }
         }
@@ -2575,6 +2606,7 @@ impl WeatherAlphaStrategy {
                     continue;
                 }
             };
+            let best_ask = book.best_ask().map(|a| a.price);
 
             // Profit-take exit: sell when price rises above profit_take_threshold
             if best_bid >= self.config.profit_take_threshold {
@@ -2617,6 +2649,19 @@ impl WeatherAlphaStrategy {
             // below 4.5% when best_bid is 0.05). This check provides a model-independent
             // exit when the loss is severe.
             if *avg_cost > Decimal::ZERO && best_bid < *avg_cost * dec!(0.50) {
+                if let Some(ask) = best_ask {
+                    if ask >= *avg_cost && best_bid >= ask * dec!(0.10) {
+                        tracing::debug!(
+                            token_id = %token_id,
+                            best_bid = %best_bid,
+                            best_ask = %ask,
+                            avg_cost = %avg_cost,
+                            "[Weather EXIT] Skipping deep-loss exit — ask still above cost with reasonable spread"
+                        );
+                        continue;
+                    }
+                }
+
                 let loss_pct = ((*avg_cost - best_bid) / *avg_cost * dec!(100)).round_dp(1);
                 tracing::debug!(
                     token_id = %token_id,
@@ -2729,11 +2774,14 @@ impl WeatherAlphaStrategy {
             };
 
             let days_to_event = target_date.map(|d| (d - Local::now().date_naive()).num_days());
-            let forecast_error_sigma = sigma_for_metric(
-                &self.config.forecast_error,
-                metric,
-                days_to_event,
-                self.config.dynamic_sigma,
+            let forecast_error_sigma = sigma_with_settlement_risk(
+                &location,
+                sigma_for_metric(
+                    &self.config.forecast_error,
+                    metric,
+                    days_to_event,
+                    self.config.dynamic_sigma,
+                ),
             );
             // Convert °C threshold to °F since forecast is always in Fahrenheit
             // For NegRisk outcomes (ranges), use model_range_probability instead of model_probability
@@ -3790,6 +3838,16 @@ mod tests {
     }
 
     #[test]
+    fn test_settlement_risk_adjusts_sigma_by_city() {
+        let base_sigma = 3.0;
+        let nyc_sigma = sigma_with_settlement_risk("NYC", base_sigma);
+        let sf_sigma = sigma_with_settlement_risk("San Francisco", base_sigma);
+
+        assert!((nyc_sigma - 3.45).abs() < 1e-6, "NYC sigma = {}", nyc_sigma);
+        assert!((sf_sigma - 4.05).abs() < 1e-6, "SF sigma = {}", sf_sigma);
+    }
+
+    #[test]
     fn test_date_specific_sigma_no_crossday() {
         // Date-specific forecast uses only forecast error, ignoring std_dev
         let forecast = ForecastData {
@@ -4115,6 +4173,26 @@ mod tests {
         assert!(!is_significant_change(95.0, Some(95.0), 0.0, 0.5));
     }
 
+    #[test]
+    fn test_resolved_outcome_sides_respects_inclusive_boundaries() {
+        assert_eq!(
+            resolved_outcome_sides(50.0, 50.0, Comparison::AtLeast),
+            (true, false)
+        );
+        assert_eq!(
+            resolved_outcome_sides(50.0, 50.0, Comparison::AtMost),
+            (true, false)
+        );
+        assert_eq!(
+            resolved_outcome_sides(50.0, 50.0, Comparison::Above),
+            (false, true)
+        );
+        assert_eq!(
+            resolved_outcome_sides(50.0, 50.0, Comparison::Below),
+            (false, true)
+        );
+    }
+
     // ──── NegRisk NO-Side Detection Test ────
 
     #[test]
@@ -4198,6 +4276,57 @@ mod tests {
             rewards_daily_rate: None,
             holding_rewards_enabled: false,
             fees_enabled: false,
+        }
+    }
+
+    fn make_neg_risk_weather_market(
+        question: &str,
+        yes_token_id: u64,
+        no_token_id: u64,
+        event_title: &str,
+    ) -> MarketInfo {
+        MarketInfo {
+            condition_id: B256::ZERO,
+            question_id: B256::ZERO,
+            question: question.to_string(),
+            neg_risk: true,
+            neg_risk_market_id: Some(B256::from([1u8; 32])),
+            tokens: vec![
+                TokenInfo {
+                    token_id: U256::from(yes_token_id),
+                    outcome: Outcome::Yes,
+                    complement_id: U256::from(no_token_id),
+                },
+                TokenInfo {
+                    token_id: U256::from(no_token_id),
+                    outcome: Outcome::No,
+                    complement_id: U256::from(yes_token_id),
+                },
+            ],
+            tick_size: dec!(0.01),
+            fee_rate_bps: 200,
+            active: true,
+            liquidity: dec!(1000),
+            event_title: Some(event_title.to_string()),
+            end_date: None,
+            category: None,
+            outcome_prices: None,
+            gamma_best_bid: None,
+            gamma_best_ask: None,
+            rewards_min_size: None,
+            rewards_max_spread: None,
+            rewards_daily_rate: None,
+            holding_rewards_enabled: false,
+            fees_enabled: false,
+        }
+    }
+
+    fn make_neg_risk_event(title: &str, markets: Vec<MarketInfo>) -> NegRiskEvent {
+        NegRiskEvent {
+            neg_risk_market_id: B256::from([1u8; 32]),
+            title: title.to_string(),
+            fee_rate_bps: 200,
+            markets,
         }
     }
 
@@ -4700,6 +4829,174 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_neg_risk_rejects_missing_bid_on_tradable_side() {
+        let event_title = "Highest temperature in Miami on March 20";
+        let market = make_neg_risk_weather_market(
+            "Will the highest temperature in Miami be 84°F or higher on March 20?",
+            11,
+            12,
+            event_title,
+        );
+        let event = make_neg_risk_event(event_title, vec![market.clone()]);
+
+        let mut yes_book = make_weather_book(U256::from(11u64), dec!(0.18));
+        yes_book.bids.clear();
+        let no_book = make_weather_book(U256::from(12u64), dec!(0.90));
+
+        let mut books = HashMap::new();
+        books.insert(U256::from(11u64), yes_book);
+        books.insert(U256::from(12u64), no_book);
+
+        let strategy = make_weather_strategy(books, vec![]);
+        let target_date = parse_target_date(event_title);
+        let cache_key = WeatherAlphaStrategy::location_hash(
+            "Miami",
+            WeatherMetric::TemperatureMax,
+            target_date,
+        );
+        {
+            let mut cache = strategy.forecast_cache.lock().unwrap();
+            cache.insert(
+                cache_key,
+                CachedForecast {
+                    forecast: ForecastData {
+                        values: vec![84.5],
+                        dates: vec!["2026-03-20".into()],
+                        mean: 84.5,
+                        std_dev: 0.2,
+                        target_value: Some(84.5),
+                        model_spread: 0.0,
+                    },
+                    fetched_at: Instant::now(),
+                    previous_mean: None,
+                    is_fresh_signal: true,
+                },
+            );
+        }
+
+        let result = strategy
+            .detect_neg_risk_weather(&event, WeatherMetric::TemperatureMax, "Miami")
+            .await;
+        assert!(
+            result.is_none(),
+            "NegRisk side with missing bid should be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_neg_risk_keeps_good_side_when_opposite_side_spread_is_wide() {
+        let event_title = "Highest temperature in Miami on March 20";
+        let market = make_neg_risk_weather_market(
+            "Will the highest temperature in Miami be 84°F or higher on March 20?",
+            21,
+            22,
+            event_title,
+        );
+        let event = make_neg_risk_event(event_title, vec![market.clone()]);
+
+        let yes_book = make_weather_book(U256::from(21u64), dec!(0.16));
+        let mut no_book = make_weather_book(U256::from(22u64), dec!(0.40));
+        no_book.asks.clear();
+        no_book.asks.push(PriceLevel {
+            price: dec!(0.80),
+            size: dec!(100),
+        });
+
+        let mut books = HashMap::new();
+        books.insert(U256::from(21u64), yes_book);
+        books.insert(U256::from(22u64), no_book);
+
+        let strategy = make_weather_strategy(books, vec![]);
+        let target_date = parse_target_date(event_title);
+        let cache_key = WeatherAlphaStrategy::location_hash(
+            "Miami",
+            WeatherMetric::TemperatureMax,
+            target_date,
+        );
+        {
+            let mut cache = strategy.forecast_cache.lock().unwrap();
+            cache.insert(
+                cache_key,
+                CachedForecast {
+                    forecast: ForecastData {
+                        values: vec![84.5],
+                        dates: vec!["2026-03-20".into()],
+                        mean: 84.5,
+                        std_dev: 0.2,
+                        target_value: Some(84.5),
+                        model_spread: 0.0,
+                    },
+                    fetched_at: Instant::now(),
+                    previous_mean: None,
+                    is_fresh_signal: true,
+                },
+            );
+        }
+
+        let result = strategy
+            .detect_neg_risk_weather(&event, WeatherMetric::TemperatureMax, "Miami")
+            .await;
+        assert!(
+            result.is_some(),
+            "Wide spread on NO side should not block a valid YES-side NegRisk trade"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_surround_rejects_missing_bid_on_yes_side() {
+        let event_title = "Highest temperature in Miami on March 20";
+        let market = make_neg_risk_weather_market(
+            "Will the highest temperature in Miami be 84°F or higher on March 20?",
+            31,
+            32,
+            event_title,
+        );
+        let event = make_neg_risk_event(event_title, vec![market.clone()]);
+
+        let mut yes_book = make_weather_book(U256::from(31u64), dec!(0.18));
+        yes_book.bids.clear();
+
+        let mut books = HashMap::new();
+        books.insert(U256::from(31u64), yes_book);
+        books.insert(U256::from(32u64), make_weather_book(U256::from(32u64), dec!(0.82)));
+
+        let strategy = make_weather_strategy(books, vec![]);
+        let target_date = parse_target_date(event_title);
+        let cache_key = WeatherAlphaStrategy::location_hash(
+            "Miami",
+            WeatherMetric::TemperatureMax,
+            target_date,
+        );
+        {
+            let mut cache = strategy.forecast_cache.lock().unwrap();
+            cache.insert(
+                cache_key,
+                CachedForecast {
+                    forecast: ForecastData {
+                        values: vec![84.5],
+                        dates: vec!["2026-03-20".into()],
+                        mean: 84.5,
+                        std_dev: 0.2,
+                        target_value: Some(84.5),
+                        model_spread: 0.0,
+                    },
+                    fetched_at: Instant::now(),
+                    previous_mean: None,
+                    is_fresh_signal: true,
+                },
+            );
+        }
+
+        let result = strategy
+            .detect_neg_risk_surround(&event, WeatherMetric::TemperatureMax, "Miami")
+            .await;
+        assert!(
+            result.is_empty(),
+            "Surround strategy should reject YES bins that have no bid support"
+        );
+    }
+
+    #[tokio::test]
     async fn test_exit_celsius_neg_risk_converts_threshold() {
         // NegRisk outcome in °C: "23°C or higher" with forecast 71.5°F (=21.9°C)
         // Without conversion: P(X >= 23) ≈ 1.0 → no exit (wrong!)
@@ -5085,7 +5382,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_single_side_pricing_accepts_missing_bid_on_tradable_side() {
+    async fn test_single_side_pricing_rejects_missing_bid_on_tradable_side() {
         let token_id = U256::from(1u64);
         let mut yes_book = make_weather_book(token_id, dec!(0.10));
         yes_book.bids.clear();
@@ -5125,8 +5422,38 @@ mod tests {
         let parsed = parse_weather_question(question).unwrap();
         let result = strategy.detect_weather_opportunity(&market, &parsed).await;
         assert!(
-            result.is_some(),
-            "Missing bid on the tradable side should no longer force a rejection"
+            result.is_none(),
+            "Missing bid on the tradable side should now force a rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_exit_deep_loss_skips_when_ask_still_above_cost() {
+        let token_id = U256::from(1u64);
+        let question = "Will the temperature in NYC exceed 100F this summer?";
+        let market = make_weather_market(question);
+
+        let mut book = make_weather_book(token_id, dec!(0.06));
+        book.asks.clear();
+        book.asks.push(PriceLevel {
+            price: dec!(0.22),
+            size: dec!(100),
+        });
+
+        let mut books = HashMap::new();
+        books.insert(token_id, book);
+        books.insert(
+            U256::from(2u64),
+            make_weather_book(U256::from(2u64), dec!(0.94)),
+        );
+
+        let held = vec![(token_id, dec!(5), dec!(0.21))];
+        let strategy = make_weather_strategy(books, held);
+
+        let exits = strategy.scan_exits(&[market]).await;
+        assert!(
+            exits.is_empty(),
+            "Low bid with ask still above cost should not trigger deep-loss exit"
         );
     }
 

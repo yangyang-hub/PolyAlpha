@@ -373,8 +373,8 @@ ws_max_instruments = 500
 market_refresh_interval_secs = 1800
 
 [weather]
-min_edge_bps = 700
-max_spread_bps = 1800
+min_edge_bps = 600
+max_spread_bps = 1500
 max_position_usdc = 5.0
 kelly_fraction = 0.25
 dynamic_sigma = true
@@ -390,6 +390,12 @@ temperature_sigma_f = 3.0
 precipitation_sigma_in = 0.3
 snowfall_sigma_in = 2.0
 wind_sigma_mph = 5.0
+
+# Settlement-aware sigma:
+# The weather strategy widens sigma by city risk tier to reflect
+# Polymarket settlement sources (often airport/Wunderground observation)
+# not exactly matching NOAA grid forecasts.
+# Verified cities currently use Medium risk; unverified NOAA cities use High risk.
 
 [convergence]
 min_price_threshold = 0.93

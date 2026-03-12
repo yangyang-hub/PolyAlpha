@@ -214,6 +214,19 @@ function FieldEditor({
 }) {
   const label = fieldKey.replace(/_/g, " ");
 
+  function riskBadgeClass(tier: "low" | "medium" | "high" | undefined) {
+    switch (tier) {
+      case "low":
+        return "badge badge-success badge-outline";
+      case "medium":
+        return "badge badge-warning badge-outline";
+      case "high":
+        return "badge badge-error badge-outline";
+      default:
+        return "badge badge-ghost";
+    }
+  }
+
   if (typeof value === "boolean") {
     return (
       <label className="flex items-center gap-2 cursor-pointer" title={hint}>
@@ -256,6 +269,8 @@ function FieldEditor({
         const options = Array.isArray(meta?.target_cities_options)
           ? (meta?.target_cities_options as string[])
           : [];
+        const riskTiers = meta?.target_cities_risk_tiers ?? {};
+        const sigmaMultipliers = meta?.target_cities_sigma_multipliers ?? {};
         if (options.length > 0) {
           const toggleCity = (city: string) => {
             onChange(
@@ -264,11 +279,27 @@ function FieldEditor({
                 : [...selected, city],
             );
           };
+          const counts = options.reduce(
+            (acc, city) => {
+              const tier = riskTiers[city] ?? "high";
+              acc[tier] += 1;
+              return acc;
+            },
+            { low: 0, medium: 0, high: 0 },
+          );
 
           return (
             <div className="form-control sm:col-span-2">
               <span className="label-text text-xs opacity-70">{label}</span>
               {hint && <span className="label-text-alt text-xs opacity-40">{hint}</span>}
+              <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                <span className="badge badge-success badge-outline">低风险 {counts.low}</span>
+                <span className="badge badge-warning badge-outline">中风险 {counts.medium}</span>
+                <span className="badge badge-error badge-outline">高风险 {counts.high}</span>
+                <span className="badge badge-ghost">
+                  sigma: low x{sigmaMultipliers.low ?? 1}, medium x{sigmaMultipliers.medium ?? 1}, high x{sigmaMultipliers.high ?? 1}
+                </span>
+              </div>
               <div className="mt-2 flex flex-wrap gap-2">
                 <button
                   type="button"
@@ -288,14 +319,20 @@ function FieldEditor({
               <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
                 {options.map((city) => {
                   const active = selected.includes(city);
+                  const tier = riskTiers[city];
                   return (
                     <button
                       key={city}
                       type="button"
-                      className={`btn btn-sm justify-start ${active ? "btn-primary" : "btn-outline"}`}
+                      className={`btn btn-sm h-auto min-h-0 justify-start px-3 py-2 ${active ? "btn-primary" : "btn-outline"}`}
                       onClick={() => toggleCity(city)}
                     >
-                      {city}
+                      <span className="flex w-full items-center justify-between gap-2">
+                        <span>{city}</span>
+                        <span className={riskBadgeClass(tier)}>
+                          {tier === "low" ? "低" : tier === "medium" ? "中" : "高"}
+                        </span>
+                      </span>
                     </button>
                   );
                 })}
