@@ -15,6 +15,20 @@ pub static OPPORTUNITIES_DETECTED: LazyLock<IntCounter> = LazyLock::new(|| {
     counter
 });
 
+/// Number of trading opportunities detected, partitioned by strategy.
+pub static OPPORTUNITIES_DETECTED_BY_STRATEGY: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let counter = IntCounterVec::new(
+        prometheus::Opts::new(
+            "opportunities_detected_by_strategy_total",
+            "Total opportunities detected by strategy",
+        ),
+        &["strategy"],
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
 /// Number of opportunities rejected by risk manager.
 pub static OPPORTUNITIES_REJECTED: LazyLock<IntCounter> = LazyLock::new(|| {
     let counter = IntCounter::new(
@@ -33,7 +47,7 @@ pub static WEATHER_REJECTIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
             "weather_rejections_total",
             "Weather strategy opportunities rejected by reason",
         ),
-        &["reason"],
+        &["provider", "reason"],
     )
     .unwrap();
     REGISTRY.register(Box::new(counter.clone())).unwrap();
@@ -75,9 +89,37 @@ pub static EXECUTIONS_TOTAL: LazyLock<IntCounter> = LazyLock::new(|| {
     counter
 });
 
+/// Number of trading opportunities executed, partitioned by strategy.
+pub static EXECUTIONS_BY_STRATEGY: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let counter = IntCounterVec::new(
+        prometheus::Opts::new(
+            "executions_by_strategy_total",
+            "Total executions attempted by strategy",
+        ),
+        &["strategy"],
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
 /// Number of execution errors.
 pub static EXECUTION_ERRORS: LazyLock<IntCounter> = LazyLock::new(|| {
     let counter = IntCounter::new("execution_errors_total", "Total execution errors").unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
+/// Number of execution errors, partitioned by strategy.
+pub static EXECUTION_ERRORS_BY_STRATEGY: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let counter = IntCounterVec::new(
+        prometheus::Opts::new(
+            "execution_errors_by_strategy_total",
+            "Total execution errors by strategy",
+        ),
+        &["strategy"],
+    )
+    .unwrap();
     REGISTRY.register(Box::new(counter.clone())).unwrap();
     counter
 });
@@ -185,6 +227,20 @@ pub static EXIT_TRADES: LazyLock<IntCounter> = LazyLock::new(|| {
     counter
 });
 
+/// Total exit trades executed, partitioned by strategy.
+pub static EXIT_TRADES_BY_STRATEGY: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let counter = IntCounterVec::new(
+        prometheus::Opts::new(
+            "exit_trades_by_strategy_total",
+            "Exit trades executed by strategy",
+        ),
+        &["strategy"],
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
 /// Current USDC balance in Polymarket proxy wallet.
 pub static USDC_BALANCE: LazyLock<Gauge> = LazyLock::new(|| {
     let gauge = Gauge::new("usdc_balance", "USDC balance in Polymarket proxy wallet").unwrap();
@@ -208,6 +264,20 @@ pub static DEPTH_VALIDATION_SCALED: LazyLock<IntCounter> = LazyLock::new(|| {
     let counter = IntCounter::new(
         "depth_validation_scaled_total",
         "Opportunities scaled down due to insufficient depth",
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
+/// Opportunities scaled down due to insufficient order book depth, partitioned by strategy.
+pub static DEPTH_VALIDATION_SCALED_BY_STRATEGY: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let counter = IntCounterVec::new(
+        prometheus::Opts::new(
+            "depth_validation_scaled_by_strategy_total",
+            "Opportunities scaled down due to insufficient depth by strategy",
+        ),
+        &["strategy"],
     )
     .unwrap();
     REGISTRY.register(Box::new(counter.clone())).unwrap();

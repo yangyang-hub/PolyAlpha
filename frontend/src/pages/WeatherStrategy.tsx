@@ -4,9 +4,9 @@ import { usePolling } from "../hooks/usePolling";
 import { metricSeriesByName, parseMetrics } from "../lib/metrics";
 
 const REJECTION_LABELS: Record<string, string> = {
-  unsupported_city: "城市不在 NOAA 覆盖范围",
+  unsupported_city: "城市不在当前天气源覆盖范围",
   geocode_failed: "城市坐标解析失败",
-  forecast_fetch_failed: "NOAA 预报拉取失败",
+  forecast_fetch_failed: "天气预报拉取失败",
   forecast_not_fresh: "预报变化不显著",
   invalid_token_count: "市场 token 结构异常",
   missing_both_books: "双边 orderbook 都缺失",
@@ -43,13 +43,27 @@ export default function WeatherStrategy() {
   const { data: metricsRaw } = usePolling<string>(metricsFetcher, 15000);
   const { data: status } = usePolling<StatusResponse>(statusFetcher, 15000);
 
+  const strategyCounterValue = (name: string) =>
+    metricsRaw
+      ? metricSeriesByName(metricsRaw, name)
+          .filter((sample) => sample.labels.strategy === "weather")
+          .reduce((sum, sample) => sum + sample.value, 0)
+      : undefined;
+
   const metrics = metricsRaw ? parseMetrics(metricsRaw) : null;
   const rejectionRows = metricsRaw
-    ? metricSeriesByName(metricsRaw, "weather_rejections_total")
-        .map((sample) => ({
-          reason: sample.labels.reason ?? "unknown",
-          value: sample.value,
-        }))
+    ? Object.values(
+        metricSeriesByName(metricsRaw, "weather_rejections_total").reduce<
+          Record<string, { reason: string; value: number }>
+        >((acc, sample) => {
+          const reason = sample.labels.reason ?? "unknown";
+          acc[reason] = {
+            reason,
+            value: (acc[reason]?.value ?? 0) + sample.value,
+          };
+          return acc;
+        }, {}),
+      )
         .filter((row) => row.value > 0)
         .sort((a, b) => b.value - a.value)
     : [];
@@ -178,10 +192,10 @@ export default function WeatherStrategy() {
       {/* Activity metrics */}
       {metrics && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-          <MetricCard label="机会检测" value={metrics.get("opportunities_detected_total")} />
-          <MetricCard label="执行次数" value={metrics.get("executions_total")} />
-          <MetricCard label="退出交易" value={metrics.get("exit_trades_total")} />
-          <MetricCard label="深度缩量" value={metrics.get("depth_validation_scaled_total")} />
+          <MetricCard label="机会检测" value={strategyCounterValue("opportunities_detected_by_strategy_total")} />
+          <MetricCard label="执行次数" value={strategyCounterValue("executions_by_strategy_total")} />
+          <MetricCard label="退出交易" value={strategyCounterValue("exit_trades_by_strategy_total")} />
+          <MetricCard label="深度缩量" value={strategyCounterValue("depth_validation_scaled_by_strategy_total")} />
         </div>
       )}
 
@@ -190,7 +204,7 @@ export default function WeatherStrategy() {
           <MetricCard label="执行前拦截" value={freshnessRows.reduce((sum, row) => sum + row.value, 0)} />
           <MetricCard label="执行前卖出缩量" value={freshnessScaledSell} />
           <MetricCard label="策略拒单总数" value={rejectionRows.reduce((sum, row) => sum + row.value, 0)} />
-          <MetricCard label="执行错误" value={metrics.get("execution_errors_total")} />
+          <MetricCard label="执行错误" value={strategyCounterValue("execution_errors_by_strategy_total")} />
         </div>
       )}
 
@@ -198,7 +212,7 @@ export default function WeatherStrategy() {
         <div className="card-body p-4">
           <div className="flex items-center justify-between gap-3">
             <h2 className="card-title text-base">拒单原因</h2>
-            <span className="text-xs opacity-60">来源: `/metrics` 中的 `weather_rejections_total`，累计计数（进程启动以来）</span>
+            <span className="text-xs opacity-60">来源: `/metrics` 中的 `weather_rejections_total`，已按 provider 聚合，累计计数（进程启动以来）</span>
           </div>
           <div className="overflow-x-auto">
             <table className="table table-sm">

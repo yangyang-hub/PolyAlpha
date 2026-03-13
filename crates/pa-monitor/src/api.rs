@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use arc_swap::ArcSwap;
 use axum::extract::{Path, Query, State};
@@ -76,6 +77,8 @@ pub struct ApiState {
     pub positions: Arc<tokio::sync::RwLock<Vec<PositionApiEntry>>>,
     /// Timestamp of the last positions snapshot refresh.
     pub positions_updated_at: Arc<tokio::sync::RwLock<Option<DateTime<Utc>>>>,
+    /// True once startup has completed enough for the bot to be considered ready.
+    pub startup_ready: Arc<AtomicBool>,
 }
 
 /// Build the full Axum router with health, metrics, config API, and SPA fallback.
@@ -150,12 +153,13 @@ async fn readiness_handler(
     State(state): State<Arc<ApiState>>,
 ) -> (axum::http::StatusCode, Json<Value>) {
     let all_ok = state.health_checks.iter().all(|(_, check)| check());
-    if all_ok {
+    let startup_ready = state.startup_ready.load(std::sync::atomic::Ordering::Relaxed);
+    if all_ok && startup_ready {
         (axum::http::StatusCode::OK, Json(json!({"ready": true})))
     } else {
         (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"ready": false})),
+            Json(json!({"ready": false, "startup_ready": startup_ready})),
         )
     }
 }
@@ -199,10 +203,11 @@ async fn get_section_meta(Path(section): Path<String>) -> (axum::http::StatusCod
     match section.as_str() {
         "weather" => {
             let target_cities = pa_core::weather::noaa_supported_location_names();
-            let city_risk_tiers: std::collections::HashMap<&str, &str> = target_cities
+            let all_weather_cities = pa_core::weather::weather_supported_location_names();
+            let city_risk_tiers: std::collections::HashMap<&str, &str> = all_weather_cities
                 .iter()
                 .map(|city| {
-                    let tier = match pa_core::weather::noaa_settlement_risk_tier(city) {
+                    let tier = match pa_core::weather::settlement_risk_tier(city) {
                         pa_core::weather::SettlementRiskTier::Low => "low",
                         pa_core::weather::SettlementRiskTier::Medium => "medium",
                         pa_core::weather::SettlementRiskTier::High => "high",
@@ -210,13 +215,43 @@ async fn get_section_meta(Path(section): Path<String>) -> (axum::http::StatusCod
                     (*city, tier)
                 })
                 .collect();
+            let city_providers: std::collections::HashMap<&str, &str> = all_weather_cities
+                .iter()
+                .filter_map(|city| {
+                    let location = pa_core::weather::weather_location(city)?;
+                    let provider = match location.provider {
+                        pa_core::weather::WeatherProvider::Noaa => "noaa",
+                        pa_core::weather::WeatherProvider::OpenMeteo => "open_meteo",
+                    };
+                    Some((*city, provider))
+                })
+                .collect();
+            let city_trade_enabled: std::collections::HashMap<&str, bool> = all_weather_cities
+                .iter()
+                .filter_map(|city| {
+                    let location = pa_core::weather::weather_location(city)?;
+                    Some((*city, location.trade_enabled))
+                })
+                .collect();
+            let city_settlement_notes: std::collections::HashMap<&str, &str> = all_weather_cities
+                .iter()
+                .filter_map(|city| {
+                    let location = pa_core::weather::weather_location(city)?;
+                    let note = location.settlement_note?;
+                    Some((*city, note))
+                })
+                .collect();
 
             (
                 axum::http::StatusCode::OK,
                 Json(json!({
                     "target_cities_options": target_cities,
+                    "supported_cities_options": all_weather_cities,
                     "target_cities_empty_means_all": true,
                     "target_cities_risk_tiers": city_risk_tiers,
+                    "target_cities_providers": city_providers,
+                    "target_cities_trade_enabled": city_trade_enabled,
+                    "target_cities_settlement_notes": city_settlement_notes,
                     "target_cities_sigma_multipliers": {
                         "low": pa_core::weather::settlement_sigma_multiplier(pa_core::weather::SettlementRiskTier::Low),
                         "medium": pa_core::weather::settlement_sigma_multiplier(pa_core::weather::SettlementRiskTier::Medium),
@@ -421,6 +456,8 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         .filter(|account| account.private_key_present)
         .count();
     let positions_updated_at = *state.positions_updated_at.read().await;
+    let startup_ready = state.startup_ready.load(std::sync::atomic::Ordering::Relaxed);
+    let health_ready = state.health_checks.iter().all(|(_, check)| check());
 
     Json(json!({
         "uptime_seconds": uptime_secs,
@@ -431,7 +468,8 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         "event_calendar_enabled": settings.event_calendar.enabled,
         "accounts_configured": account_status.len(),
         "accounts_ready": ready_accounts,
-        "trading_ready": ready_accounts > 0,
+        "trading_ready": ready_accounts > 0 && startup_ready && health_ready,
+        "startup_ready": startup_ready,
         "positions_snapshot_updated_at": positions_updated_at.map(|ts| ts.to_rfc3339()),
         "accounts": account_status,
     }))

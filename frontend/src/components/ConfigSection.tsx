@@ -269,7 +269,13 @@ function FieldEditor({
         const options = Array.isArray(meta?.target_cities_options)
           ? (meta?.target_cities_options as string[])
           : [];
+        const supportedOptions = Array.isArray(meta?.supported_cities_options)
+          ? (meta?.supported_cities_options as string[])
+          : options;
         const riskTiers = meta?.target_cities_risk_tiers ?? {};
+        const providers = meta?.target_cities_providers ?? {};
+        const tradeEnabled = meta?.target_cities_trade_enabled ?? {};
+        const settlementNotes = meta?.target_cities_settlement_notes ?? {};
         const sigmaMultipliers = meta?.target_cities_sigma_multipliers ?? {};
         if (options.length > 0) {
           const toggleCity = (city: string) => {
@@ -286,6 +292,9 @@ function FieldEditor({
               return acc;
             },
             { low: 0, medium: 0, high: 0 },
+          );
+          const auditOnlyCities = supportedOptions.filter(
+            (city) => !tradeEnabled[city],
           );
 
           return (
@@ -320,6 +329,8 @@ function FieldEditor({
                 {options.map((city) => {
                   const active = selected.includes(city);
                   const tier = riskTiers[city];
+                  const provider = providers[city];
+                  const settlementNote = settlementNotes[city];
                   return (
                     <button
                       key={city}
@@ -327,18 +338,69 @@ function FieldEditor({
                       className={`btn btn-sm h-auto min-h-0 justify-start px-3 py-2 ${active ? "btn-primary" : "btn-outline"}`}
                       onClick={() => toggleCity(city)}
                     >
-                      <span className="flex w-full items-center justify-between gap-2">
-                        <span>{city}</span>
-                        <span className={riskBadgeClass(tier)}>
-                          {tier === "low" ? "低" : tier === "medium" ? "中" : "高"}
+                      <span className="flex w-full flex-col items-start gap-1">
+                        <span className="flex w-full items-center justify-between gap-2">
+                          <span>{city}</span>
+                          <span className={riskBadgeClass(tier)}>
+                            {tier === "low" ? "低" : tier === "medium" ? "中" : "高"}
+                          </span>
                         </span>
+                        <span className="flex flex-wrap gap-1 text-[11px] opacity-70">
+                          <span className="badge badge-ghost badge-xs">
+                            {provider === "open_meteo" ? "Open-Meteo" : "NOAA"}
+                          </span>
+                          <span className="badge badge-success badge-outline badge-xs">
+                            可交易
+                          </span>
+                        </span>
+                        {settlementNote && (
+                          <span className="text-[11px] opacity-60">{settlementNote}</span>
+                        )}
                       </span>
                     </button>
                   );
                 })}
               </div>
+              {auditOnlyCities.length > 0 && (
+                <div className="mt-3 rounded-box border border-base-300 p-3">
+                  <div className="text-xs font-medium opacity-70">国际审计城市（暂不参与实盘）</div>
+                  <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
+                    {auditOnlyCities.map((city) => {
+                      const tier = riskTiers[city] ?? "high";
+                      const provider = providers[city];
+                      const settlementNote = settlementNotes[city];
+                      return (
+                        <div
+                          key={city}
+                          className="rounded-btn border border-dashed border-base-300 px-3 py-2 text-sm"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span>{city}</span>
+                            <span className={riskBadgeClass(tier)}>
+                              {tier === "low" ? "低" : tier === "medium" ? "中" : "高"}
+                            </span>
+                          </div>
+                          <div className="mt-1 flex flex-wrap gap-1 text-[11px] opacity-70">
+                            <span className="badge badge-ghost badge-xs">
+                              {provider === "open_meteo" ? "Open-Meteo" : "NOAA"}
+                            </span>
+                            <span className="badge badge-warning badge-outline badge-xs">
+                              audit-only
+                            </span>
+                          </div>
+                          {settlementNote && (
+                            <div className="mt-1 text-[11px] opacity-60">
+                              结算站点: {settlementNote}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
               <span className="label-text-alt text-xs opacity-50">
-                当前选择 {selected.length} 个城市。留空表示允许所有 NOAA 覆盖城市。
+                当前选择 {selected.length} 个城市。留空表示允许所有当前可交易的天气城市。
               </span>
             </div>
           );

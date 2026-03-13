@@ -643,7 +643,11 @@ impl StrategyEngine {
             "Opportunity detected"
         );
 
+        let strategy_label = Self::strategy_metric_label(opp.strategy_type);
         pa_monitor::metrics::OPPORTUNITIES_DETECTED.inc();
+        pa_monitor::metrics::OPPORTUNITIES_DETECTED_BY_STRATEGY
+            .with_label_values(&[strategy_label])
+            .inc();
 
         // Pre-trade risk check
         match self.risk_manager.check_pre_trade(opp) {
@@ -670,8 +674,14 @@ impl StrategyEngine {
                     "Execution complete"
                 );
                 pa_monitor::metrics::EXECUTIONS_TOTAL.inc();
+                pa_monitor::metrics::EXECUTIONS_BY_STRATEGY
+                    .with_label_values(&[strategy_label])
+                    .inc();
                 if is_exit {
                     pa_monitor::metrics::EXIT_TRADES.inc();
+                    pa_monitor::metrics::EXIT_TRADES_BY_STRATEGY
+                        .with_label_values(&[strategy_label])
+                        .inc();
                 }
                 // Update realized PnL gauge
                 use rust_decimal::prelude::ToPrimitive;
@@ -693,6 +703,14 @@ impl StrategyEngine {
                 let err_msg = e.to_string();
                 tracing::error!(id = %opp.id, error = %err_msg, "Execution failed");
                 pa_monitor::metrics::EXECUTION_ERRORS.inc();
+                pa_monitor::metrics::EXECUTION_ERRORS_BY_STRATEGY
+                    .with_label_values(&[match opp.strategy_type {
+                        StrategyType::Weather => "weather",
+                        StrategyType::CryptoAlpha => "crypto_alpha",
+                        StrategyType::LiquidityRewards => "liquidity_rewards",
+                        StrategyType::SmartMoney => "smart_money",
+                    }])
+                    .inc();
                 // Pause all execution for 5 minutes on balance/allowance failures
                 if err_msg.contains("balance") || err_msg.contains("allowance") {
                     tracing::warn!(
@@ -1028,7 +1046,6 @@ impl StrategyEngine {
                 },
             };
 
-            pa_monitor::metrics::EXIT_TRADES.inc();
             self.process_opportunity(&opp).await;
             // Long cooldown for stop-loss to avoid spam (5 minutes)
             self.set_cooldown(condition_id, st, 300);
@@ -1123,6 +1140,9 @@ impl StrategyEngine {
             "Depth scaling opportunity"
         );
         pa_monitor::metrics::DEPTH_VALIDATION_SCALED.inc();
+        pa_monitor::metrics::DEPTH_VALIDATION_SCALED_BY_STRATEGY
+            .with_label_values(&[Self::strategy_metric_label(opp.strategy_type)])
+            .inc();
         Some(scaled)
     }
 

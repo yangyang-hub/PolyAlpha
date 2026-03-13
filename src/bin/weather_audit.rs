@@ -4,20 +4,20 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-use pa_core::weather::normalize_noaa_location_name;
+use pa_core::weather::{normalize_weather_location_name, weather_location};
 use pa_strategy::weather::{parse_target_date, parse_weather_event_title, parse_weather_question};
 
 #[derive(Parser)]
 #[command(
     name = "weather-audit",
-    about = "Build a NOAA weather market audit sample set"
+    about = "Build a weather market audit sample set"
 )]
 struct Args {
     /// Output format: text or json
     #[arg(long, default_value = "text")]
     output: String,
 
-    /// Max number of NOAA-covered event samples to include
+    /// Max number of supported event samples to include
     #[arg(long, default_value_t = 20)]
     limit: usize,
 
@@ -34,7 +34,9 @@ struct AuditEntry {
     normalized_location: Option<String>,
     metric: String,
     target_date: Option<String>,
-    noaa_supported: bool,
+    weather_supported: bool,
+    trade_enabled: bool,
+    provider: Option<String>,
 }
 
 async fn fetch_weather_events() -> Result<Vec<(String, String)>> {
@@ -101,10 +103,13 @@ async fn fetch_weather_events() -> Result<Vec<(String, String)>> {
 
 fn to_audit_entry(event_title: String, question: String) -> Option<AuditEntry> {
     if let Some((metric, location)) = parse_weather_event_title(&event_title) {
-        let normalized = normalize_noaa_location_name(&location).map(ToOwned::to_owned);
+        let normalized = normalize_weather_location_name(&location).map(ToOwned::to_owned);
+        let metadata = normalized.as_deref().and_then(weather_location);
         return Some(AuditEntry {
             target_date: parse_target_date(&event_title).map(|d| d.to_string()),
-            noaa_supported: normalized.is_some(),
+            weather_supported: normalized.is_some(),
+            trade_enabled: metadata.map(|entry| entry.trade_enabled).unwrap_or(false),
+            provider: metadata.map(|entry| format!("{:?}", entry.provider)),
             normalized_location: normalized,
             event_title,
             question,
@@ -114,10 +119,13 @@ fn to_audit_entry(event_title: String, question: String) -> Option<AuditEntry> {
     }
 
     if let Some(parsed) = parse_weather_question(&question) {
-        let normalized = normalize_noaa_location_name(&parsed.location).map(ToOwned::to_owned);
+        let normalized = normalize_weather_location_name(&parsed.location).map(ToOwned::to_owned);
+        let metadata = normalized.as_deref().and_then(weather_location);
         return Some(AuditEntry {
             target_date: parse_target_date(&question).map(|d| d.to_string()),
-            noaa_supported: normalized.is_some(),
+            weather_supported: normalized.is_some(),
+            trade_enabled: metadata.map(|entry| entry.trade_enabled).unwrap_or(false),
+            provider: metadata.map(|entry| format!("{:?}", entry.provider)),
             normalized_location: normalized,
             event_title,
             question,
@@ -139,21 +147,21 @@ async fn main() -> Result<()> {
         .collect();
 
     entries.sort_by(|a, b| {
-        b.noaa_supported
-            .cmp(&a.noaa_supported)
+        b.weather_supported
+            .cmp(&a.weather_supported)
             .then_with(|| a.target_date.cmp(&b.target_date))
             .then_with(|| a.event_title.cmp(&b.event_title))
     });
 
-    let covered_count = entries.iter().filter(|e| e.noaa_supported).count();
-    let unsupported_count = entries.iter().filter(|e| !e.noaa_supported).count();
+    let covered_count = entries.iter().filter(|e| e.weather_supported).count();
+    let unsupported_count = entries.iter().filter(|e| !e.weather_supported).count();
 
     let display_entries: Vec<_> = if args.include_unsupported {
         entries.into_iter().take(args.limit).collect()
     } else {
         entries
             .into_iter()
-            .filter(|e| e.noaa_supported)
+            .filter(|e| e.weather_supported)
             .take(args.limit)
             .collect()
     };
@@ -170,12 +178,12 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    println!("NOAA-covered events: {covered_count}");
+    println!("Supported weather events: {covered_count}");
     println!("Unsupported weather events: {unsupported_count}");
     println!();
     for (idx, entry) in display_entries.iter().enumerate() {
         println!(
-            "{}. [{}] {} | {} | {} | NOAA={}",
+            "{}. [{}] {} | {} | {} | supported={} | trade_enabled={} | provider={}",
             idx + 1,
             entry.metric,
             entry
@@ -184,7 +192,9 @@ async fn main() -> Result<()> {
                 .unwrap_or(entry.location.as_str()),
             entry.target_date.as_deref().unwrap_or("unknown-date"),
             entry.event_title,
-            entry.noaa_supported
+            entry.weather_supported,
+            entry.trade_enabled,
+            entry.provider.as_deref().unwrap_or("-"),
         );
         println!("   {}", entry.question);
     }

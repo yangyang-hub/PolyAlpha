@@ -1,4 +1,4 @@
-# NOAA Weather Settlement Checklist
+# Weather Settlement Checklist
 
 Generated from the current canonical NOAA-supported city list in [crates/pa-core/src/weather.rs](/home/yangyang/workspace/polygon/PolyAlpha/crates/pa-core/src/weather.rs).
 
@@ -6,6 +6,7 @@ Purpose:
 - Track how Polymarket weather markets settle for each NOAA-supported city
 - Compare settlement source/rules vs the strategy's current NOAA forecast input
 - Flag where model risk comes from settlement-source mismatch rather than forecast quality
+- Track international audit-only cities before enabling a non-NOAA provider in trading
 
 Current strategy NOAA input:
 - Source: `api.weather.gov`
@@ -51,6 +52,16 @@ Suggested review steps for each city:
 | Tampa |  |  |  |  | NOAA grid forecast for Tampa |  |  | Not started |  |
 | New Orleans |  |  |  |  | NOAA grid forecast for New Orleans |  |  | Not started |  |
 | Cleveland |  |  |  |  | NOAA grid forecast for Cleveland |  |  | Not started |  |
+
+## International Audit-Only Samples
+
+These cities are currently in the provider-aware registry as `Open-Meteo` audit-only
+locations. They are not trade-enabled yet.
+
+| City | Sample market title | Metric | Polymarket settlement rule | Expected settlement source | Current strategy input | Main mismatch risk | Risk | Status | Notes |
+|---|---|---|---|---|---|---|---|---|---|
+| London | Highest temperature in London on March 12? | Highest temperature (C) | Highest temperature recorded at the London City Airport Station for the full local day; Wunderground final daily history; whole-degree C resolution | Wunderground daily history for London City Airport Station (`EGLC`) | Open-Meteo daily forecast for London | Airport-station settlement vs model grid/city forecast; local-day window mismatch | High | Verified | Source: https://polymarket.com/event/highest-temperature-in-london-on-march-12-2026 |
+| Seoul | Highest temperature in Seoul on March 11? | Highest temperature (C) | Highest temperature recorded at the Incheon Intl Airport Station for the full local day; Wunderground final daily history; whole-degree C resolution | Wunderground daily history for Incheon Intl Airport Station (`RKSI`) | Open-Meteo daily forecast for Seoul | Airport-station settlement vs model grid/city forecast; airport-to-city spatial mismatch | High | Verified | Source: https://polymarket.com/zh/event/highest-temperature-in-seoul-on-march-11-2026 |
 
 ## Quick Summary Template
 
