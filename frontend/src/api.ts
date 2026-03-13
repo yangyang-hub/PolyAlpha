@@ -21,12 +21,14 @@ export interface StatusResponse {
   accounts_configured: number;
   accounts_ready: number;
   trading_ready: boolean;
+  positions_snapshot_updated_at: string | null;
   accounts: AccountStatusEntry[];
 }
 
 export interface AccountStatusEntry {
   name: string;
   strategies: string[];
+  proxy_wallet: string;
   private_key_env: string;
   private_key_present: boolean;
 }

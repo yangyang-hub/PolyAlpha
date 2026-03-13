@@ -58,6 +58,7 @@ pub struct PositionApiEntry {
 pub struct AccountStatusEntry {
     pub name: String,
     pub strategies: Vec<String>,
+    pub proxy_wallet: String,
     pub private_key_env: String,
     pub private_key_present: bool,
 }
@@ -73,6 +74,8 @@ pub struct ApiState {
     pub lr_status: Option<Arc<tokio::sync::RwLock<LrRuntimeStatus>>>,
     /// Live positions, populated after account init and updated by position sync.
     pub positions: Arc<tokio::sync::RwLock<Vec<PositionApiEntry>>>,
+    /// Timestamp of the last positions snapshot refresh.
+    pub positions_updated_at: Arc<tokio::sync::RwLock<Option<DateTime<Utc>>>>,
 }
 
 /// Build the full Axum router with health, metrics, config API, and SPA fallback.
@@ -408,6 +411,7 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         .map(|account| AccountStatusEntry {
             name: account.name.clone(),
             strategies: account.strategies.clone(),
+            proxy_wallet: account.proxy_wallet.clone(),
             private_key_env: account.private_key_env.clone(),
             private_key_present: std::env::var(&account.private_key_env).is_ok(),
         })
@@ -416,6 +420,7 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         .iter()
         .filter(|account| account.private_key_present)
         .count();
+    let positions_updated_at = *state.positions_updated_at.read().await;
 
     Json(json!({
         "uptime_seconds": uptime_secs,
@@ -427,6 +432,7 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         "accounts_configured": account_status.len(),
         "accounts_ready": ready_accounts,
         "trading_ready": ready_accounts > 0,
+        "positions_snapshot_updated_at": positions_updated_at.map(|ts| ts.to_rfc3339()),
         "accounts": account_status,
     }))
 }

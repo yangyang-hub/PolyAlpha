@@ -849,11 +849,13 @@ impl StrategyEngine {
                 && let Some(end_date) = m.end_date
                 && end_date <= chrono::Utc::now()
             {
+                let condition_id = pos.condition_id.unwrap_or(m.condition_id);
+                let st = pos.strategy_type.unwrap_or(StrategyType::CryptoAlpha);
+                let sell_value = best_bid * pos.size;
+
                 // If price is very low, this is likely a losing position.
                 // Auto-redeem won't help — try to sell to salvage whatever we can.
                 if best_bid >= dec!(0.10) {
-                    let condition_id = pos.condition_id.unwrap_or(m.condition_id);
-                    let st = pos.strategy_type.unwrap_or(StrategyType::CryptoAlpha);
                     if !self.is_cooled_down(condition_id, st) {
                         tracing::info!(
                             token_id = %pos.token_id,
@@ -865,6 +867,20 @@ impl StrategyEngine {
                     }
                     continue;
                 }
+
+                if sell_value < dec!(0.05) {
+                    tracing::info!(
+                        token_id = %pos.token_id,
+                        end_date = %end_date,
+                        best_bid = %best_bid,
+                        size = %pos.size,
+                        sell_value = %sell_value,
+                        "[STOP-LOSS] Expired dust position — too small for CLOB, waiting for resolution"
+                    );
+                    self.set_cooldown(condition_id, st, 43200); // 12 hours
+                    continue;
+                }
+
                 // Low-priced expired position — likely losing side, try to sell
                 tracing::info!(
                     token_id = %pos.token_id,

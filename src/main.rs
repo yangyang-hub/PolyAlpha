@@ -220,6 +220,8 @@ async fn main() -> Result<()> {
     );
     let shared_positions: Arc<tokio::sync::RwLock<Vec<pa_monitor::api::PositionApiEntry>>> =
         Arc::new(tokio::sync::RwLock::new(Vec::new()));
+    let shared_positions_updated_at: Arc<tokio::sync::RwLock<Option<chrono::DateTime<Utc>>>> =
+        Arc::new(tokio::sync::RwLock::new(None));
     let api_state = Arc::new(ApiState {
         config: Arc::clone(&config_arc),
         config_store,
@@ -234,6 +236,7 @@ async fn main() -> Result<()> {
         )],
         lr_status: Some(Arc::clone(&lr_runtime_status)),
         positions: Arc::clone(&shared_positions),
+        positions_updated_at: Arc::clone(&shared_positions_updated_at),
     });
     let health_port = settings.monitor.health_port;
     std::thread::spawn(move || {
@@ -663,6 +666,7 @@ async fn main() -> Result<()> {
         let entries = build_position_snapshot(&account_contexts, &markets_snapshot, &api_cache);
         let count = entries.len();
         *shared_positions.write().await = entries;
+        *shared_positions_updated_at.write().await = Some(Utc::now());
         if count > 0 {
             tracing::info!(positions = count, "API positions snapshot populated");
         }
@@ -1956,6 +1960,7 @@ async fn main() -> Result<()> {
         let snap_markets = Arc::clone(&shared_markets);
         let snap_cache = market_data.cache().clone();
         let snap_positions = Arc::clone(&shared_positions);
+        let snap_positions_updated_at = Arc::clone(&shared_positions_updated_at);
         let snap_cancel = cancel.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(30));
@@ -2013,6 +2018,7 @@ async fn main() -> Result<()> {
                             all
                         };
                         *snap_positions.write().await = entries;
+                        *snap_positions_updated_at.write().await = Some(Utc::now());
 
                         // Update Prometheus gauges for balance, exposure & market value
                         use rust_decimal::prelude::ToPrimitive;

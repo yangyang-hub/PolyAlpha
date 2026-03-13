@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { fetchPositions, fetchMetrics, type PositionEntry } from "../api";
+import { fetchPositions, fetchMetrics, fetchStatus, type PositionEntry, type StatusResponse } from "../api";
 import { usePolling } from "../hooks/usePolling";
 import { metricSeriesByName, parseMetrics } from "../lib/metrics";
 
@@ -31,13 +31,17 @@ const FRESHNESS_REJECTION_LABELS: Record<string, string> = {
   missing_bid: "执行前无买盘",
   insufficient_bid_depth: "执行前 bid 深度不足",
   non_positive_profit: "执行前重算后净利润不再为正",
+  buy_lot_size_invalid: "执行前买单低于最小可执行手数",
+  sell_lot_size_invalid: "执行前卖单低于最小可执行手数",
 };
 
 export default function WeatherStrategy() {
   const posFetcher = useCallback(() => fetchPositions("weather"), []);
   const metricsFetcher = useCallback(() => fetchMetrics(), []);
+  const statusFetcher = useCallback(() => fetchStatus(), []);
   const { data: positions, loading } = usePolling<PositionEntry[]>(posFetcher, 15000);
   const { data: metricsRaw } = usePolling<string>(metricsFetcher, 15000);
+  const { data: status } = usePolling<StatusResponse>(statusFetcher, 15000);
 
   const metrics = metricsRaw ? parseMetrics(metricsRaw) : null;
   const rejectionRows = metricsRaw
@@ -81,14 +85,18 @@ export default function WeatherStrategy() {
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">天气策略</h1>
 
-      {/* Portfolio overview */}
+      {/* Account-level overview */}
       {metrics && (() => {
         const cash = metrics.get("usdc_balance") ?? 0;
         const posValue = metrics.get("positions_market_value_usd") ?? 0;
         const portfolio = cash + posValue;
         const pnl = metrics.get("realized_pnl_usd") ?? 0;
         return (
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <div className="space-y-2">
+            <div className="text-xs opacity-60">
+              账户级资金概览，不是天气策略专属。天气策略自己的成本和未实现盈亏见下方“策略统计”和“当前持仓”。
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
             <div className="stat bg-base-200 rounded-box p-4">
               <div className="stat-title text-xs">资产总值</div>
               <div className="stat-value text-lg">
@@ -113,9 +121,37 @@ export default function WeatherStrategy() {
                 ${pnl.toFixed(2)}
               </div>
             </div>
+            </div>
           </div>
         );
       })()}
+
+      {status && (
+        <div className="card bg-base-200 shadow-sm">
+          <div className="card-body p-4">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="card-title text-base">运行上下文</h2>
+              <span className="text-xs opacity-60">用于解释钱包口径和持仓快照来源</span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+              <div>
+                <div className="opacity-60 text-xs">持仓快照更新时间</div>
+                <div>{status.positions_snapshot_updated_at ? new Date(status.positions_snapshot_updated_at).toLocaleString("zh-CN") : "-"}</div>
+              </div>
+              <div>
+                <div className="opacity-60 text-xs">账户</div>
+                <div>{status.accounts.map((account) => account.name).join(", ") || "-"}</div>
+              </div>
+              <div>
+                <div className="opacity-60 text-xs">代理钱包</div>
+                <div className="font-mono text-xs break-all">
+                  {status.accounts.map((account) => account.proxy_wallet || "(EOA)").join(", ") || "-"}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Strategy stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
@@ -162,7 +198,7 @@ export default function WeatherStrategy() {
         <div className="card-body p-4">
           <div className="flex items-center justify-between gap-3">
             <h2 className="card-title text-base">拒单原因</h2>
-            <span className="text-xs opacity-60">来源: `/metrics` 中的 `weather_rejections_total`</span>
+            <span className="text-xs opacity-60">来源: `/metrics` 中的 `weather_rejections_total`，累计计数（进程启动以来）</span>
           </div>
           <div className="overflow-x-auto">
             <table className="table table-sm">
@@ -199,7 +235,7 @@ export default function WeatherStrategy() {
           <div className="flex items-center justify-between gap-3">
             <h2 className="card-title text-base">执行前拦截</h2>
             <span className="text-xs opacity-60">
-              来源: `/metrics` 中的 `execution_freshness_rejections_total`
+              来源: `/metrics` 中的 `execution_freshness_rejections_total`，累计计数（进程启动以来）
             </span>
           </div>
           <div className="overflow-x-auto">

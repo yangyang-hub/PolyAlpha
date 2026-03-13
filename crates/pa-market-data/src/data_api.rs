@@ -3,6 +3,31 @@ use anyhow::{Context, Result};
 use polymarket_client_sdk::data::Client as DataApiClient;
 use polymarket_client_sdk::data::types::request::PositionsRequest;
 use rust_decimal::Decimal;
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+
+static FALLBACK_LOG_THROTTLE: LazyLock<dashmap::DashMap<String, Instant>> =
+    LazyLock::new(dashmap::DashMap::new);
+const FALLBACK_LOG_THROTTLE_SECS: u64 = 1800;
+
+fn log_fallback_throttled(kind: &str, wallet: Address, error: &anyhow::Error) {
+    let key = format!("{}:{}", kind, wallet);
+    let now = Instant::now();
+
+    if let Some(last) = FALLBACK_LOG_THROTTLE.get(&key)
+        && now.duration_since(*last.value()) < Duration::from_secs(FALLBACK_LOG_THROTTLE_SECS)
+    {
+        return;
+    }
+
+    FALLBACK_LOG_THROTTLE.insert(key, now);
+    tracing::info!(
+        error = %error,
+        wallet = %wallet,
+        kind = kind,
+        "Data API SDK hit known empty endDate bug, using raw HTTP fallback"
+    );
+}
 
 /// A position loaded from the Polymarket Data API.
 pub struct ApiPosition {
@@ -86,11 +111,7 @@ impl PositionLoader {
                     || error_chain.contains("invalid type")
                     || error_chain.contains("enddate")
                 {
-                    tracing::info!(
-                        error = %e,
-                        wallet = %self.wallet,
-                        "Data API SDK hit known empty endDate bug, using raw HTTP fallback"
-                    );
+                    log_fallback_throttled("positions", self.wallet, &e);
                     self.load_positions_fallback().await
                 } else {
                     Err(e)
@@ -241,11 +262,7 @@ impl PositionLoader {
                     || error_chain.contains("invalid type")
                     || error_chain.contains("enddate")
                 {
-                    tracing::info!(
-                        error = %e,
-                        wallet = %self.wallet,
-                        "Data API SDK redeemable path hit known empty endDate bug, using raw HTTP fallback"
-                    );
+                    log_fallback_throttled("redeemable", self.wallet, &e);
                     self.find_redeemable_fallback().await
                 } else {
                     Err(e)
