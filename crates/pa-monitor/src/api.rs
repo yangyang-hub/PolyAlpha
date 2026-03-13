@@ -13,9 +13,8 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
 use pa_core::config::Settings;
-use pa_storage::config_store::{ConfigStore, extract_section, validate_section};
 
-use crate::health::HealthCheck;
+type HealthCheck = Box<dyn Fn() -> bool + Send + Sync>;
 
 /// Runtime status of a single LR-quoted market.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,8 +66,6 @@ pub struct AccountStatusEntry {
 /// Shared API state for all Axum handlers.
 pub struct ApiState {
     pub config: Arc<ArcSwap<Settings>>,
-    pub config_store: Option<ConfigStore>,
-    pub config_tx: tokio::sync::watch::Sender<u64>,
     pub start_time: DateTime<Utc>,
     pub health_checks: Vec<(&'static str, HealthCheck)>,
     /// Optional LR runtime status, populated by the LR background task.
@@ -86,8 +83,7 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
     let api_routes = Router::new()
         .route("/api/config", get(get_all_config))
         .route("/api/config/meta/{section}", get(get_section_meta))
-        .route("/api/config/{section}", get(get_section).put(put_section))
-        .route("/api/config/history/{section}", get(get_history))
+        .route("/api/config/{section}", get(get_section))
         .route("/api/status", get(get_status))
         .route("/api/positions", get(get_positions))
         .route("/api/lr/status", get(get_lr_status));
@@ -264,178 +260,6 @@ async fn get_section_meta(Path(section): Path<String>) -> (axum::http::StatusCod
     }
 }
 
-/// PUT /api/config/:section — update section, validate, save to DB, hot reload.
-async fn put_section(
-    State(state): State<Arc<ApiState>>,
-    Path(section): Path<String>,
-    Json(body): Json<Value>,
-) -> (axum::http::StatusCode, Json<Value>) {
-    // Reject accounts section
-    if section == "accounts" {
-        return (
-            axum::http::StatusCode::FORBIDDEN,
-            Json(json!({"error": "accounts section cannot be modified via API"})),
-        );
-    }
-
-    // Validate by deserializing into typed struct
-    if let Err(e) = validate_section(&section, &body) {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("Validation failed: {}", e)})),
-        );
-    }
-
-    // If we have a DB-backed config store, persist and rebuild from TOML + all DB overrides
-    if let Some(ref store) = state.config_store {
-        let new_version = match store.save_section(&section, &body).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!(error = %e, section = %section, "Failed to save config section");
-                return (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("Failed to save: {}", e)})),
-                );
-            }
-        };
-
-        // Rebuild full settings: load TOML base → apply all DB overrides
-        let mut new_settings = match Settings::load() {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to reload TOML settings");
-                return (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("Failed to reload base config: {}", e)})),
-                );
-            }
-        };
-
-        match store.load_all().await {
-            Ok(all_overrides) => {
-                if let Err(e) = ConfigStore::apply_overrides(&mut new_settings, &all_overrides) {
-                    tracing::error!(error = %e, "Failed to apply DB overrides");
-                    return (
-                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("Failed to apply overrides: {}", e)})),
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to load all overrides");
-                return (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("Failed to load overrides: {}", e)})),
-                );
-            }
-        }
-
-        if let Err(e) = new_settings.reapply_env_overrides() {
-            tracing::error!(error = %e, "Failed to re-apply environment overrides");
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Failed to re-apply env overrides: {}", e)})),
-            );
-        }
-        new_settings.merge_account_strategies_into_enabled();
-
-        state.config.store(Arc::new(new_settings));
-        let _ = state.config_tx.send(new_version as u64);
-
-        tracing::info!(section = %section, version = new_version, "Config section updated via API (persisted)");
-
-        return (
-            axum::http::StatusCode::OK,
-            Json(json!({
-                "section": section,
-                "version": new_version,
-                "status": "applied",
-                "persisted": true,
-            })),
-        );
-    }
-
-    // No DB: in-memory only hot swap
-    let current = state.config.load();
-    let mut new_settings = Settings::clone(&current);
-
-    // Apply the single section update via serde round-trip
-    let mut full_val = match serde_json::to_value(&new_settings) {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("Serialization failed: {}", e)})),
-            );
-        }
-    };
-    if let Some(obj) = full_val.as_object_mut() {
-        obj.insert(section.clone(), body);
-    }
-    match serde_json::from_value::<Settings>(full_val) {
-        Ok(s) => new_settings = s,
-        Err(e) => {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                Json(json!({"error": format!("Failed to merge section: {}", e)})),
-            );
-        }
-    }
-
-    if let Err(e) = new_settings.reapply_env_overrides() {
-        return (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("Failed to re-apply env overrides: {}", e)})),
-        );
-    }
-    new_settings.merge_account_strategies_into_enabled();
-
-    state.config.store(Arc::new(new_settings));
-    let _ = state.config_tx.send(0);
-
-    tracing::info!(section = %section, "Config section updated via API (in-memory only, no DB)");
-
-    (
-        axum::http::StatusCode::OK,
-        Json(json!({
-            "section": section,
-            "version": 0,
-            "status": "applied",
-            "persisted": false,
-        })),
-    )
-}
-
-/// GET /api/config/history/:section — change history.
-async fn get_history(
-    State(state): State<Arc<ApiState>>,
-    Path(section): Path<String>,
-) -> (axum::http::StatusCode, Json<Value>) {
-    let Some(ref store) = state.config_store else {
-        return (axum::http::StatusCode::OK, Json(json!([])));
-    };
-    match store.history(&section, 50).await {
-        Ok(rows) => {
-            let entries: Vec<Value> = rows
-                .iter()
-                .map(|r| {
-                    json!({
-                        "version": r.version,
-                        "data": r.data,
-                        "changed_by": r.changed_by,
-                        "created_at": r.created_at.to_rfc3339(),
-                    })
-                })
-                .collect();
-            (axum::http::StatusCode::OK, Json(json!(entries)))
-        }
-        Err(e) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("Failed to load history: {}", e)})),
-        ),
-    }
-}
-
 /// GET /api/status — bot status summary.
 async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
     let uptime_secs = (Utc::now() - state.start_time).num_seconds();
@@ -505,5 +329,19 @@ async fn get_lr_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
             Json(serde_json::to_value(&*status).unwrap_or(json!({})))
         }
         None => Json(json!({"error": "LR not running"})),
+    }
+}
+
+fn extract_section(settings: &pa_core::config::Settings, section: &str) -> anyhow::Result<Value> {
+    match section {
+        "strategy" => Ok(serde_json::to_value(&settings.strategy)?),
+        "risk" => Ok(serde_json::to_value(&settings.risk)?),
+        "market_filter" => Ok(serde_json::to_value(&settings.market_filter)?),
+        "weather" => Ok(serde_json::to_value(&settings.weather)?),
+        "crypto_alpha" => Ok(serde_json::to_value(&settings.crypto_alpha)?),
+        "event_calendar" => Ok(serde_json::to_value(&settings.event_calendar)?),
+        "liquidity_rewards" => Ok(serde_json::to_value(&settings.liquidity_rewards)?),
+        "smart_money" => Ok(serde_json::to_value(&settings.smart_money)?),
+        _ => Err(anyhow::anyhow!("Unknown config section: {}", section)),
     }
 }

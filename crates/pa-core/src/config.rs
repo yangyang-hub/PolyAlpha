@@ -210,8 +210,8 @@ fn default_capital_efficiency_threshold() -> Decimal {
     Decimal::new(98, 2)
 } // 0.98
 fn default_max_spread_bps() -> u32 {
-    1500
-} // 15% max spread
+    1700
+} // 17% max spread
 fn default_true() -> bool {
     true
 }
@@ -219,11 +219,11 @@ fn default_forecast_change_threshold() -> f64 {
     0.35
 }
 fn default_max_entry_price() -> Decimal {
-    Decimal::new(30, 2)
-} // 0.30
+    Decimal::new(35, 2)
+} // 0.35
 fn default_profit_take_threshold() -> Decimal {
-    Decimal::new(38, 2)
-} // 0.38
+    Decimal::new(34, 2)
+} // 0.34
 fn default_weather_max_position_usdc() -> Decimal {
     Decimal::new(5, 0)
 } // $5
@@ -237,7 +237,7 @@ fn default_target_cities() -> Vec<String> {
 impl Default for WeatherConfig {
     fn default() -> Self {
         Self {
-            min_edge_bps: 600,
+            min_edge_bps: 500,
             max_spread_bps: default_max_spread_bps(),
             max_position_pct: Decimal::new(50, 2), // 0.50 = 50% of balance
             kelly_fraction: Decimal::new(25, 2),   // 0.25 (quarter Kelly)

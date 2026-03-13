@@ -27,8 +27,6 @@ async fn main() -> Result<()> {
         resolved_accounts,
         active_enabled_strategies,
         config_arc,
-        config_tx,
-        config_store,
     } = load_runtime_settings().await?;
 
     tracing::info!(
@@ -45,8 +43,6 @@ async fn main() -> Result<()> {
         &active_enabled_strategies,
         &resolved_accounts,
         Arc::clone(&config_arc),
-        config_tx,
-        config_store,
     )
     .await?
     else {

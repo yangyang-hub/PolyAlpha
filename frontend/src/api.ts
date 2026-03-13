@@ -33,13 +33,6 @@ export interface AccountStatusEntry {
   private_key_present: boolean;
 }
 
-export interface HistoryEntry {
-  version: number;
-  data: unknown;
-  changed_by: string;
-  created_at: string;
-}
-
 export interface LrMarketStatus {
   condition_id: string;
   question: string;
@@ -57,13 +50,6 @@ export interface LrRuntimeStatus {
   cached_balance: string;
   market_mode: string;
   last_refresh: string | null;
-}
-
-export interface UpdateResult {
-  section: string;
-  version: number;
-  status: string;
-  persisted: boolean;
 }
 
 export interface SectionMeta {
@@ -119,26 +105,6 @@ export function fetchSection(section: string): Promise<Record<string, unknown>> 
 
 export function fetchSectionMeta(section: string): Promise<SectionMeta> {
   return get(`/api/config/meta/${section}`);
-}
-
-export async function updateSection(
-  section: string,
-  data: unknown,
-): Promise<UpdateResult> {
-  const res = await fetch(`${BASE}/api/config/${section}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`${res.status}: ${body}`);
-  }
-  return res.json();
-}
-
-export function fetchHistory(section: string): Promise<HistoryEntry[]> {
-  return get(`/api/config/history/${section}`);
 }
 
 export function fetchLRStatus(): Promise<LrRuntimeStatus> {

@@ -16,7 +16,7 @@ use pa_core::types::{
 };
 
 use crate::profitability::ProfitCalculator;
-use crate::weather::{contains_word, normal_cdf, parse_target_date, with_retry};
+use crate::weather::{contains_word, normal_cdf, parse_target_date_server_local, with_retry};
 
 // ──── Asset Mapping ────
 
@@ -242,7 +242,7 @@ pub fn parse_crypto_question(question: &str) -> Option<CryptoQuestion> {
         PriceDirection::Above
     };
 
-    let target_date = parse_target_date(question);
+    let target_date = parse_target_date_server_local(question);
 
     Some(CryptoQuestion {
         asset,
@@ -271,7 +271,7 @@ pub fn parse_crypto_event_title(title: &str) -> Option<(&'static CryptoAsset, Op
     if !has_price_indicator {
         return None;
     }
-    let target_date = parse_target_date(title);
+    let target_date = parse_target_date_server_local(title);
     Some((asset, target_date))
 }
 

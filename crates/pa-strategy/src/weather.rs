@@ -378,9 +378,12 @@ const MONTHS: &[(&str, u32)] = &[
 /// - `"on 2/14"` → numeric M/D of current year
 ///
 /// Returns `None` if no recognizable date pattern is found.
-pub fn parse_target_date(text: &str) -> Option<NaiveDate> {
+pub fn parse_target_date_server_local(text: &str) -> Option<NaiveDate> {
+    parse_target_date_with_today(text, Local::now().date_naive())
+}
+
+pub fn parse_target_date_with_today(text: &str, today: NaiveDate) -> Option<NaiveDate> {
     let lower = text.to_lowercase();
-    let today = Local::now().date_naive();
 
     // "today"
     if contains_word(&lower, "today") {
@@ -1149,6 +1152,11 @@ fn market_local_today(location: &str) -> NaiveDate {
     let tz_name = weather_timezone(location);
     let tz: Tz = tz_name.parse().unwrap_or(chrono_tz::UTC);
     Utc::now().with_timezone(&tz).date_naive()
+}
+
+fn days_to_event_from_local_today(location: &str, target_date: Option<NaiveDate>) -> Option<i64> {
+    let today = market_local_today(location);
+    target_date.map(|d| (d - today).num_days())
 }
 
 impl NoaaClient {
@@ -1995,7 +2003,10 @@ impl WeatherAlphaStrategy {
                 continue;
             }
 
-            let target_date = match parse_target_date(&market.question) {
+            let target_date = match parse_target_date_with_today(
+                &market.question,
+                market_local_today(&parsed.location),
+            ) {
                 Some(d) => d,
                 None => continue, // Skip markets without a clear date
             };
@@ -2199,13 +2210,13 @@ impl WeatherAlphaStrategy {
         let mut opportunities = Vec::new();
 
         // Parse target date
-        let target_date = match parse_target_date(&event.title) {
+        let target_date = match parse_target_date_with_today(&event.title, market_local_today(location)) {
             Some(d) => d,
             None => return opportunities, // Skip if no clear date
         };
 
         // Only use surround strategy when event is more than 24 hours away
-        let today = Local::now().date_naive();
+        let today = market_local_today(location);
         if (target_date - today).num_days() < 1 {
             return opportunities; // Too close to event, use regular detection
         }
@@ -2469,7 +2480,10 @@ impl WeatherAlphaStrategy {
         parsed: &WeatherQuestion,
     ) -> Option<TradingOpportunity> {
         // Parse target date and precipitation unit from question
-        let target_date = parse_target_date(&market.question);
+        let target_date = parse_target_date_with_today(
+            &market.question,
+            market_local_today(&parsed.location),
+        );
         let precipitation_unit = if matches!(
             parsed.metric,
             WeatherMetric::Rainfall | WeatherMetric::Snowfall
@@ -2489,7 +2503,7 @@ impl WeatherAlphaStrategy {
             return None;
         }
 
-        let days_to_event = target_date.map(|d| (d - Local::now().date_naive()).num_days());
+        let days_to_event = days_to_event_from_local_today(&parsed.location, target_date);
         let forecast_error_sigma = sigma_with_settlement_risk(
             &parsed.location,
             sigma_for_metric(
@@ -2751,7 +2765,7 @@ impl WeatherAlphaStrategy {
         location: &str,
     ) -> Option<TradingOpportunity> {
         // Parse target date and precipitation unit from event title
-        let target_date = parse_target_date(&event.title);
+        let target_date = parse_target_date_with_today(&event.title, market_local_today(location));
         let precipitation_unit =
             if matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
                 detect_precipitation_unit(&event.title)
@@ -2769,7 +2783,7 @@ impl WeatherAlphaStrategy {
             return None;
         }
 
-        let days_to_event = target_date.map(|d| (d - Local::now().date_naive()).num_days());
+        let days_to_event = days_to_event_from_local_today(location, target_date);
         let forecast_error_sigma = sigma_with_settlement_risk(
             location,
             sigma_for_metric(
@@ -3097,7 +3111,8 @@ impl WeatherAlphaStrategy {
                         continue;
                     }
                 };
-                let target_date = parse_target_date(event_title);
+                let target_date =
+                    parse_target_date_with_today(event_title, market_local_today(&location));
                 let precipitation_unit =
                     if matches!(metric, WeatherMetric::Rainfall | WeatherMetric::Snowfall) {
                         detect_precipitation_unit(event_title)
@@ -3113,7 +3128,10 @@ impl WeatherAlphaStrategy {
                         continue;
                     }
                 };
-                let target_date = parse_target_date(&market.question);
+                let target_date = parse_target_date_with_today(
+                    &market.question,
+                    market_local_today(&parsed.location),
+                );
                 let precipitation_unit = if matches!(
                     parsed.metric,
                     WeatherMetric::Rainfall | WeatherMetric::Snowfall
@@ -3157,7 +3175,7 @@ impl WeatherAlphaStrategy {
                 }
             };
 
-            let days_to_event = target_date.map(|d| (d - Local::now().date_naive()).num_days());
+            let days_to_event = days_to_event_from_local_today(&location, target_date);
             let forecast_error_sigma = sigma_with_settlement_risk(
                 &location,
                 sigma_for_metric(
@@ -3827,8 +3845,9 @@ mod tests {
 
     #[test]
     fn test_parse_target_date_full_month() {
-        let date = parse_target_date("What will the temperature be on February 14?").unwrap();
         let today = Local::now().date_naive();
+        let date = parse_target_date_with_today("What will the temperature be on February 14?", today)
+            .unwrap();
         assert_eq!(date.month(), 2);
         assert_eq!(date.day(), 14);
         assert_eq!(date.year(), today.year());
@@ -3836,8 +3855,9 @@ mod tests {
 
     #[test]
     fn test_parse_target_date_abbreviated() {
-        let date = parse_target_date("Highest temperature in NYC on Feb 14?").unwrap();
         let today = Local::now().date_naive();
+        let date =
+            parse_target_date_with_today("Highest temperature in NYC on Feb 14?", today).unwrap();
         assert_eq!(date.month(), 2);
         assert_eq!(date.day(), 14);
         assert_eq!(date.year(), today.year());
@@ -3845,8 +3865,8 @@ mod tests {
 
     #[test]
     fn test_parse_target_date_slash() {
-        let date = parse_target_date("Temperature on 2/14 in NYC?").unwrap();
         let today = Local::now().date_naive();
+        let date = parse_target_date_with_today("Temperature on 2/14 in NYC?", today).unwrap();
         assert_eq!(date.month(), 2);
         assert_eq!(date.day(), 14);
         assert_eq!(date.year(), today.year());
@@ -3854,13 +3874,16 @@ mod tests {
 
     #[test]
     fn test_parse_target_date_none() {
-        assert!(parse_target_date("Will it rain this week?").is_none());
+        let today = Local::now().date_naive();
+        assert!(parse_target_date_with_today("Will it rain this week?", today).is_none());
     }
 
     #[test]
     fn test_parse_target_date_bare_month() {
         // "in February" without a day → last day of February
-        let date = parse_target_date("What price will Solana hit in February?").unwrap();
+        let today = Local::now().date_naive();
+        let date =
+            parse_target_date_with_today("What price will Solana hit in February?", today).unwrap();
         assert_eq!(date.month(), 2);
         // Last day: Feb 28 or 29 depending on leap year
         assert!(date.day() == 28 || date.day() == 29);
@@ -3869,29 +3892,35 @@ mod tests {
     #[test]
     fn test_parse_target_date_by_end_of_month() {
         // "by end of March" → last day of March
-        let date = parse_target_date("Will BTC reach $200k by end of March?").unwrap();
+        let today = Local::now().date_naive();
+        let date =
+            parse_target_date_with_today("Will BTC reach $200k by end of March?", today).unwrap();
         assert_eq!(date.month(), 3);
         assert_eq!(date.day(), 31);
     }
 
     #[test]
     fn test_parse_target_date_today() {
-        let date = parse_target_date("What is the temperature today in NYC?").unwrap();
         let today = Local::now().date_naive();
+        let date = parse_target_date_with_today("What is the temperature today in NYC?", today)
+            .unwrap();
         assert_eq!(date, today);
     }
 
     #[test]
     fn test_parse_target_date_tomorrow() {
-        let date = parse_target_date("Will it rain tomorrow in NYC?").unwrap();
         let today = Local::now().date_naive();
+        let date =
+            parse_target_date_with_today("Will it rain tomorrow in NYC?", today).unwrap();
         assert_eq!(date, today + chrono::Duration::days(1));
     }
 
     #[test]
     fn test_parse_target_date_may_modal_verb() {
         // "may" as a modal verb should NOT be parsed as the month May
-        let date = parse_target_date("Will temperatures may exceed 100°F this summer?");
+        let today = Local::now().date_naive();
+        let date =
+            parse_target_date_with_today("Will temperatures may exceed 100°F this summer?", today);
         assert!(
             date.is_none(),
             "Modal verb 'may' should not match as month May"
@@ -3901,7 +3930,9 @@ mod tests {
     #[test]
     fn test_parse_target_date_in_may() {
         // "in May" with preposition should match
-        let date = parse_target_date("What will the temperature be in May?").unwrap();
+        let today = Local::now().date_naive();
+        let date = parse_target_date_with_today("What will the temperature be in May?", today)
+            .unwrap();
         assert_eq!(date.month(), 5);
         assert_eq!(date.day(), 31);
     }
@@ -5313,7 +5344,7 @@ mod tests {
         books.insert(U256::from(12u64), no_book);
 
         let strategy = make_weather_strategy(books, vec![]);
-        let target_date = parse_target_date(event_title);
+        let target_date = parse_target_date_server_local(event_title);
         let cache_key = WeatherAlphaStrategy::location_hash(
             "Miami",
             WeatherMetric::TemperatureMax,
@@ -5372,7 +5403,7 @@ mod tests {
         books.insert(U256::from(22u64), no_book);
 
         let strategy = make_weather_strategy(books, vec![]);
-        let target_date = parse_target_date(event_title);
+        let target_date = parse_target_date_server_local(event_title);
         let cache_key = WeatherAlphaStrategy::location_hash(
             "Miami",
             WeatherMetric::TemperatureMax,
@@ -5426,7 +5457,7 @@ mod tests {
         books.insert(U256::from(32u64), make_weather_book(U256::from(32u64), dec!(0.82)));
 
         let strategy = make_weather_strategy(books, vec![]);
-        let target_date = parse_target_date(event_title);
+        let target_date = parse_target_date_server_local(event_title);
         let cache_key = WeatherAlphaStrategy::location_hash(
             "Miami",
             WeatherMetric::TemperatureMax,

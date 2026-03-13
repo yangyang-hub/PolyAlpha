@@ -36,14 +36,3 @@ pub struct AccountContext {
     /// Strategies assigned to this account (e.g., ["weather", "crypto", "liquidity_rewards"]).
     pub strategies: Vec<String>,
 }
-
-pub type ClobRewards = Vec<pa_strategy::liquidity_rewards::ClobRewardData>;
-pub type LrQuoteResult = (
-    Vec<(String, LrOrderMeta)>,
-    Decimal,
-    Option<Decimal>,
-    Option<Decimal>,
-);
-
-pub type LrCooldownMap =
-    std::collections::HashMap<(alloy::primitives::U256, bool, Decimal), std::time::Instant>;

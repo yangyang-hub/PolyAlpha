@@ -5,7 +5,9 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use pa_core::weather::{normalize_weather_location_name, weather_location};
-use pa_strategy::weather::{parse_target_date, parse_weather_event_title, parse_weather_question};
+use pa_strategy::weather::{
+    parse_target_date_server_local, parse_weather_event_title, parse_weather_question,
+};
 
 #[derive(Parser)]
 #[command(
@@ -106,7 +108,7 @@ fn to_audit_entry(event_title: String, question: String) -> Option<AuditEntry> {
         let normalized = normalize_weather_location_name(&location).map(ToOwned::to_owned);
         let metadata = normalized.as_deref().and_then(weather_location);
         return Some(AuditEntry {
-            target_date: parse_target_date(&event_title).map(|d| d.to_string()),
+            target_date: parse_target_date_server_local(&event_title).map(|d| d.to_string()),
             weather_supported: normalized.is_some(),
             trade_enabled: metadata.map(|entry| entry.trade_enabled).unwrap_or(false),
             provider: metadata.map(|entry| format!("{:?}", entry.provider)),
@@ -122,7 +124,7 @@ fn to_audit_entry(event_title: String, question: String) -> Option<AuditEntry> {
         let normalized = normalize_weather_location_name(&parsed.location).map(ToOwned::to_owned);
         let metadata = normalized.as_deref().and_then(weather_location);
         return Some(AuditEntry {
-            target_date: parse_target_date(&question).map(|d| d.to_string()),
+            target_date: parse_target_date_server_local(&question).map(|d| d.to_string()),
             weather_supported: normalized.is_some(),
             trade_enabled: metadata.map(|entry| entry.trade_enabled).unwrap_or(false),
             provider: metadata.map(|entry| format!("{:?}", entry.provider)),

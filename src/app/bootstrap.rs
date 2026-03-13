@@ -1,7 +1,7 @@
 //! Startup-time bootstrap helpers.
 //!
 //! This module owns process-level initialization such as tracing, configuration
-//! loading, config-store overlay, and API server startup.
+//! loading, and API server startup.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -16,15 +16,12 @@ use pa_core::config::{AccountConfig, Settings};
 use pa_core::traits::MarketDataFeed;
 use pa_market_data::service::MarketDataService;
 use pa_monitor::api::{ApiState, LrRuntimeStatus, PositionApiEntry};
-use pa_storage::config_store::ConfigStore;
 
 pub struct BootstrapArtifacts {
     pub settings: Settings,
     pub resolved_accounts: Vec<AccountConfig>,
     pub active_enabled_strategies: Vec<String>,
     pub config_arc: Arc<ArcSwap<Settings>>,
-    pub config_tx: tokio::sync::watch::Sender<u64>,
-    pub config_store: Option<ConfigStore>,
 }
 
 pub fn init_tracing() {
@@ -40,36 +37,11 @@ pub fn init_tracing() {
 
 pub async fn load_runtime_settings() -> Result<BootstrapArtifacts> {
     let mut settings = Settings::load().context("Failed to load configuration")?;
-
-    let config_store = if !settings.database.url.is_empty() {
-        match sqlx::PgPool::connect(&settings.database.url).await {
-            Ok(pool) => {
-                if let Err(e) = sqlx::migrate!("./migrations").run(&pool).await {
-                    tracing::warn!(error = %e, "DB migration failed (non-fatal for config store)");
-                }
-                let store = ConfigStore::new(pool);
-                match store.load_all().await {
-                    Ok(overrides) if !overrides.is_empty() => {
-                        if let Err(e) = ConfigStore::apply_overrides(&mut settings, &overrides) {
-                            tracing::warn!(error = %e, "Failed to apply DB config overrides");
-                        } else {
-                            tracing::info!(sections = overrides.len(), "Applied DB config overrides");
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error = %e, "Failed to load DB config overrides"),
-                }
-                Some(store)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "PostgreSQL connection failed — config store disabled");
-                None
-            }
-        }
-    } else {
+    if settings.database.url.is_empty() {
         tracing::info!("No database URL configured — config store disabled");
-        None
-    };
+    } else {
+        tracing::info!("Config store persistence disabled — database config overrides ignored");
+    }
 
     if let Err(e) = settings.reapply_env_overrides() {
         tracing::warn!(error = %e, "Failed to re-apply environment config overrides");
@@ -85,23 +57,18 @@ pub async fn load_runtime_settings() -> Result<BootstrapArtifacts> {
     settings.merge_account_strategies_into_enabled();
     let active_enabled_strategies = settings.active_account_enabled_strategies();
     let config_arc = Arc::new(ArcSwap::new(Arc::new(settings.clone())));
-    let (config_tx, _config_rx) = tokio::sync::watch::channel(0u64);
 
     Ok(BootstrapArtifacts {
         settings,
         resolved_accounts,
         active_enabled_strategies,
         config_arc,
-        config_tx,
-        config_store,
     })
 }
 
 pub fn start_api_server(
     settings: &Settings,
     config_arc: Arc<ArcSwap<Settings>>,
-    config_store: Option<ConfigStore>,
-    config_tx: tokio::sync::watch::Sender<u64>,
     ws_connected: Arc<std::sync::atomic::AtomicBool>,
     lr_runtime_status: Arc<tokio::sync::RwLock<LrRuntimeStatus>>,
     shared_positions: Arc<tokio::sync::RwLock<Vec<PositionApiEntry>>>,
@@ -110,8 +77,6 @@ pub fn start_api_server(
 ) {
     let api_state = Arc::new(ApiState {
         config: config_arc,
-        config_store,
-        config_tx,
         start_time: Utc::now(),
         health_checks: vec![(
             "websocket",

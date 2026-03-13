@@ -58,8 +58,8 @@ ws_max_instruments = 500
 market_refresh_interval_secs = 1800  # 30 min
 
 [weather]
-min_edge_bps = 600
-max_spread_bps = 1500
+min_edge_bps = 500
+max_spread_bps = 1700
 max_position_pct = 0.50
 kelly_fraction = 0.25
 refresh_interval_secs = 120          # Every 2 minutes
@@ -68,8 +68,8 @@ capital_efficiency_threshold = 0.98
 dynamic_sigma = true
 forecast_change_detection = false    # Disabled by default; weather forecasts usually change slowly
 forecast_change_threshold = 0.35
-max_entry_price = 0.30               # Allow moderately priced tokens instead of only extreme longshots
-profit_take_threshold = 0.38         # Take profits earlier in thin weather books
+max_entry_price = 0.35               # Allow moderately priced tokens instead of only extreme longshots
+profit_take_threshold = 0.34         # Take profits earlier in thin weather books
 max_position_usdc = 5.0              # Max $5 per trade
 noaa_user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 target_cities = []

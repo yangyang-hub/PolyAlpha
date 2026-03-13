@@ -23,8 +23,18 @@ use pa_monitor::api::LrRuntimeStatus;
 use pa_risk::manager::RiskManagerImpl;
 use pa_strategy::liquidity_rewards::RewardMarketCandidate;
 
-use crate::app::types::{LrCooldownMap, LrOrderMeta, LrQuoteResult};
+use crate::app::types::LrOrderMeta;
 use crate::app::helpers::fetch_clob_rewards;
+
+type LrQuoteResult = (
+    Vec<(String, LrOrderMeta)>,
+    Decimal,
+    Option<Decimal>,
+    Option<Decimal>,
+);
+
+type LrCooldownMap =
+    std::collections::HashMap<(alloy::primitives::U256, bool, Decimal), std::time::Instant>;
 
 pub struct LrRuntimePrep {
     pub clob: ClobExecutor,

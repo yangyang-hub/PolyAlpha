@@ -36,8 +36,7 @@ This file records repository-specific working agreements, high-level project con
   1. `config/default.toml`
   2. `config/{RUN_MODE}.toml` if present
   3. `PA_` prefixed environment variables
-  4. persisted config-store overrides if enabled
-  5. `PA_` environment variables are re-applied last as highest priority
+  4. `PA_` environment variables are re-applied last as highest priority
 - Trading is multi-account only.
 - Accounts must be explicitly configured through `[[accounts]]` or `PA_ACCOUNT_<N>_*` environment variables.
 - The monitoring API and frontend are served by `pa-monitor`.
@@ -82,6 +81,66 @@ This file records repository-specific working agreements, high-level project con
 - When changing execution or risk behavior, add or update focused regression tests.
 
 ## Change Log
+
+### 2026-03-13
+- Area: `src/app/bootstrap.rs`, `src/app/market_runtime.rs`, `src/main.rs`, `crates/pa-monitor/src/api.rs`, `crates/pa-monitor/Cargo.toml`, `crates/pa-storage/src/lib.rs`
+- Change: Removed the disabled config-store/config watch plumbing from bootstrap, runtime wiring, API state, and storage exports, inlined config section extraction into `pa-monitor`, and dropped the now-unused `pa-storage` dependency from `pa-monitor`.
+- Why: Finish the transition to read-only `TOML + environment variable` configuration and eliminate dead persistence scaffolding that could mislead future maintenance.
+
+### 2026-03-13
+- Area: `crates/pa-monitor/src/api.rs`, `crates/pa-monitor/src/lib.rs`, `crates/pa-monitor/Cargo.toml`, `crates/pa-storage/Cargo.toml`
+- Change: Removed the dead `alerts` and legacy `health` modules from `pa-monitor`, inlined the shared `HealthCheck` alias into the active API module, and pruned unused crate dependencies from `pa-monitor` and `pa-storage`.
+- Why: Reduce dead code and dependency surface after the monitoring stack converged on the unified Axum API server and storage config persistence was removed.
+
+### 2026-03-13
+- Area: `src/app/types.rs`, `src/app/helpers.rs`, `src/app/liquidity_rewards.rs`, `Cargo.toml`
+- Change: Inlined LR-only type aliases back into the liquidity-rewards module and removed unused root-crate dependencies on `config` and `sqlx`.
+- Why: Reduce cross-module indirection in `src/app` and shrink the dependency surface of the main binary crate without changing runtime behavior.
+
+### 2026-03-13
+- Area: `src/bin/weather_audit.rs`
+- Change: Switched the audit CLI to the explicit `parse_target_date_server_local()` helper after weather date parsing APIs were tightened.
+- Why: Restore full workspace compilation for auxiliary weather audit tooling without weakening production weather date semantics.
+
+### 2026-03-13
+- Area: `crates/pa-monitor/src/api.rs`, `crates/pa-strategy/src/weather.rs`
+- Change: Removed the inert config history API route and fully eliminated the public server-local `parse_target_date()` entrypoint in favor of explicit production/test call sites.
+- Why: Remove no-op surface area and reduce the chance of future regressions back to server-local date semantics in weather logic.
+
+### 2026-03-13
+- Area: `crates/pa-strategy/src/weather.rs`, `crates/pa-strategy/src/crypto_alpha.rs`
+- Change: Added an explicit `parse_target_date_server_local()` helper and switched crypto strategy parsing to use it instead of depending on the weather test-oriented wrapper.
+- Why: Fix the compile regression introduced after tightening weather date parsing semantics without reintroducing server-local date handling into weather production paths.
+
+### 2026-03-13
+- Area: `crates/pa-strategy/src/weather.rs`, `frontend/src/api.ts`, `frontend/src/components/HistoryModal.tsx`
+- Change: Restricted the server-local `parse_target_date()` wrapper to tests and removed dead frontend config-mutation/history client code.
+- Why: Avoid future production regressions to server-local date parsing and remove stale configuration-editing code after the UI/API became read-only.
+
+### 2026-03-13
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Switched remaining weather `days_to_event`, surround gating, and relative date parsing paths from server-local time to market-local dates.
+- Why: Keep weather forecasting, stale-liquidity, and international-city date handling consistent with market-local settlement boundaries.
+
+### 2026-03-13
+- Area: `crates/pa-monitor/src/api.rs`
+- Change: Removed the writable `/api/config/{section}` update route so the config API is now read-only.
+- Why: Runtime configuration should be controlled only by TOML and environment variables, not by ad-hoc API mutation.
+
+### 2026-03-13
+- Area: `frontend/src/components/ConfigSection.tsx`, `frontend/src/pages/Configuration.tsx`
+- Change: Converted the configuration UI to read-only display mode and removed frontend save/history actions.
+- Why: Configuration should now be managed via TOML and environment variables only, not edited or persisted from the web UI.
+
+### 2026-03-13
+- Area: `src/app/bootstrap.rs`
+- Change: Disabled database-backed config-store loading and persistence so runtime config changes are now in-memory only.
+- Why: Configuration should no longer be persisted or restored from PostgreSQL overrides.
+
+### 2026-03-13
+- Area: `config/default.toml`, `crates/pa-core/src/config.rs`
+- Change: Relaxed weather trading defaults to improve order generation by lowering `min_edge_bps` to `500`, widening `max_spread_bps` to `1700`, raising `max_entry_price` to `0.35`, and lowering `profit_take_threshold` to `0.34`.
+- Why: The live weather strategy was consistently filtered out by spread and edge thresholds and needed a moderately less conservative default profile.
 
 ### 2026-03-13
 - Area: `AGENTS.md`

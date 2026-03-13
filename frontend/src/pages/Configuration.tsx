@@ -7,7 +7,6 @@ import {
   type StatusResponse,
 } from "../api";
 import ConfigSection from "../components/ConfigSection";
-import HistoryModal from "../components/HistoryModal";
 
 const SECTIONS = [
   { key: "strategy", label: "策略总控" },
@@ -34,7 +33,6 @@ export default function Configuration() {
   );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [historySection, setHistorySection] = useState<string | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
 
   function load() {
@@ -90,6 +88,10 @@ export default function Configuration() {
     <div className="space-y-4">
       <h1 className="text-2xl font-bold">系统配置</h1>
 
+      <div className="alert alert-info">
+        <span>当前页面为只读展示。配置以 `TOML + 环境变量` 为准，前端不再提供保存和持久化入口。</span>
+      </div>
+
       {status && (
         <div className={`alert ${status.trading_ready ? "alert-success" : "alert-warning"}`}>
           <div className="space-y-2">
@@ -138,21 +140,11 @@ export default function Configuration() {
                 section={s.key}
                 data={s.data}
                 meta={s.meta ?? undefined}
-                onSaved={load}
-                onHistory={() => setHistorySection(s.key)}
               />
             )}
           </div>
         </div>
       ))}
-
-      {historySection && (
-        <HistoryModal
-          section={historySection}
-          open={true}
-          onClose={() => setHistorySection(null)}
-        />
-      )}
     </div>
   );
 }

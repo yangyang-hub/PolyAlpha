@@ -13,13 +13,15 @@ use pa_execution::clob_executor::ClobExecutor;
 use pa_market_data::cache::OrderBookCache;
 use pa_market_data::gamma_feed::GammaFeed;
 
-use crate::app::types::{AccountContext, ClobRewards};
+use crate::app::types::AccountContext;
 
 /// Fetch current liquidity rewards from the CLOB API.
 ///
 /// Returns a list of markets with active rewards, including their reward parameters
 /// (max_spread, min_size, total_daily_rate).
-pub async fn fetch_clob_rewards(clob: &ClobExecutor) -> anyhow::Result<ClobRewards> {
+pub async fn fetch_clob_rewards(
+    clob: &ClobExecutor,
+) -> anyhow::Result<Vec<pa_strategy::liquidity_rewards::ClobRewardData>> {
     let mut all_rewards = Vec::new();
     let mut next_cursor: Option<String> = None;
 

@@ -37,8 +37,6 @@ pub async fn initialize_market_runtime(
     active_enabled_strategies: &[String],
     resolved_accounts: &[AccountConfig],
     config_arc: Arc<arc_swap::ArcSwap<Settings>>,
-    config_tx: tokio::sync::watch::Sender<u64>,
-    config_store: Option<pa_storage::config_store::ConfigStore>,
 ) -> Result<Option<MarketRuntimeArtifacts>> {
     let mut discovery_settings = settings.clone();
     discovery_settings.strategy.enabled = active_enabled_strategies.to_vec();
@@ -59,8 +57,6 @@ pub async fn initialize_market_runtime(
     start_api_server(
         settings,
         config_arc,
-        config_store,
-        config_tx,
         Arc::clone(&ws_connected),
         Arc::clone(&lr_runtime_status),
         Arc::clone(&shared_positions),

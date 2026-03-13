@@ -1,16 +1,12 @@
-import { useState } from "react";
-import { updateSection, type SectionMeta } from "../api";
+import type { SectionMeta } from "../api";
 
 interface Props {
   title: string;
   section: string;
   data: Record<string, unknown>;
   meta?: SectionMeta;
-  onSaved?: () => void;
-  onHistory?: () => void;
 }
 
-/** Per-section, per-field Chinese descriptions. */
 const FIELD_HINTS: Record<string, Record<string, string>> = {
   strategy: {
     enabled: "启用的策略列表，如 weather, crypto, smart_money",
@@ -120,367 +116,209 @@ const FIELD_HINTS: Record<string, Record<string, string>> = {
   },
 };
 
-export default function ConfigSection({ title, section, data, meta, onSaved, onHistory }: Props) {
-  const [form, setForm] = useState<Record<string, unknown>>({ ...data });
-  const [saving, setSaving] = useState(false);
-  const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
-
+export default function ConfigSection({ title, section, data, meta }: Props) {
   const hints = FIELD_HINTS[section] ?? {};
-
-  function showToast(msg: string, ok: boolean) {
-    setToast({ msg, ok });
-    setTimeout(() => setToast(null), 3000);
-  }
-
-  function setValue(key: string, raw: unknown) {
-    setForm((prev) => ({ ...prev, [key]: raw }));
-  }
-
-  async function handleSave() {
-    setSaving(true);
-    try {
-      const result = await updateSection(section, form);
-      showToast(
-        result.persisted ? "保存成功，已持久化" : "保存成功，仅当前进程生效，重启后会丢失",
-        result.persisted,
-      );
-      onSaved?.();
-    } catch (e) {
-      showToast(`保存失败: ${e instanceof Error ? e.message : e}`, false);
-    } finally {
-      setSaving(false);
-    }
-  }
 
   return (
     <div className="card bg-base-200 shadow-sm">
       <div className="card-body p-4">
-        <div className="flex items-center justify-between mb-3">
+        <div className="mb-3 flex items-center justify-between">
           <h3 className="card-title text-base">{title}</h3>
-          <div className="flex gap-2">
-            {onHistory && (
-              <button className="btn btn-ghost btn-xs" onClick={onHistory}>
-                历史
-              </button>
-            )}
-            <button
-              className="btn btn-primary btn-xs"
-              onClick={handleSave}
-              disabled={saving}
-            >
-              {saving ? "保存中..." : "保存"}
-            </button>
-          </div>
+          <span className="badge badge-outline">只读展示</span>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          {Object.entries(form).map(([key, value]) => (
-            <FieldEditor
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {Object.entries(data).map(([key, value]) => (
+            <FieldDisplay
               key={key}
               section={section}
               fieldKey={key}
               value={value}
               meta={meta}
               hint={hints[key]}
-              onChange={(v) => setValue(key, v)}
             />
           ))}
         </div>
       </div>
-      {toast && (
-        <div className="toast toast-end toast-bottom z-50">
-          <div className={`alert ${toast.ok ? "alert-success" : "alert-error"} text-sm py-2`}>
-            {toast.msg}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
 
-function FieldEditor({
+function riskBadgeClass(tier: "low" | "medium" | "high" | undefined) {
+  switch (tier) {
+    case "low":
+      return "badge badge-success badge-outline";
+    case "medium":
+      return "badge badge-warning badge-outline";
+    case "high":
+      return "badge badge-error badge-outline";
+    default:
+      return "badge badge-ghost";
+  }
+}
+
+function FieldDisplay({
   section,
   fieldKey,
   value,
   meta,
   hint,
-  onChange,
 }: {
   section: string;
   fieldKey: string;
   value: unknown;
   meta?: SectionMeta;
   hint?: string;
-  onChange: (v: unknown) => void;
 }) {
   const label = fieldKey.replace(/_/g, " ");
 
-  function riskBadgeClass(tier: "low" | "medium" | "high" | undefined) {
-    switch (tier) {
-      case "low":
-        return "badge badge-success badge-outline";
-      case "medium":
-        return "badge badge-warning badge-outline";
-      case "high":
-        return "badge badge-error badge-outline";
-      default:
-        return "badge badge-ghost";
-    }
-  }
-
   if (typeof value === "boolean") {
     return (
-      <label className="flex items-center gap-2 cursor-pointer" title={hint}>
-        <input
-          type="checkbox"
-          className="toggle toggle-primary toggle-sm"
-          checked={value}
-          onChange={(e) => onChange(e.target.checked)}
-        />
-        <span className="text-sm">{label}</span>
-        {hint && <span className="text-xs opacity-40 truncate max-w-48" title={hint}>{hint}</span>}
-      </label>
+      <div className="rounded-box border border-base-300 bg-base-100 p-3" title={hint}>
+        <div className="text-xs opacity-70">{label}</div>
+        {hint && <div className="mt-1 text-xs opacity-40">{hint}</div>}
+        <div className="mt-2">
+          <span className={`badge ${value ? "badge-success" : "badge-ghost"}`}>
+            {value ? "启用" : "关闭"}
+          </span>
+        </div>
+      </div>
     );
   }
 
-  if (typeof value === "number") {
+  if (typeof value === "number" || typeof value === "string") {
     return (
-      <label className="form-control">
-        <span className="label-text text-xs opacity-70">{label}</span>
-        {hint && <span className="label-text-alt text-xs opacity-40">{hint}</span>}
-        <input
-          type="number"
-          className="input input-bordered input-sm w-full"
-          value={value}
-          step="any"
-          onChange={(e) => {
-            const n = parseFloat(e.target.value);
-            onChange(isNaN(n) ? 0 : n);
-          }}
-        />
-      </label>
+      <div className="rounded-box border border-base-300 bg-base-100 p-3">
+        <div className="text-xs opacity-70">{label}</div>
+        {hint && <div className="mt-1 text-xs opacity-40">{hint}</div>}
+        <div className="mt-2 font-mono text-sm break-all">{String(value)}</div>
+      </div>
     );
   }
 
   if (Array.isArray(value)) {
     const isStringArray = value.every((v) => typeof v === "string");
-    if (isStringArray) {
-      if (section === "weather" && fieldKey === "target_cities") {
-        const selected = value as string[];
-        const options = Array.isArray(meta?.target_cities_options)
-          ? (meta?.target_cities_options as string[])
-          : [];
-        const supportedOptions = Array.isArray(meta?.supported_cities_options)
-          ? (meta?.supported_cities_options as string[])
-          : options;
-        const riskTiers = meta?.target_cities_risk_tiers ?? {};
-        const providers = meta?.target_cities_providers ?? {};
-        const tradeEnabled = meta?.target_cities_trade_enabled ?? {};
-        const settlementNotes = meta?.target_cities_settlement_notes ?? {};
-        const sigmaMultipliers = meta?.target_cities_sigma_multipliers ?? {};
-        if (options.length > 0) {
-          const toggleCity = (city: string) => {
-            onChange(
-              selected.includes(city)
-                ? selected.filter((item) => item !== city)
-                : [...selected, city],
-            );
-          };
-          const counts = options.reduce(
-            (acc, city) => {
-              const tier = riskTiers[city] ?? "high";
-              acc[tier] += 1;
-              return acc;
-            },
-            { low: 0, medium: 0, high: 0 },
-          );
-          const auditOnlyCities = supportedOptions.filter(
-            (city) => !tradeEnabled[city],
-          );
+    if (isStringArray && section === "weather" && fieldKey === "target_cities") {
+      const selected = value as string[];
+      const options = Array.isArray(meta?.target_cities_options)
+        ? (meta?.target_cities_options as string[])
+        : [];
+      const supportedOptions = Array.isArray(meta?.supported_cities_options)
+        ? (meta?.supported_cities_options as string[])
+        : options;
+      const riskTiers = meta?.target_cities_risk_tiers ?? {};
+      const providers = meta?.target_cities_providers ?? {};
+      const tradeEnabled = meta?.target_cities_trade_enabled ?? {};
+      const settlementNotes = meta?.target_cities_settlement_notes ?? {};
+      const sigmaMultipliers = meta?.target_cities_sigma_multipliers ?? {};
+      const counts = options.reduce(
+        (acc, city) => {
+          const tier = riskTiers[city] ?? "high";
+          acc[tier] += 1;
+          return acc;
+        },
+        { low: 0, medium: 0, high: 0 },
+      );
+      const auditOnlyCities = supportedOptions.filter((city) => !tradeEnabled[city]);
 
-          return (
-            <div className="form-control sm:col-span-2">
-              <span className="label-text text-xs opacity-70">{label}</span>
-              {hint && <span className="label-text-alt text-xs opacity-40">{hint}</span>}
-              <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                <span className="badge badge-success badge-outline">低风险 {counts.low}</span>
-                <span className="badge badge-warning badge-outline">中风险 {counts.medium}</span>
-                <span className="badge badge-error badge-outline">高风险 {counts.high}</span>
-                <span className="badge badge-ghost">
-                  sigma: low x{sigmaMultipliers.low ?? 1}, medium x{sigmaMultipliers.medium ?? 1}, high x{sigmaMultipliers.high ?? 1}
-                </span>
-              </div>
-              <div className="mt-2 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  className="btn btn-xs"
-                  onClick={() => onChange([])}
+      return (
+        <div className="rounded-box border border-base-300 bg-base-100 p-3 sm:col-span-2">
+          <div className="text-xs opacity-70">{label}</div>
+          {hint && <div className="mt-1 text-xs opacity-40">{hint}</div>}
+          <div className="mt-2 flex flex-wrap gap-2 text-xs">
+            <span className="badge badge-success badge-outline">低风险 {counts.low}</span>
+            <span className="badge badge-warning badge-outline">中风险 {counts.medium}</span>
+            <span className="badge badge-error badge-outline">高风险 {counts.high}</span>
+            <span className="badge badge-ghost">
+              sigma: low x{sigmaMultipliers.low ?? 1}, medium x{sigmaMultipliers.medium ?? 1}, high x{sigmaMultipliers.high ?? 1}
+            </span>
+          </div>
+          <div className="mt-2 text-xs opacity-60">
+            {selected.length === 0
+              ? "当前为留空模式：允许所有当前可交易的天气城市。"
+              : `当前选中 ${selected.length} 个城市。`}
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {options.map((city) => {
+              const active = selected.length === 0 || selected.includes(city);
+              const tier = riskTiers[city];
+              const provider = providers[city];
+              const settlementNote = settlementNotes[city];
+              return (
+                <div
+                  key={city}
+                  className={`rounded-btn border px-3 py-2 text-sm ${active ? "border-primary bg-primary/5" : "border-base-300 bg-base-100"}`}
                 >
-                  留空允许全部
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-xs"
-                  onClick={() => onChange([...options])}
-                >
-                  填入全部城市
-                </button>
-              </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span>{city}</span>
+                    <span className={riskBadgeClass(tier)}>
+                      {tier === "low" ? "低" : tier === "medium" ? "中" : "高"}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-1 text-[11px] opacity-70">
+                    <span className="badge badge-ghost badge-xs">
+                      {provider === "open_meteo" ? "Open-Meteo" : "NOAA"}
+                    </span>
+                    <span className="badge badge-success badge-outline badge-xs">可交易</span>
+                    {active && <span className="badge badge-primary badge-outline badge-xs">已纳入</span>}
+                  </div>
+                  {settlementNote && <div className="mt-1 text-[11px] opacity-60">{settlementNote}</div>}
+                </div>
+              );
+            })}
+          </div>
+          {auditOnlyCities.length > 0 && (
+            <div className="mt-3 rounded-box border border-base-300 p-3">
+              <div className="text-xs font-medium opacity-70">国际审计城市（暂不参与实盘）</div>
               <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
-                {options.map((city) => {
-                  const active = selected.includes(city);
-                  const tier = riskTiers[city];
+                {auditOnlyCities.map((city) => {
+                  const tier = riskTiers[city] ?? "high";
                   const provider = providers[city];
                   const settlementNote = settlementNotes[city];
                   return (
-                    <button
-                      key={city}
-                      type="button"
-                      className={`btn btn-sm h-auto min-h-0 justify-start px-3 py-2 ${active ? "btn-primary" : "btn-outline"}`}
-                      onClick={() => toggleCity(city)}
-                    >
-                      <span className="flex w-full flex-col items-start gap-1">
-                        <span className="flex w-full items-center justify-between gap-2">
-                          <span>{city}</span>
-                          <span className={riskBadgeClass(tier)}>
-                            {tier === "low" ? "低" : tier === "medium" ? "中" : "高"}
-                          </span>
+                    <div key={city} className="rounded-btn border border-dashed border-base-300 px-3 py-2 text-sm">
+                      <div className="flex items-center justify-between gap-2">
+                        <span>{city}</span>
+                        <span className={riskBadgeClass(tier)}>
+                          {tier === "low" ? "低" : tier === "medium" ? "中" : "高"}
                         </span>
-                        <span className="flex flex-wrap gap-1 text-[11px] opacity-70">
-                          <span className="badge badge-ghost badge-xs">
-                            {provider === "open_meteo" ? "Open-Meteo" : "NOAA"}
-                          </span>
-                          <span className="badge badge-success badge-outline badge-xs">
-                            可交易
-                          </span>
+                      </div>
+                      <div className="mt-1 flex flex-wrap gap-1 text-[11px] opacity-70">
+                        <span className="badge badge-ghost badge-xs">
+                          {provider === "open_meteo" ? "Open-Meteo" : "NOAA"}
                         </span>
-                        {settlementNote && (
-                          <span className="text-[11px] opacity-60">{settlementNote}</span>
-                        )}
-                      </span>
-                    </button>
+                        <span className="badge badge-warning badge-outline badge-xs">audit-only</span>
+                      </div>
+                      {settlementNote && (
+                        <div className="mt-1 text-[11px] opacity-60">结算站点: {settlementNote}</div>
+                      )}
+                    </div>
                   );
                 })}
               </div>
-              {auditOnlyCities.length > 0 && (
-                <div className="mt-3 rounded-box border border-base-300 p-3">
-                  <div className="text-xs font-medium opacity-70">国际审计城市（暂不参与实盘）</div>
-                  <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3">
-                    {auditOnlyCities.map((city) => {
-                      const tier = riskTiers[city] ?? "high";
-                      const provider = providers[city];
-                      const settlementNote = settlementNotes[city];
-                      return (
-                        <div
-                          key={city}
-                          className="rounded-btn border border-dashed border-base-300 px-3 py-2 text-sm"
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <span>{city}</span>
-                            <span className={riskBadgeClass(tier)}>
-                              {tier === "low" ? "低" : tier === "medium" ? "中" : "高"}
-                            </span>
-                          </div>
-                          <div className="mt-1 flex flex-wrap gap-1 text-[11px] opacity-70">
-                            <span className="badge badge-ghost badge-xs">
-                              {provider === "open_meteo" ? "Open-Meteo" : "NOAA"}
-                            </span>
-                            <span className="badge badge-warning badge-outline badge-xs">
-                              audit-only
-                            </span>
-                          </div>
-                          {settlementNote && (
-                            <div className="mt-1 text-[11px] opacity-60">
-                              结算站点: {settlementNote}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-              <span className="label-text-alt text-xs opacity-50">
-                当前选择 {selected.length} 个城市。留空表示允许所有当前可交易的天气城市。
-              </span>
             </div>
-          );
-        }
-      }
-
-      return (
-        <label className="form-control sm:col-span-2">
-          <span className="label-text text-xs opacity-70">{label}</span>
-          {hint && <span className="label-text-alt text-xs opacity-40">{hint}</span>}
-          <input
-            type="text"
-            className="input input-bordered input-sm w-full"
-            value={(value as string[]).join(", ")}
-            onChange={(e) =>
-              onChange(
-                e.target.value
-                  .split(",")
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-              )
-            }
-          />
-          <span className="label-text-alt text-xs opacity-50">逗号分隔</span>
-        </label>
+          )}
+        </div>
       );
     }
-    // Non-string arrays and objects → JSON textarea
+
     return (
-      <label className="form-control sm:col-span-2">
-        <span className="label-text text-xs opacity-70">{label}</span>
-        {hint && <span className="label-text-alt text-xs opacity-40">{hint}</span>}
-        <textarea
-          className="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
-          rows={3}
-          value={JSON.stringify(value, null, 2)}
-          onChange={(e) => {
-            try {
-              onChange(JSON.parse(e.target.value));
-            } catch {
-              /* keep current value on invalid JSON */
-            }
-          }}
-        />
-      </label>
+      <div className="rounded-box border border-base-300 bg-base-100 p-3 sm:col-span-2">
+        <div className="text-xs opacity-70">{label}</div>
+        {hint && <div className="mt-1 text-xs opacity-40">{hint}</div>}
+        <div className="mt-2 font-mono text-sm break-all">
+          {isStringArray ? (value as string[]).join(", ") || "[]" : JSON.stringify(value, null, 2)}
+        </div>
+      </div>
     );
   }
 
-  if (typeof value === "object" && value !== null) {
-    return (
-      <label className="form-control sm:col-span-2">
-        <span className="label-text text-xs opacity-70">{label}</span>
-        {hint && <span className="label-text-alt text-xs opacity-40">{hint}</span>}
-        <textarea
-          className="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
-          rows={4}
-          value={JSON.stringify(value, null, 2)}
-          onChange={(e) => {
-            try {
-              onChange(JSON.parse(e.target.value));
-            } catch {
-              /* keep current value on invalid JSON */
-            }
-          }}
-        />
-      </label>
-    );
-  }
-
-  // String
   return (
-    <label className="form-control">
-      <span className="label-text text-xs opacity-70">{label}</span>
-      {hint && <span className="label-text-alt text-xs opacity-40">{hint}</span>}
-      <input
-        type="text"
-        className="input input-bordered input-sm w-full"
-        value={String(value ?? "")}
-        onChange={(e) => onChange(e.target.value)}
-      />
-    </label>
+    <div className="rounded-box border border-base-300 bg-base-100 p-3 sm:col-span-2">
+      <div className="text-xs opacity-70">{label}</div>
+      {hint && <div className="mt-1 text-xs opacity-40">{hint}</div>}
+      <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-all rounded bg-base-200 p-2 text-xs">
+        {JSON.stringify(value, null, 2)}
+      </pre>
+    </div>
   );
 }
