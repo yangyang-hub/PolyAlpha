@@ -134,6 +134,11 @@ This file records repository-specific working agreements, high-level project con
 
 ### 2026-03-14
 - Area: `src/bin/weather_audit.rs`
+- Change: Switched the audit CLI's internal unvalidated-city filtering and counting from string matching to `SettlementValidationStatus` enum matching.
+- Why: Avoid brittle filtering behavior if the displayed validation-status strings ever change while keeping the CLI output human-readable.
+
+### 2026-03-14
+- Area: `src/bin/weather_audit.rs`
 - Change: Added `--only-trade-enabled` and `--only-unvalidated` filters plus per-entry validation-status output so the audit CLI can act as a direct queue for settlement-validation follow-up.
 - Why: Make it trivial to surface only the remaining default-protected cities when they reappear in active weather markets instead of manually filtering the full audit output.
 

@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 use pa_core::weather::{
     normalize_weather_location_name, settlement_validation_status, weather_location,
+    SettlementValidationStatus,
 };
 use pa_strategy::weather::{
     parse_target_date_server_local, parse_weather_event_title, parse_weather_question,
@@ -51,6 +52,8 @@ struct AuditEntry {
     weather_supported: bool,
     trade_enabled: bool,
     provider: Option<String>,
+    #[serde(skip_serializing)]
+    validation_status_enum: Option<SettlementValidationStatus>,
     validation_status: Option<String>,
 }
 
@@ -158,6 +161,7 @@ fn to_audit_entry(
     if let Some((metric, location)) = parse_weather_event_title(&event_title) {
         let normalized = normalize_weather_location_name(&location).map(ToOwned::to_owned);
         let metadata = normalized.as_deref().and_then(weather_location);
+        let validation_status_enum = normalized.as_deref().map(settlement_validation_status);
         return Some(AuditEntry {
             event_url: event_slug
                 .as_ref()
@@ -166,10 +170,8 @@ fn to_audit_entry(
             weather_supported: normalized.is_some(),
             trade_enabled: metadata.map(|entry| entry.trade_enabled).unwrap_or(false),
             provider: metadata.map(|entry| format!("{:?}", entry.provider)),
-            validation_status: normalized
-                .as_deref()
-                .map(settlement_validation_status)
-                .map(|status| format!("{status:?}")),
+            validation_status: validation_status_enum.map(|status| format!("{status:?}")),
+            validation_status_enum,
             normalized_location: normalized,
             event_title,
             event_slug,
@@ -182,6 +184,7 @@ fn to_audit_entry(
     if let Some(parsed) = parse_weather_question(&question) {
         let normalized = normalize_weather_location_name(&parsed.location).map(ToOwned::to_owned);
         let metadata = normalized.as_deref().and_then(weather_location);
+        let validation_status_enum = normalized.as_deref().map(settlement_validation_status);
         return Some(AuditEntry {
             event_url: event_slug
                 .as_ref()
@@ -190,10 +193,8 @@ fn to_audit_entry(
             weather_supported: normalized.is_some(),
             trade_enabled: metadata.map(|entry| entry.trade_enabled).unwrap_or(false),
             provider: metadata.map(|entry| format!("{:?}", entry.provider)),
-            validation_status: normalized
-                .as_deref()
-                .map(settlement_validation_status)
-                .map(|status| format!("{status:?}")),
+            validation_status: validation_status_enum.map(|status| format!("{status:?}")),
+            validation_status_enum,
             normalized_location: normalized,
             event_title,
             event_slug,
@@ -233,7 +234,7 @@ async fn main() -> Result<()> {
         .filter(|e| !args.only_trade_enabled || e.trade_enabled)
         .filter(|e| {
             !args.only_unvalidated
-                || e.validation_status.as_deref() == Some("DefaultProtected")
+                || e.validation_status_enum == Some(SettlementValidationStatus::DefaultProtected)
         })
         .take(args.limit)
         .collect();
@@ -249,7 +250,9 @@ async fn main() -> Result<()> {
         .count();
     let filtered_unvalidated_count = display_entries
         .iter()
-        .filter(|entry| entry.validation_status.as_deref() == Some("DefaultProtected"))
+        .filter(|entry| {
+            entry.validation_status_enum == Some(SettlementValidationStatus::DefaultProtected)
+        })
         .count();
 
     if args.output == "json" {
