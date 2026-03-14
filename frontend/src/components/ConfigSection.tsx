@@ -209,6 +209,8 @@ function FieldDisplay({
       const providers = meta?.target_cities_providers ?? {};
       const tradeEnabled = meta?.target_cities_trade_enabled ?? {};
       const settlementNotes = meta?.target_cities_settlement_notes ?? {};
+      const validationStatus = meta?.target_cities_validation_status ?? {};
+      const extraEdgeBps = meta?.target_cities_extra_edge_bps ?? {};
       const sigmaMultipliers = meta?.target_cities_sigma_multipliers ?? {};
       const counts = options.reduce(
         (acc, city) => {
@@ -243,6 +245,8 @@ function FieldDisplay({
               const tier = riskTiers[city];
               const provider = providers[city];
               const settlementNote = settlementNotes[city];
+              const validation = validationStatus[city];
+              const extraEdge = extraEdgeBps[city] ?? 0;
               return (
                 <div
                   key={city}
@@ -259,6 +263,14 @@ function FieldDisplay({
                       {provider === "open_meteo" ? "Open-Meteo" : "NOAA"}
                     </span>
                     <span className="badge badge-success badge-outline badge-xs">可交易</span>
+                    <span className={`badge badge-xs ${validation === "validated" ? "badge-info badge-outline" : "badge-warning badge-outline"}`}>
+                      {validation === "validated" ? "已验证结算" : "默认保护"}
+                    </span>
+                    {extraEdge > 0 && (
+                      <span className="badge badge-warning badge-outline badge-xs">
+                        +{extraEdge}bps edge
+                      </span>
+                    )}
                     {active && <span className="badge badge-primary badge-outline badge-xs">已纳入</span>}
                   </div>
                   {settlementNote && <div className="mt-1 text-[11px] opacity-60">{settlementNote}</div>}
@@ -274,6 +286,8 @@ function FieldDisplay({
                   const tier = riskTiers[city] ?? "high";
                   const provider = providers[city];
                   const settlementNote = settlementNotes[city];
+                  const validation = validationStatus[city];
+                  const extraEdge = extraEdgeBps[city] ?? 0;
                   return (
                     <div key={city} className="rounded-btn border border-dashed border-base-300 px-3 py-2 text-sm">
                       <div className="flex items-center justify-between gap-2">
@@ -287,6 +301,14 @@ function FieldDisplay({
                           {provider === "open_meteo" ? "Open-Meteo" : "NOAA"}
                         </span>
                         <span className="badge badge-warning badge-outline badge-xs">audit-only</span>
+                        <span className={`badge badge-xs ${validation === "validated" ? "badge-info badge-outline" : "badge-warning badge-outline"}`}>
+                          {validation === "validated" ? "已验证结算" : "默认保护"}
+                        </span>
+                        {extraEdge > 0 && (
+                          <span className="badge badge-warning badge-outline badge-xs">
+                            +{extraEdge}bps edge
+                          </span>
+                        )}
                       </div>
                       {settlementNote && (
                         <div className="mt-1 text-[11px] opacity-60">结算站点: {settlementNote}</div>

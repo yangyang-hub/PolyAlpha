@@ -60,6 +60,8 @@ export interface SectionMeta {
   target_cities_providers?: Record<string, "noaa" | "open_meteo">;
   target_cities_trade_enabled?: Record<string, boolean>;
   target_cities_settlement_notes?: Record<string, string>;
+  target_cities_validation_status?: Record<string, "validated" | "default_protected">;
+  target_cities_extra_edge_bps?: Record<string, number>;
   target_cities_sigma_multipliers?: Record<string, number>;
 }
 

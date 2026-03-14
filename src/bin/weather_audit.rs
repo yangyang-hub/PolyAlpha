@@ -4,7 +4,9 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-use pa_core::weather::{normalize_weather_location_name, weather_location};
+use pa_core::weather::{
+    normalize_weather_location_name, settlement_validation_status, weather_location,
+};
 use pa_strategy::weather::{
     parse_target_date_server_local, parse_weather_event_title, parse_weather_question,
 };
@@ -26,11 +28,21 @@ struct Args {
     /// Include unsupported weather events in the output
     #[arg(long, default_value_t = false)]
     include_unsupported: bool,
+
+    /// Only include trade-enabled cities
+    #[arg(long, default_value_t = false)]
+    only_trade_enabled: bool,
+
+    /// Only include cities still using the default settlement protection tier
+    #[arg(long, default_value_t = false)]
+    only_unvalidated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct AuditEntry {
     event_title: String,
+    event_slug: Option<String>,
+    event_url: Option<String>,
     question: String,
     location: String,
     normalized_location: Option<String>,
@@ -39,9 +51,10 @@ struct AuditEntry {
     weather_supported: bool,
     trade_enabled: bool,
     provider: Option<String>,
+    validation_status: Option<String>,
 }
 
-async fn fetch_weather_events() -> Result<Vec<(String, String)>> {
+async fn fetch_weather_events() -> Result<Vec<(String, String, Option<String>)>> {
     let client = reqwest::Client::builder()
         .http1_only()
         .timeout(std::time::Duration::from_secs(30))
@@ -49,22 +62,51 @@ async fn fetch_weather_events() -> Result<Vec<(String, String)>> {
         .build()?;
 
     let terms = ["temperature", "rainfall", "snowfall", "wind speed"];
-    let mut seen = BTreeMap::<String, (String, String)>::new();
+    let mut seen = BTreeMap::<String, (String, String, Option<String>)>::new();
 
     for term in terms {
-        let resp: Value = client
-            .get("https://gamma-api.polymarket.com/public-search")
-            .query(&[
-                ("q", term),
-                ("limit_per_type", "100"),
-                ("events_status", "active"),
-            ])
-            .send()
-            .await
-            .with_context(|| format!("search failed for term={term}"))?
-            .json()
-            .await
-            .with_context(|| format!("invalid JSON for term={term}"))?;
+        let mut resp: Option<Value> = None;
+        let mut last_error: Option<anyhow::Error> = None;
+
+        for attempt in 0..3u32 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(2u64.pow(attempt))).await;
+            }
+
+            let result: Result<Value> = async {
+                let response = client
+                    .get("https://gamma-api.polymarket.com/public-search")
+                    .query(&[
+                        ("q", term),
+                        ("limit_per_type", "100"),
+                        ("events_status", "active"),
+                    ])
+                    .send()
+                    .await
+                    .with_context(|| format!("search failed for term={term}"))?;
+
+                response
+                    .json()
+                    .await
+                    .with_context(|| format!("invalid JSON for term={term}"))
+            }
+            .await;
+
+            match result {
+                Ok(value) => {
+                    resp = Some(value);
+                    break;
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        let resp = match resp {
+            Some(value) => value,
+            None => return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("unknown error"))),
+        };
 
         if let Some(events) = resp.get("events").and_then(Value::as_array) {
             for event in events {
@@ -73,6 +115,10 @@ async fn fetch_weather_events() -> Result<Vec<(String, String)>> {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
+                let event_slug = event
+                    .get("slug")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
                 let Some(markets) = event.get("markets").and_then(Value::as_array) else {
                     continue;
                 };
@@ -94,7 +140,8 @@ async fn fetch_weather_events() -> Result<Vec<(String, String)>> {
                     } else {
                         event_title.clone()
                     };
-                    seen.entry(key).or_insert((event_title.clone(), question));
+                    seen.entry(key)
+                        .or_insert((event_title.clone(), question, event_slug.clone()));
                 }
             }
         }
@@ -103,17 +150,29 @@ async fn fetch_weather_events() -> Result<Vec<(String, String)>> {
     Ok(seen.into_values().collect())
 }
 
-fn to_audit_entry(event_title: String, question: String) -> Option<AuditEntry> {
+fn to_audit_entry(
+    event_title: String,
+    question: String,
+    event_slug: Option<String>,
+) -> Option<AuditEntry> {
     if let Some((metric, location)) = parse_weather_event_title(&event_title) {
         let normalized = normalize_weather_location_name(&location).map(ToOwned::to_owned);
         let metadata = normalized.as_deref().and_then(weather_location);
         return Some(AuditEntry {
+            event_url: event_slug
+                .as_ref()
+                .map(|slug| format!("https://polymarket.com/event/{slug}")),
             target_date: parse_target_date_server_local(&event_title).map(|d| d.to_string()),
             weather_supported: normalized.is_some(),
             trade_enabled: metadata.map(|entry| entry.trade_enabled).unwrap_or(false),
             provider: metadata.map(|entry| format!("{:?}", entry.provider)),
+            validation_status: normalized
+                .as_deref()
+                .map(settlement_validation_status)
+                .map(|status| format!("{status:?}")),
             normalized_location: normalized,
             event_title,
+            event_slug,
             question,
             location,
             metric: format!("{metric:?}"),
@@ -124,12 +183,20 @@ fn to_audit_entry(event_title: String, question: String) -> Option<AuditEntry> {
         let normalized = normalize_weather_location_name(&parsed.location).map(ToOwned::to_owned);
         let metadata = normalized.as_deref().and_then(weather_location);
         return Some(AuditEntry {
+            event_url: event_slug
+                .as_ref()
+                .map(|slug| format!("https://polymarket.com/event/{slug}")),
             target_date: parse_target_date_server_local(&question).map(|d| d.to_string()),
             weather_supported: normalized.is_some(),
             trade_enabled: metadata.map(|entry| entry.trade_enabled).unwrap_or(false),
             provider: metadata.map(|entry| format!("{:?}", entry.provider)),
+            validation_status: normalized
+                .as_deref()
+                .map(settlement_validation_status)
+                .map(|status| format!("{status:?}")),
             normalized_location: normalized,
             event_title,
+            event_slug,
             question,
             location: parsed.location,
             metric: format!("{:?}", parsed.metric),
@@ -145,7 +212,9 @@ async fn main() -> Result<()> {
     let raw = fetch_weather_events().await?;
     let mut entries: Vec<_> = raw
         .into_iter()
-        .filter_map(|(event_title, question)| to_audit_entry(event_title, question))
+        .filter_map(|(event_title, question, event_slug)| {
+            to_audit_entry(event_title, question, event_slug)
+        })
         .collect();
 
     entries.sort_by(|a, b| {
@@ -158,15 +227,30 @@ async fn main() -> Result<()> {
     let covered_count = entries.iter().filter(|e| e.weather_supported).count();
     let unsupported_count = entries.iter().filter(|e| !e.weather_supported).count();
 
-    let display_entries: Vec<_> = if args.include_unsupported {
-        entries.into_iter().take(args.limit).collect()
-    } else {
-        entries
-            .into_iter()
-            .filter(|e| e.weather_supported)
-            .take(args.limit)
-            .collect()
-    };
+    let display_entries: Vec<_> = entries
+        .into_iter()
+        .filter(|e| args.include_unsupported || e.weather_supported)
+        .filter(|e| !args.only_trade_enabled || e.trade_enabled)
+        .filter(|e| {
+            !args.only_unvalidated
+                || e.validation_status.as_deref() == Some("DefaultProtected")
+        })
+        .take(args.limit)
+        .collect();
+
+    let filtered_count = display_entries.len();
+    let filtered_supported_count = display_entries
+        .iter()
+        .filter(|entry| entry.weather_supported)
+        .count();
+    let filtered_trade_enabled_count = display_entries
+        .iter()
+        .filter(|entry| entry.trade_enabled)
+        .count();
+    let filtered_unvalidated_count = display_entries
+        .iter()
+        .filter(|entry| entry.validation_status.as_deref() == Some("DefaultProtected"))
+        .count();
 
     if args.output == "json" {
         println!(
@@ -174,6 +258,15 @@ async fn main() -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "covered_count": covered_count,
                 "unsupported_count": unsupported_count,
+                "filters": {
+                    "include_unsupported": args.include_unsupported,
+                    "only_trade_enabled": args.only_trade_enabled,
+                    "only_unvalidated": args.only_unvalidated,
+                },
+                "filtered_count": filtered_count,
+                "filtered_supported_count": filtered_supported_count,
+                "filtered_trade_enabled_count": filtered_trade_enabled_count,
+                "filtered_unvalidated_count": filtered_unvalidated_count,
                 "entries": display_entries,
             }))?
         );
@@ -182,10 +275,14 @@ async fn main() -> Result<()> {
 
     println!("Supported weather events: {covered_count}");
     println!("Unsupported weather events: {unsupported_count}");
+    println!("Filtered entries: {filtered_count}");
+    println!("Filtered supported entries: {filtered_supported_count}");
+    println!("Filtered trade-enabled entries: {filtered_trade_enabled_count}");
+    println!("Filtered unvalidated entries: {filtered_unvalidated_count}");
     println!();
     for (idx, entry) in display_entries.iter().enumerate() {
         println!(
-            "{}. [{}] {} | {} | {} | supported={} | trade_enabled={} | provider={}",
+            "{}. [{}] {} | {} | {} | supported={} | trade_enabled={} | provider={} | validation={}",
             idx + 1,
             entry.metric,
             entry
@@ -197,8 +294,12 @@ async fn main() -> Result<()> {
             entry.weather_supported,
             entry.trade_enabled,
             entry.provider.as_deref().unwrap_or("-"),
+            entry.validation_status.as_deref().unwrap_or("-"),
         );
         println!("   {}", entry.question);
+        if let Some(url) = entry.event_url.as_deref() {
+            println!("   {}", url);
+        }
     }
 
     Ok(())

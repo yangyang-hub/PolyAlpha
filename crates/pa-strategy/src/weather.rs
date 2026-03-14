@@ -19,7 +19,8 @@ use pa_core::types::{
 };
 use pa_core::weather::{
     NOAA_SUPPORTED_LOCATIONS, WeatherProvider, normalize_noaa_location_name,
-    settlement_risk_tier, settlement_sigma_multiplier_for_location, weather_location,
+    settlement_extra_edge_bps_for_location, settlement_risk_tier,
+    settlement_sigma_multiplier_for_location, weather_location,
     weather_timezone,
 };
 
@@ -1723,6 +1724,12 @@ pub struct WeatherAlphaDeps {
 }
 
 impl WeatherAlphaStrategy {
+    fn effective_min_edge_bps(&self, location: &str) -> u32 {
+        self.config
+            .min_edge_bps
+            .saturating_add(settlement_extra_edge_bps_for_location(location))
+    }
+
     fn provider_metric_label(location: &str) -> &'static str {
         match weather_location(location).map(|entry| entry.provider) {
             Some(WeatherProvider::Noaa) => "noaa",
@@ -2321,7 +2328,7 @@ impl WeatherAlphaStrategy {
             if let Some(side) = side {
                 let edge_bps = (side.edge * dec!(10000)).to_u32().unwrap_or(0);
 
-                if edge_bps < self.config.min_edge_bps {
+                if edge_bps < self.effective_min_edge_bps(&location) {
                     continue;
                 }
 
@@ -2607,7 +2614,8 @@ impl WeatherAlphaStrategy {
             use rust_decimal::prelude::ToPrimitive;
             (edge * dec!(10000)).to_u32().unwrap_or(0)
         };
-        if edge_bps < self.config.min_edge_bps {
+        let min_edge_bps = self.effective_min_edge_bps(&parsed.location);
+        if edge_bps < min_edge_bps {
             Self::record_rejection("edge_too_small");
             return None;
         }
@@ -2905,7 +2913,8 @@ impl WeatherAlphaStrategy {
             use rust_decimal::prelude::ToPrimitive;
             (edge * dec!(10000)).to_u32().unwrap_or(0)
         };
-        if edge_bps < self.config.min_edge_bps {
+        let min_edge_bps = self.effective_min_edge_bps(location);
+        if edge_bps < min_edge_bps {
             Self::record_rejection("edge_too_small");
             return None;
         }

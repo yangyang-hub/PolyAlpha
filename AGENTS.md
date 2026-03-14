@@ -83,6 +83,61 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-13
+- Area: `docs/weather-settlement-validation-plan.md`
+- Change: Added a phased implementation plan for promoting remaining trade-enabled weather cities from `DefaultProtected` to `Validated`, including verification criteria, rollout batches, and required metadata/documentation updates.
+- Why: Turn the settlement-consistency expansion work into an executable repo-level plan instead of leaving it as ad-hoc discussion.
+
+### 2026-03-13
+- Area: `docs/weather-noaa-settlement-checklist.md`, `docs/weather-settlement-validation-plan.md`
+- Change: Marked the first batch of remaining NOAA cities as in-progress investigation targets and added candidate airport-station hypotheses for Philadelphia, Austin, San Francisco, Las Vegas, and Minneapolis while keeping them unvalidated pending direct Polymarket rule confirmation.
+- Why: Make the first execution batch actionable without prematurely promoting cities to validated settlement status before primary-source rule pages are confirmed.
+
+### 2026-03-13
+- Area: `docs/weather-noaa-settlement-checklist.md`
+- Change: Added Phoenix to the first-batch in-progress settlement investigation set with `KPHX` recorded as the current candidate airport station hypothesis.
+- Why: Keep the whole first validation batch documented consistently so direct Polymarket rule checks can proceed city-by-city without missing a planned target.
+
+### 2026-03-13
+- Area: `crates/pa-core/src/weather.rs`, `docs/weather-noaa-settlement-checklist.md`, `docs/weather-settlement-validation-plan.md`
+- Change: Promoted Phoenix from `DefaultProtected` to `Validated`, added the confirmed `Phoenix Sky Harbor Intl / KPHX` settlement note, and updated the settlement checklist/plan with a direct Polymarket rules-page sample.
+- Why: A primary-source market rules page confirmed the expected settlement station and whole-degree temperature resolution, so Phoenix no longer needs the default extra settlement-protection edge buffer.
+
+### 2026-03-13
+- Area: `docs/weather-settlement-validation-plan.md`
+- Change: Added an execution note that public Polymarket/Gamma search does not reliably surface historical weather pages for several remaining first-batch cities, so they must stay `DefaultProtected` until a primary-source rules page is captured.
+- Why: Record the current validation blocker explicitly so future settlement-review work does not mistake missing public search coverage for completed verification.
+
+### 2026-03-13
+- Area: `docs/weather-settlement-validation-plan.md`
+- Change: Relaxed the settlement-validation rollout plan to allow evidence-first, out-of-batch promotion whenever a direct Polymarket rules page is available for another city.
+- Why: Public discoverability of historical weather pages is inconsistent, so the validation workflow should prioritize primary-source availability over rigid batch order.
+
+### 2026-03-13
+- Area: `src/bin/weather_audit.rs`
+- Change: Extended the weather audit CLI to include event slugs and direct Polymarket event URLs in both text and JSON output.
+- Why: Public search coverage for historical weather pages is inconsistent, so the audit tool should surface primary-source URLs immediately whenever a target city reappears in active markets.
+
+### 2026-03-14
+- Area: `docs/weather-settlement-validation-plan.md`
+- Change: Added an active-market availability snapshot noting that the current weather audit sample still only exposes already-validated NOAA cities plus audit-only London/Seoul, with no new first-batch default-protected cities surfaced on that pass.
+- Why: Record why no additional settlement promotions were made despite continuing the evidence-first validation workflow.
+
+### 2026-03-14
+- Area: `src/bin/weather_audit.rs`
+- Change: Added `--only-trade-enabled` and `--only-unvalidated` filters plus per-entry validation-status output so the audit CLI can act as a direct queue for settlement-validation follow-up, and added retry logic around Gamma public-search calls.
+- Why: Make the audit workflow both easier to filter and more resilient to the intermittent EOF errors returned by the Gamma endpoint.
+
+### 2026-03-14
+- Area: `src/bin/weather_audit.rs`
+- Change: Added filtered result counters to the audit CLI output and JSON payload so filtered runs report both full-scan totals and the actual size of the filtered follow-up queue.
+- Why: Prevent confusion where the full supported-city counts remained nonzero even when the filtered settlement-validation candidate set was empty.
+
+### 2026-03-14
+- Area: `src/bin/weather_audit.rs`
+- Change: Added `--only-trade-enabled` and `--only-unvalidated` filters plus per-entry validation-status output so the audit CLI can act as a direct queue for settlement-validation follow-up.
+- Why: Make it trivial to surface only the remaining default-protected cities when they reappear in active weather markets instead of manually filtering the full audit output.
+
+### 2026-03-13
 - Area: `src/app/bootstrap.rs`, `src/app/market_runtime.rs`, `src/main.rs`, `crates/pa-monitor/src/api.rs`, `crates/pa-monitor/Cargo.toml`, `crates/pa-storage/src/lib.rs`
 - Change: Removed the disabled config-store/config watch plumbing from bootstrap, runtime wiring, API state, and storage exports, inlined config section extraction into `pa-monitor`, and dropped the now-unused `pa-storage` dependency from `pa-monitor`.
 - Why: Finish the transition to read-only `TOML + environment variable` configuration and eliminate dead persistence scaffolding that could mislead future maintenance.
@@ -96,6 +151,16 @@ This file records repository-specific working agreements, high-level project con
 - Area: `src/app/types.rs`, `src/app/helpers.rs`, `src/app/liquidity_rewards.rs`, `Cargo.toml`
 - Change: Inlined LR-only type aliases back into the liquidity-rewards module and removed unused root-crate dependencies on `config` and `sqlx`.
 - Why: Reduce cross-module indirection in `src/app` and shrink the dependency surface of the main binary crate without changing runtime behavior.
+
+### 2026-03-13
+- Area: `crates/pa-core/src/weather.rs`, `crates/pa-monitor/src/api.rs`, `crates/pa-strategy/src/weather.rs`
+- Change: Added shared settlement validation status metadata and per-city extra edge buffers, exposed them through weather config meta, and made weather entry thresholds dynamically stricter for default-protected cities while keeping validated cities on the base threshold.
+- Why: Apply a consistent settlement-mismatch protection layer to all weather cities without pretending every city has the same level of settlement validation.
+
+### 2026-03-13
+- Area: `frontend/src/api.ts`, `frontend/src/components/ConfigSection.tsx`
+- Change: Exposed settlement validation status and extra edge buffers in the weather configuration UI so each city now shows whether it is validated or default-protected and how much extra edge is required.
+- Why: Make the new city-level settlement protection policy visible to operators instead of hiding it only in backend metadata and strategy logic.
 
 ### 2026-03-13
 - Area: `src/bin/weather_audit.rs`

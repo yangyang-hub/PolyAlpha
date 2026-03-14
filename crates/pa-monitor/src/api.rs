@@ -237,6 +237,22 @@ async fn get_section_meta(Path(section): Path<String>) -> (axum::http::StatusCod
                     Some((*city, note))
                 })
                 .collect();
+            let city_validation_status: std::collections::HashMap<&str, &str> = all_weather_cities
+                .iter()
+                .map(|city| {
+                    let status = match pa_core::weather::settlement_validation_status(city) {
+                        pa_core::weather::SettlementValidationStatus::Validated => "validated",
+                        pa_core::weather::SettlementValidationStatus::DefaultProtected => {
+                            "default_protected"
+                        }
+                    };
+                    (*city, status)
+                })
+                .collect();
+            let city_extra_edge_bps: std::collections::HashMap<&str, u32> = all_weather_cities
+                .iter()
+                .map(|city| (*city, pa_core::weather::settlement_extra_edge_bps_for_location(city)))
+                .collect();
 
             (
                 axum::http::StatusCode::OK,
@@ -248,6 +264,8 @@ async fn get_section_meta(Path(section): Path<String>) -> (axum::http::StatusCod
                     "target_cities_providers": city_providers,
                     "target_cities_trade_enabled": city_trade_enabled,
                     "target_cities_settlement_notes": city_settlement_notes,
+                    "target_cities_validation_status": city_validation_status,
+                    "target_cities_extra_edge_bps": city_extra_edge_bps,
                     "target_cities_sigma_multipliers": {
                         "low": pa_core::weather::settlement_sigma_multiplier(pa_core::weather::SettlementRiskTier::Low),
                         "medium": pa_core::weather::settlement_sigma_multiplier(pa_core::weather::SettlementRiskTier::Medium),

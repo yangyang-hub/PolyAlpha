@@ -11,6 +11,12 @@ pub enum SettlementRiskTier {
     High,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettlementValidationStatus {
+    Validated,
+    DefaultProtected,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WeatherLocation {
     pub canonical_name: &'static str,
@@ -19,6 +25,7 @@ pub struct WeatherLocation {
     pub lon: f64,
     pub timezone: &'static str,
     pub settlement_risk_tier: SettlementRiskTier,
+    pub settlement_validation_status: SettlementValidationStatus,
     pub trade_enabled: bool,
     pub settlement_note: Option<&'static str>,
 }
@@ -31,6 +38,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -74.0060,
         timezone: "America/New_York",
         settlement_risk_tier: SettlementRiskTier::Medium,
+        settlement_validation_status: SettlementValidationStatus::Validated,
         trade_enabled: true,
         settlement_note: Some("LaGuardia Airport / KLGA"),
     },
@@ -41,6 +49,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -87.6298,
         timezone: "America/Chicago",
         settlement_risk_tier: SettlementRiskTier::Medium,
+        settlement_validation_status: SettlementValidationStatus::Validated,
         trade_enabled: true,
         settlement_note: Some("Chicago O'Hare / KORD"),
     },
@@ -51,6 +60,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -118.2437,
         timezone: "America/Los_Angeles",
         settlement_risk_tier: SettlementRiskTier::High,
+        settlement_validation_status: SettlementValidationStatus::DefaultProtected,
         trade_enabled: true,
         settlement_note: None,
     },
@@ -61,6 +71,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -95.3698,
         timezone: "America/Chicago",
         settlement_risk_tier: SettlementRiskTier::High,
+        settlement_validation_status: SettlementValidationStatus::DefaultProtected,
         trade_enabled: true,
         settlement_note: None,
     },
@@ -70,9 +81,10 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lat: 33.4484,
         lon: -112.0740,
         timezone: "America/Phoenix",
-        settlement_risk_tier: SettlementRiskTier::High,
+        settlement_risk_tier: SettlementRiskTier::Medium,
+        settlement_validation_status: SettlementValidationStatus::Validated,
         trade_enabled: true,
-        settlement_note: None,
+        settlement_note: Some("Phoenix Sky Harbor Intl / KPHX"),
     },
     WeatherLocation {
         canonical_name: "Miami",
@@ -81,6 +93,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -80.1918,
         timezone: "America/New_York",
         settlement_risk_tier: SettlementRiskTier::Medium,
+        settlement_validation_status: SettlementValidationStatus::Validated,
         trade_enabled: true,
         settlement_note: Some("Miami Intl Airport / KMIA"),
     },
@@ -91,6 +104,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -75.1652,
         timezone: "America/New_York",
         settlement_risk_tier: SettlementRiskTier::High,
+        settlement_validation_status: SettlementValidationStatus::DefaultProtected,
         trade_enabled: true,
         settlement_note: None,
     },
@@ -101,6 +115,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -98.4936,
         timezone: "America/Chicago",
         settlement_risk_tier: SettlementRiskTier::High,
+        settlement_validation_status: SettlementValidationStatus::DefaultProtected,
         trade_enabled: true,
         settlement_note: None,
     },
@@ -111,6 +126,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -117.1611,
         timezone: "America/Los_Angeles",
         settlement_risk_tier: SettlementRiskTier::High,
+        settlement_validation_status: SettlementValidationStatus::DefaultProtected,
         trade_enabled: true,
         settlement_note: None,
     },
@@ -121,6 +137,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -96.7970,
         timezone: "America/Chicago",
         settlement_risk_tier: SettlementRiskTier::Medium,
+        settlement_validation_status: SettlementValidationStatus::Validated,
         trade_enabled: true,
         settlement_note: Some("Dallas Love Field / KDAL"),
     },
@@ -131,6 +148,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -97.7431,
         timezone: "America/Chicago",
         settlement_risk_tier: SettlementRiskTier::High,
+        settlement_validation_status: SettlementValidationStatus::DefaultProtected,
         trade_enabled: true,
         settlement_note: None,
     },
@@ -141,6 +159,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -122.4194,
         timezone: "America/Los_Angeles",
         settlement_risk_tier: SettlementRiskTier::High,
+        settlement_validation_status: SettlementValidationStatus::DefaultProtected,
         trade_enabled: true,
         settlement_note: None,
     },
@@ -151,6 +170,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -122.3321,
         timezone: "America/Los_Angeles",
         settlement_risk_tier: SettlementRiskTier::Medium,
+        settlement_validation_status: SettlementValidationStatus::Validated,
         trade_enabled: true,
         settlement_note: Some("Seattle-Tacoma Intl / KSEA"),
     },
@@ -161,6 +181,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -104.9903,
         timezone: "America/Denver",
         settlement_risk_tier: SettlementRiskTier::Medium,
+        settlement_validation_status: SettlementValidationStatus::Validated,
         trade_enabled: true,
         settlement_note: Some("Buckley Space Force Base / KBKF"),
     },
@@ -171,6 +192,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -86.7816,
         timezone: "America/Chicago",
         settlement_risk_tier: SettlementRiskTier::High,
+        settlement_validation_status: SettlementValidationStatus::DefaultProtected,
         trade_enabled: true,
         settlement_note: None,
     },
@@ -181,6 +203,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -122.6784,
         timezone: "America/Los_Angeles",
         settlement_risk_tier: SettlementRiskTier::High,
+        settlement_validation_status: SettlementValidationStatus::DefaultProtected,
         trade_enabled: true,
         settlement_note: None,
     },
@@ -191,6 +214,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -115.1398,
         timezone: "America/Los_Angeles",
         settlement_risk_tier: SettlementRiskTier::High,
+        settlement_validation_status: SettlementValidationStatus::DefaultProtected,
         trade_enabled: true,
         settlement_note: None,
     },
@@ -201,6 +225,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -84.3880,
         timezone: "America/New_York",
         settlement_risk_tier: SettlementRiskTier::Medium,
+        settlement_validation_status: SettlementValidationStatus::Validated,
         trade_enabled: true,
         settlement_note: Some("Hartsfield-Jackson / KATL"),
     },
@@ -211,6 +236,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -93.2650,
         timezone: "America/Chicago",
         settlement_risk_tier: SettlementRiskTier::High,
+        settlement_validation_status: SettlementValidationStatus::DefaultProtected,
         trade_enabled: true,
         settlement_note: None,
     },
@@ -221,6 +247,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -82.4572,
         timezone: "America/New_York",
         settlement_risk_tier: SettlementRiskTier::High,
+        settlement_validation_status: SettlementValidationStatus::DefaultProtected,
         trade_enabled: true,
         settlement_note: None,
     },
@@ -231,6 +258,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -90.0715,
         timezone: "America/Chicago",
         settlement_risk_tier: SettlementRiskTier::High,
+        settlement_validation_status: SettlementValidationStatus::DefaultProtected,
         trade_enabled: true,
         settlement_note: None,
     },
@@ -241,6 +269,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -81.6944,
         timezone: "America/New_York",
         settlement_risk_tier: SettlementRiskTier::High,
+        settlement_validation_status: SettlementValidationStatus::DefaultProtected,
         trade_enabled: true,
         settlement_note: None,
     },
@@ -251,6 +280,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: -0.1276,
         timezone: "Europe/London",
         settlement_risk_tier: SettlementRiskTier::High,
+        settlement_validation_status: SettlementValidationStatus::Validated,
         trade_enabled: false,
         settlement_note: Some("London City Airport / EGLC"),
     },
@@ -261,6 +291,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         lon: 126.9780,
         timezone: "Asia/Seoul",
         settlement_risk_tier: SettlementRiskTier::High,
+        settlement_validation_status: SettlementValidationStatus::Validated,
         trade_enabled: false,
         settlement_note: Some("Incheon Intl Airport / RKSI"),
     },
@@ -404,6 +435,23 @@ pub fn settlement_sigma_multiplier_for_location(location: &str) -> f64 {
     settlement_sigma_multiplier(settlement_risk_tier(location))
 }
 
+pub fn settlement_validation_status(location: &str) -> SettlementValidationStatus {
+    weather_location(location)
+        .map(|entry| entry.settlement_validation_status)
+        .unwrap_or(SettlementValidationStatus::DefaultProtected)
+}
+
+pub fn settlement_extra_edge_bps(status: SettlementValidationStatus) -> u32 {
+    match status {
+        SettlementValidationStatus::Validated => 0,
+        SettlementValidationStatus::DefaultProtected => 150,
+    }
+}
+
+pub fn settlement_extra_edge_bps_for_location(location: &str) -> u32 {
+    settlement_extra_edge_bps(settlement_validation_status(location))
+}
+
 pub fn weather_timezone(location: &str) -> &'static str {
     weather_location(location)
         .map(|entry| entry.timezone)
@@ -522,5 +570,27 @@ mod tests {
         assert_eq!(settlement_sigma_multiplier_for_location("NYC"), 1.15);
         assert_eq!(settlement_sigma_multiplier_for_location("NOLA"), 1.35);
         assert_eq!(settlement_sigma_multiplier_for_location("London"), 1.35);
+    }
+
+    #[test]
+    fn test_settlement_validation_status_distinguishes_validated_from_default_protected() {
+        assert_eq!(
+            settlement_validation_status("New York"),
+            SettlementValidationStatus::Validated
+        );
+        assert_eq!(
+            settlement_validation_status("Seattle"),
+            SettlementValidationStatus::Validated
+        );
+        assert_eq!(
+            settlement_validation_status("San Francisco"),
+            SettlementValidationStatus::DefaultProtected
+        );
+    }
+
+    #[test]
+    fn test_settlement_extra_edge_bps_for_location_uses_aliases() {
+        assert_eq!(settlement_extra_edge_bps_for_location("NYC"), 0);
+        assert_eq!(settlement_extra_edge_bps_for_location("SF"), 150);
     }
 }
