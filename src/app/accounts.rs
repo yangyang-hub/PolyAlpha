@@ -207,7 +207,9 @@ pub async fn build_account_contexts(
                     missing = missing_condition_ids.len(),
                     "Fetching market data for held positions not in discovery"
                 );
-                let position_markets = market_data.fetch_position_markets(&missing_condition_ids).await;
+                let position_markets = market_data
+                    .fetch_position_markets(&missing_condition_ids)
+                    .await;
                 if !position_markets.is_empty() {
                     let seed_cache = market_data.cache();
                     let mut seeded = 0;

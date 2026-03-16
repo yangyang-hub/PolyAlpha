@@ -47,6 +47,8 @@ pub struct PositionApiEntry {
     pub avg_cost: Decimal,
     pub cost_basis: Decimal,
     pub strategy: Option<String>,
+    pub asset: Option<String>,
+    pub direction: Option<String>,
     pub condition_id: Option<String>,
     pub question: Option<String>,
     pub outcome: Option<String>,
@@ -74,6 +76,8 @@ pub struct ApiState {
     pub positions: Arc<tokio::sync::RwLock<Vec<PositionApiEntry>>>,
     /// Timestamp of the last positions snapshot refresh.
     pub positions_updated_at: Arc<tokio::sync::RwLock<Option<DateTime<Utc>>>>,
+    /// Latest summed USDC balance across active accounts.
+    pub wallet_balance: Arc<tokio::sync::RwLock<Decimal>>,
     /// True once startup has completed enough for the bot to be considered ready.
     pub startup_ready: Arc<AtomicBool>,
 }
@@ -149,7 +153,9 @@ async fn readiness_handler(
     State(state): State<Arc<ApiState>>,
 ) -> (axum::http::StatusCode, Json<Value>) {
     let all_ok = state.health_checks.iter().all(|(_, check)| check());
-    let startup_ready = state.startup_ready.load(std::sync::atomic::Ordering::Relaxed);
+    let startup_ready = state
+        .startup_ready
+        .load(std::sync::atomic::Ordering::Relaxed);
     if all_ok && startup_ready {
         (axum::http::StatusCode::OK, Json(json!({"ready": true})))
     } else {
@@ -253,7 +259,12 @@ async fn get_section_meta(Path(section): Path<String>) -> (axum::http::StatusCod
                 .collect();
             let city_extra_edge_bps: std::collections::HashMap<&str, u32> = all_weather_cities
                 .iter()
-                .map(|city| (*city, pa_core::weather::settlement_extra_edge_bps_for_location(city)))
+                .map(|city| {
+                    (
+                        *city,
+                        pa_core::weather::settlement_extra_edge_bps_for_location(city),
+                    )
+                })
                 .collect();
 
             (
@@ -300,7 +311,10 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         .filter(|account| account.private_key_present)
         .count();
     let positions_updated_at = *state.positions_updated_at.read().await;
-    let startup_ready = state.startup_ready.load(std::sync::atomic::Ordering::Relaxed);
+    let wallet_balance = *state.wallet_balance.read().await;
+    let startup_ready = state
+        .startup_ready
+        .load(std::sync::atomic::Ordering::Relaxed);
     let health_ready = state.health_checks.iter().all(|(_, check)| check());
 
     Json(json!({
@@ -314,6 +328,7 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         "accounts_ready": ready_accounts,
         "trading_ready": ready_accounts > 0 && startup_ready && health_ready,
         "startup_ready": startup_ready,
+        "wallet_balance": wallet_balance,
         "positions_snapshot_updated_at": positions_updated_at.map(|ts| ts.to_rfc3339()),
         "accounts": account_status,
     }))

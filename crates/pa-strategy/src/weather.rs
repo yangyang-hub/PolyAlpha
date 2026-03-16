@@ -18,8 +18,9 @@ use pa_core::types::{
     ExecutionPlan, MarketInfo, NegRiskEvent, OrderBook, StrategyType, TradeSide, TradingOpportunity,
 };
 use pa_core::weather::{
-    NOAA_SUPPORTED_LOCATIONS, WeatherProvider, normalize_noaa_location_name,
-    settlement_extra_edge_bps_for_location, settlement_risk_tier,
+    NOAA_SUPPORTED_LOCATIONS, SettlementValidationStatus, WeatherProvider,
+    normalize_noaa_location_name, settlement_extra_edge_bps_for_location,
+    settlement_risk_tier, settlement_validation_status,
     settlement_sigma_multiplier_for_location, weather_kma_grid, weather_kma_station_id,
     weather_location, weather_observation_site_hint, weather_timezone,
 };
@@ -1078,7 +1079,9 @@ impl OpenMeteoClient {
         };
 
         if values.is_empty() || values.len() != resp.daily.time.len() {
-            return Err(anyhow::anyhow!("Open-Meteo response missing expected daily values"));
+            return Err(anyhow::anyhow!(
+                "Open-Meteo response missing expected daily values"
+            ));
         }
 
         let target_value = target_date.and_then(|td| {
@@ -1173,11 +1176,11 @@ impl OpenMeteoClient {
                     .ok_or_else(|| anyhow::anyhow!("Missing historical min temperature"))?;
                 Ok((max + min) / 2.0)
             }
-            WeatherMetric::Rainfall | WeatherMetric::Snowfall | WeatherMetric::WindSpeed => Err(
-                anyhow::anyhow!(
+            WeatherMetric::Rainfall | WeatherMetric::Snowfall | WeatherMetric::WindSpeed => {
+                Err(anyhow::anyhow!(
                     "Open-Meteo historical path currently supports temperature metrics only"
-                ),
-            ),
+                ))
+            }
         }
     }
 
@@ -1362,7 +1365,9 @@ impl MetOfficeClient {
             .properties
             .time_series;
         if daily.is_empty() {
-            return Err(anyhow::anyhow!("No daily Met Office forecast data returned"));
+            return Err(anyhow::anyhow!(
+                "No daily Met Office forecast data returned"
+            ));
         }
 
         let mut dates = Vec::new();
@@ -1405,7 +1410,8 @@ impl MetOfficeClient {
 
         let target_value = target_date.and_then(|td| {
             let date_str = td.format("%Y-%m-%d").to_string();
-            dates.iter()
+            dates
+                .iter()
                 .position(|date| date == &date_str)
                 .map(|idx| values[idx])
         });
@@ -1440,7 +1446,9 @@ impl MetOfficeClient {
             ));
         }
 
-        let tz: Tz = weather_timezone(location).parse().unwrap_or(chrono_tz::Europe::London);
+        let tz: Tz = weather_timezone(location)
+            .parse()
+            .unwrap_or(chrono_tz::Europe::London);
         let geohash = weather_observation_site_hint(location).ok_or_else(|| {
             anyhow::anyhow!(
                 "Met Office observation site hint missing for location {}",
@@ -1499,11 +1507,11 @@ impl MetOfficeClient {
             WeatherMetric::TemperatureAvg => {
                 Ok(best_daily_values.iter().sum::<f64>() / best_daily_values.len() as f64)
             }
-            WeatherMetric::Rainfall | WeatherMetric::Snowfall | WeatherMetric::WindSpeed => Err(
-                anyhow::anyhow!(
+            WeatherMetric::Rainfall | WeatherMetric::Snowfall | WeatherMetric::WindSpeed => {
+                Err(anyhow::anyhow!(
                     "Met Office historical actual currently supports temperature metrics only"
-                ),
-            ),
+                ))
+            }
         }
     }
 
@@ -1534,7 +1542,10 @@ impl KmaClient {
     }
 
     pub fn supports_location(location: &str) -> bool {
-        matches!(weather_location(location).map(|entry| entry.provider), Some(WeatherProvider::Kma))
+        matches!(
+            weather_location(location).map(|entry| entry.provider),
+            Some(WeatherProvider::Kma)
+        )
     }
 
     fn ensure_key(&self) -> anyhow::Result<&str> {
@@ -1647,7 +1658,9 @@ impl KmaClient {
         let api_key = self.ensure_key()?.to_string();
         let (nx, ny) = weather_kma_grid(location)
             .ok_or_else(|| anyhow::anyhow!("Missing KMA grid metadata for {}", location))?;
-        let tz: Tz = weather_timezone(location).parse().unwrap_or(chrono_tz::Asia::Seoul);
+        let tz: Tz = weather_timezone(location)
+            .parse()
+            .unwrap_or(chrono_tz::Asia::Seoul);
         let (base_date, base_time) = Self::latest_base_datetime(Utc::now().with_timezone(&tz));
         let resp: KmaForecastResponse = with_retry(2, || {
             let http = self.http.clone();
@@ -1686,10 +1699,7 @@ impl KmaClient {
                 let tmx = Self::collect_daily_series(&items, "TMX");
                 if tmx.is_empty() {
                     Self::collect_daily_tmp_extrema(&items, |values| {
-                        values
-                            .iter()
-                            .copied()
-                            .fold(f64::NEG_INFINITY, f64::max)
+                        values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
                     })
                 } else {
                     tmx
@@ -1699,10 +1709,7 @@ impl KmaClient {
                 let tmn = Self::collect_daily_series(&items, "TMN");
                 if tmn.is_empty() {
                     Self::collect_daily_tmp_extrema(&items, |values| {
-                        values
-                            .iter()
-                            .copied()
-                            .fold(f64::INFINITY, f64::min)
+                        values.iter().copied().fold(f64::INFINITY, f64::min)
                     })
                 } else {
                     tmn
@@ -1729,13 +1736,16 @@ impl KmaClient {
         };
 
         if daily.is_empty() {
-            return Err(anyhow::anyhow!("KMA response missing expected daily values"));
+            return Err(anyhow::anyhow!(
+                "KMA response missing expected daily values"
+            ));
         }
 
         let dates: Vec<String> = daily.iter().map(|(date, _)| date.to_string()).collect();
         let values: Vec<f64> = daily.iter().map(|(_, value)| *value).collect();
         let target_value = target_date.and_then(|td| {
-            daily.iter()
+            daily
+                .iter()
                 .find(|(date, _)| *date == td)
                 .map(|(_, value)| *value)
         });
@@ -1810,7 +1820,9 @@ impl KmaClient {
             .into_iter()
             .flat_map(|item| item.stndays.info.into_iter())
             .find(|row| row.day_of_month.trim_start_matches('0') == target_day)
-            .ok_or_else(|| anyhow::anyhow!("KMA historical actual missing target date {}", target_date))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("KMA historical actual missing target date {}", target_date)
+            })?;
 
         let parse_value = |value: Option<String>, label: &str| -> anyhow::Result<f64> {
             let raw =
@@ -1823,11 +1835,11 @@ impl KmaClient {
             WeatherMetric::TemperatureMax => parse_value(info.ta_max, "ta_max"),
             WeatherMetric::TemperatureMin => parse_value(info.ta_min, "ta_min"),
             WeatherMetric::TemperatureAvg => parse_value(info.ta_avg, "ta_avg"),
-            WeatherMetric::Rainfall | WeatherMetric::Snowfall | WeatherMetric::WindSpeed => Err(
-                anyhow::anyhow!(
+            WeatherMetric::Rainfall | WeatherMetric::Snowfall | WeatherMetric::WindSpeed => {
+                Err(anyhow::anyhow!(
                     "KMA historical actual currently supports temperature metrics only"
-                ),
-            ),
+                ))
+            }
         }
     }
 
@@ -2422,10 +2434,86 @@ pub struct WeatherAlphaDeps {
 }
 
 impl WeatherAlphaStrategy {
+    fn uses_conservative_city_overlay(location: &str) -> bool {
+        location.eq_ignore_ascii_case("Chicago")
+            || matches!(
+                settlement_validation_status(location),
+                SettlementValidationStatus::DefaultProtected
+            )
+    }
+
     fn effective_min_edge_bps(&self, location: &str) -> u32 {
         self.config
             .min_edge_bps
             .saturating_add(settlement_extra_edge_bps_for_location(location))
+            .saturating_add(if Self::uses_conservative_city_overlay(location) {
+                100
+            } else {
+                0
+            })
+    }
+
+    fn short_dated_entry_edge_overlay_bps(hours_until_resolution: Option<i64>) -> u32 {
+        match hours_until_resolution {
+            Some(hours) if hours <= 12 => 200,
+            Some(hours) if hours <= 24 => 100,
+            _ => 0,
+        }
+    }
+
+    fn hours_until_resolution(end_date: Option<chrono::DateTime<Utc>>) -> Option<i64> {
+        end_date.map(|end| (end - Utc::now()).num_hours())
+    }
+
+    fn effective_min_edge_bps_for_resolution(
+        &self,
+        location: &str,
+        hours_until_resolution: Option<i64>,
+    ) -> u32 {
+        self.effective_min_edge_bps(location)
+            .saturating_add(Self::short_dated_entry_edge_overlay_bps(hours_until_resolution))
+    }
+
+    fn effective_max_entry_price(&self, location: &str) -> Decimal {
+        if Self::uses_conservative_city_overlay(location) {
+            self.config.max_entry_price.min(dec!(0.30))
+        } else {
+            self.config.max_entry_price
+        }
+    }
+
+    fn effective_max_entry_price_for_resolution(
+        &self,
+        location: &str,
+        hours_until_resolution: Option<i64>,
+    ) -> Decimal {
+        let base = self.effective_max_entry_price(location);
+        match hours_until_resolution {
+            Some(hours) if hours <= 12 => base.min(dec!(0.25)),
+            Some(hours) if hours <= 24 => base.min(dec!(0.28)),
+            _ => base,
+        }
+    }
+
+    fn effective_max_position_usdc(&self, location: &str) -> Decimal {
+        if Self::uses_conservative_city_overlay(location) {
+            self.config.max_position_usdc * dec!(0.75)
+        } else {
+            self.config.max_position_usdc
+        }
+    }
+
+    fn effective_max_position_usdc_for_resolution(
+        &self,
+        location: &str,
+        hours_until_resolution: Option<i64>,
+    ) -> Decimal {
+        let base = self.effective_max_position_usdc(location);
+        match hours_until_resolution {
+            Some(hours) if hours <= 12 => base * dec!(0.75),
+            Some(hours) if hours <= 24 => base * dec!(0.85),
+            _ => base,
+        }
     }
 
     fn provider_metric_label(location: &str) -> &'static str {
@@ -2512,6 +2600,25 @@ impl WeatherAlphaStrategy {
         hasher.finish()
     }
 
+    fn weather_event_key(
+        location: &str,
+        metric: WeatherMetric,
+        target_date: Option<NaiveDate>,
+    ) -> String {
+        let metric_key = match metric {
+            WeatherMetric::TemperatureMax => "temp_max",
+            WeatherMetric::TemperatureMin => "temp_min",
+            WeatherMetric::TemperatureAvg => "temp_avg",
+            WeatherMetric::Rainfall => "rainfall",
+            WeatherMetric::Snowfall => "snowfall",
+            WeatherMetric::WindSpeed => "wind_speed",
+        };
+        let date_key = target_date
+            .map(|date| date.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        format!("{}|{}|{}", location.to_lowercase(), metric_key, date_key)
+    }
+
     /// Check if a location is NOAA-supported and in the target cities list.
     ///
     /// When target_cities is empty, all trade-enabled weather cities pass.
@@ -2583,7 +2690,10 @@ impl WeatherAlphaStrategy {
                     .forecast(location, metric, target_date, precipitation_unit)
                     .await
             }
-            None => Err(anyhow::anyhow!("Unsupported weather location: {}", location)),
+            None => Err(anyhow::anyhow!(
+                "Unsupported weather location: {}",
+                location
+            )),
         }
     }
 
@@ -2624,13 +2734,18 @@ impl WeatherAlphaStrategy {
                     .fetch_historical(location, metric, target_date, precipitation_unit)
                     .await
             }
-            None => Err(anyhow::anyhow!("Unsupported weather location: {}", location)),
+            None => Err(anyhow::anyhow!(
+                "Unsupported weather location: {}",
+                location
+            )),
         }
     }
 
     fn evaluate_binary_side(
         &self,
         question: &str,
+        location: &str,
+        hours_until_resolution: Option<i64>,
         side_name: &'static str,
         token_id: U256,
         ask_price: Option<Decimal>,
@@ -2674,7 +2789,8 @@ impl WeatherAlphaStrategy {
             return None;
         }
 
-        if ask_price > self.config.max_entry_price {
+        if ask_price > self.effective_max_entry_price_for_resolution(location, hours_until_resolution)
+        {
             Self::record_rejection("price_above_max_entry");
             return None;
         }
@@ -2695,6 +2811,8 @@ impl WeatherAlphaStrategy {
     fn evaluate_neg_risk_side(
         &self,
         question: &str,
+        location: &str,
+        hours_until_resolution: Option<i64>,
         side_name: &'static str,
         token_id: U256,
         ask_price: Option<Decimal>,
@@ -2703,6 +2821,8 @@ impl WeatherAlphaStrategy {
     ) -> Option<SideCandidate> {
         self.evaluate_binary_side(
             question,
+            location,
+            hours_until_resolution,
             side_name,
             token_id,
             ask_price,
@@ -2822,6 +2942,8 @@ impl WeatherAlphaStrategy {
             if should_trigger_yes && yes_ask < dec!(0.90) {
                 let side = self.evaluate_binary_side(
                     &market.question,
+                    &parsed.location,
+                    None,
                     "yes",
                     yes_token.token_id,
                     Some(yes_ask),
@@ -2829,7 +2951,7 @@ impl WeatherAlphaStrategy {
                     Decimal::ONE,
                 );
                 if let Some(side) = side {
-                    let max_usdc = self.config.max_position_usdc;
+                    let max_usdc = self.effective_max_position_usdc(&parsed.location);
                     let available = (self.get_available_capital)();
                     let existing_cost = (self.get_position)(side.token_id) * side.ask_price;
                     let remaining = (max_usdc - existing_cost).max(Decimal::ZERO);
@@ -2874,6 +2996,8 @@ impl WeatherAlphaStrategy {
             if should_trigger_no && no_ask < dec!(0.90) {
                 let side = self.evaluate_binary_side(
                     &market.question,
+                    &parsed.location,
+                    None,
                     "no",
                     no_token.token_id,
                     Some(no_ask),
@@ -2881,7 +3005,7 @@ impl WeatherAlphaStrategy {
                     Decimal::ONE,
                 );
                 if let Some(side) = side {
-                    let max_usdc = self.config.max_position_usdc;
+                    let max_usdc = self.effective_max_position_usdc(&parsed.location);
                     let available = (self.get_available_capital)();
                     let existing_cost = (self.get_position)(side.token_id) * side.ask_price;
                     let remaining = (max_usdc - existing_cost).max(Decimal::ZERO);
@@ -2942,10 +3066,11 @@ impl WeatherAlphaStrategy {
         let mut opportunities = Vec::new();
 
         // Parse target date
-        let target_date = match parse_target_date_with_today(&event.title, market_local_today(location)) {
-            Some(d) => d,
-            None => return opportunities, // Skip if no clear date
-        };
+        let target_date =
+            match parse_target_date_with_today(&event.title, market_local_today(location)) {
+                Some(d) => d,
+                None => return opportunities, // Skip if no clear date
+            };
 
         // Only use surround strategy when event is more than 24 hours away
         let today = market_local_today(location);
@@ -2994,10 +3119,10 @@ impl WeatherAlphaStrategy {
             let sigma = sigma_with_settlement_risk(
                 location,
                 sigma_for_metric(
-                &self.config.forecast_error,
-                metric,
-                Some((target_date - today).num_days()),
-                self.config.dynamic_sigma,
+                    &self.config.forecast_error,
+                    metric,
+                    Some((target_date - today).num_days()),
+                    self.config.dynamic_sigma,
                 ),
             );
             let prob_f64 = model_range_probability(&forecast, &range, sigma, metric);
@@ -3043,6 +3168,8 @@ impl WeatherAlphaStrategy {
             };
             let side = self.evaluate_neg_risk_side(
                 &market.question,
+                location,
+                None,
                 "yes",
                 market.tokens[0].token_id,
                 yes_book.best_ask().map(|l| l.price),
@@ -3065,14 +3192,13 @@ impl WeatherAlphaStrategy {
                     continue;
                 }
 
-                let existing_cost =
-                    (self.get_position)(market.tokens[0].token_id) * side.ask_price;
+                let existing_cost = (self.get_position)(market.tokens[0].token_id) * side.ask_price;
                 let remaining = (surround_size_per_bin - existing_cost).max(Decimal::ZERO);
-                let final_size =
-                    size.min(Self::shares_from_usdc_budget(remaining, side.ask_price));
+                let final_size = size.min(Self::shares_from_usdc_budget(remaining, side.ask_price));
 
                 if final_size <= Decimal::ZERO
-                    || (side.ask_price > Decimal::ZERO && final_size * side.ask_price < Decimal::ONE)
+                    || (side.ask_price > Decimal::ZERO
+                        && final_size * side.ask_price < Decimal::ONE)
                 {
                     continue;
                 }
@@ -3212,10 +3338,8 @@ impl WeatherAlphaStrategy {
         parsed: &WeatherQuestion,
     ) -> Option<TradingOpportunity> {
         // Parse target date and precipitation unit from question
-        let target_date = parse_target_date_with_today(
-            &market.question,
-            market_local_today(&parsed.location),
-        );
+        let target_date =
+            parse_target_date_with_today(&market.question, market_local_today(&parsed.location));
         let precipitation_unit = if matches!(
             parsed.metric,
             WeatherMetric::Rainfall | WeatherMetric::Snowfall
@@ -3290,6 +3414,8 @@ impl WeatherAlphaStrategy {
 
         let yes_candidate = self.evaluate_binary_side(
             &market.question,
+            &parsed.location,
+            Self::hours_until_resolution(market.end_date),
             "yes",
             yes_token.token_id,
             yes_book
@@ -3302,6 +3428,8 @@ impl WeatherAlphaStrategy {
         );
         let no_candidate = self.evaluate_binary_side(
             &market.question,
+            &parsed.location,
+            Self::hours_until_resolution(market.end_date),
             "no",
             no_token.token_id,
             no_book
@@ -3339,14 +3467,20 @@ impl WeatherAlphaStrategy {
             use rust_decimal::prelude::ToPrimitive;
             (edge * dec!(10000)).to_u32().unwrap_or(0)
         };
-        let min_edge_bps = self.effective_min_edge_bps(&parsed.location);
+        let min_edge_bps = self.effective_min_edge_bps_for_resolution(
+            &parsed.location,
+            Self::hours_until_resolution(market.end_date),
+        );
         if edge_bps < min_edge_bps {
             Self::record_rejection("edge_too_small");
             return None;
         }
 
         // Fixed position sizing: max_position_usdc per trade, position-aware
-        let max_usdc = self.config.max_position_usdc;
+        let max_usdc = self.effective_max_position_usdc_for_resolution(
+            &parsed.location,
+            Self::hours_until_resolution(market.end_date),
+        );
         let available = (self.get_available_capital)();
         let existing_cost = (self.get_position)(token_id) * ask_price;
         let remaining = (max_usdc - existing_cost).max(Decimal::ZERO);
@@ -3509,6 +3643,10 @@ impl WeatherAlphaStrategy {
         let (forecast, is_fresh) = self
             .get_forecast_by_location(location, metric, target_date, precipitation_unit)
             .await?;
+        let hours_until_resolution =
+            event.markets.iter().filter_map(|market| market.end_date).min().map(|end| {
+                (end - Utc::now()).num_hours()
+            });
 
         // Skip if forecast hasn't changed significantly (when change detection is enabled)
         if self.config.forecast_change_detection && !is_fresh {
@@ -3585,6 +3723,8 @@ impl WeatherAlphaStrategy {
 
             let yes_candidate = self.evaluate_neg_risk_side(
                 &market.question,
+                location,
+                hours_until_resolution,
                 "yes",
                 yes_token.token_id,
                 yes_book
@@ -3600,6 +3740,8 @@ impl WeatherAlphaStrategy {
             let no_model_prob = Decimal::ONE - model_prob;
             let no_candidate = self.evaluate_neg_risk_side(
                 &market.question,
+                location,
+                hours_until_resolution,
                 "no",
                 no_token.token_id,
                 no_book
@@ -3638,14 +3780,16 @@ impl WeatherAlphaStrategy {
             use rust_decimal::prelude::ToPrimitive;
             (edge * dec!(10000)).to_u32().unwrap_or(0)
         };
-        let min_edge_bps = self.effective_min_edge_bps(location);
+        let min_edge_bps =
+            self.effective_min_edge_bps_for_resolution(location, hours_until_resolution);
         if edge_bps < min_edge_bps {
             Self::record_rejection("edge_too_small");
             return None;
         }
 
         // Fixed position sizing: max_position_usdc per trade, position-aware
-        let max_usdc = self.config.max_position_usdc;
+        let max_usdc =
+            self.effective_max_position_usdc_for_resolution(location, hours_until_resolution);
         let available = (self.get_available_capital)();
         let existing_cost = (self.get_position)(token_id) * ask_price;
         let remaining = (max_usdc - existing_cost).max(Decimal::ZERO);
@@ -3762,7 +3906,9 @@ impl WeatherAlphaStrategy {
             // which is nearly impossible at low prices (e.g., model_prob would need to be
             // below 4.5% when best_bid is 0.05). This check provides a model-independent
             // exit when the loss is severe.
-            if *avg_cost > Decimal::ZERO && best_bid < *avg_cost * self.config.relative_stop_loss_ratio {
+            if *avg_cost > Decimal::ZERO
+                && best_bid < *avg_cost * self.config.relative_stop_loss_ratio
+            {
                 if let Some(ask) = best_ask {
                     if ask >= *avg_cost && best_bid >= ask * dec!(0.10) {
                         tracing::debug!(
@@ -4042,6 +4188,7 @@ impl Strategy for WeatherAlphaStrategy {
 
         let mut binary_weather = 0u32;
         let mut neg_risk_weather = 0u32;
+        let mut best_by_event: HashMap<String, TradingOpportunity> = HashMap::new();
 
         // 1. Collect binary weather markets, filtered by target cities
         let mut binary_candidates: Vec<(&MarketInfo, WeatherQuestion)> = Vec::new();
@@ -4067,7 +4214,18 @@ impl Strategy for WeatherAlphaStrategy {
         // Scan binary weather markets
         for (market, parsed) in binary_candidates {
             if let Some(opp) = self.detect_weather_opportunity(market, &parsed).await {
-                opportunities.push(opp);
+                let target_date = parse_target_date_with_today(
+                    &market.question,
+                    market_local_today(&parsed.location),
+                );
+                let event_key =
+                    Self::weather_event_key(&parsed.location, parsed.metric, target_date);
+                match best_by_event.get(&event_key) {
+                    Some(existing) if existing.estimated_profit >= opp.estimated_profit => {}
+                    _ => {
+                        best_by_event.insert(event_key, opp);
+                    }
+                }
             }
         }
 
@@ -4078,11 +4236,20 @@ impl Strategy for WeatherAlphaStrategy {
                     continue;
                 }
                 neg_risk_weather += 1;
+                let target_date = parse_target_date_with_today(&event.title, market_local_today(&location));
+                let event_key = Self::weather_event_key(&location, metric, target_date);
                 if let Some(opp) = self.detect_neg_risk_weather(event, metric, &location).await {
-                    opportunities.push(opp);
+                    match best_by_event.get(&event_key) {
+                        Some(existing) if existing.estimated_profit >= opp.estimated_profit => {}
+                        _ => {
+                            best_by_event.insert(event_key, opp);
+                        }
+                    }
                 }
             }
         }
+
+        opportunities.extend(best_by_event.into_values());
 
         if log_diag {
             tracing::debug!(
@@ -4566,8 +4733,9 @@ mod tests {
     #[test]
     fn test_parse_target_date_full_month() {
         let today = Local::now().date_naive();
-        let date = parse_target_date_with_today("What will the temperature be on February 14?", today)
-            .unwrap();
+        let date =
+            parse_target_date_with_today("What will the temperature be on February 14?", today)
+                .unwrap();
         assert_eq!(date.month(), 2);
         assert_eq!(date.day(), 14);
         assert_eq!(date.year(), today.year());
@@ -4622,16 +4790,15 @@ mod tests {
     #[test]
     fn test_parse_target_date_today() {
         let today = Local::now().date_naive();
-        let date = parse_target_date_with_today("What is the temperature today in NYC?", today)
-            .unwrap();
+        let date =
+            parse_target_date_with_today("What is the temperature today in NYC?", today).unwrap();
         assert_eq!(date, today);
     }
 
     #[test]
     fn test_parse_target_date_tomorrow() {
         let today = Local::now().date_naive();
-        let date =
-            parse_target_date_with_today("Will it rain tomorrow in NYC?", today).unwrap();
+        let date = parse_target_date_with_today("Will it rain tomorrow in NYC?", today).unwrap();
         assert_eq!(date, today + chrono::Duration::days(1));
     }
 
@@ -4651,8 +4818,8 @@ mod tests {
     fn test_parse_target_date_in_may() {
         // "in May" with preposition should match
         let today = Local::now().date_naive();
-        let date = parse_target_date_with_today("What will the temperature be in May?", today)
-            .unwrap();
+        let date =
+            parse_target_date_with_today("What will the temperature be in May?", today).unwrap();
         assert_eq!(date.month(), 5);
         assert_eq!(date.day(), 31);
     }
@@ -5624,8 +5791,14 @@ mod tests {
         let market = make_weather_market(question);
 
         let mut books = HashMap::new();
-        books.insert(U256::from(1u64), make_weather_book(U256::from(1u64), dec!(0.20)));
-        books.insert(U256::from(2u64), make_weather_book(U256::from(2u64), dec!(0.80)));
+        books.insert(
+            U256::from(1u64),
+            make_weather_book(U256::from(1u64), dec!(0.20)),
+        );
+        books.insert(
+            U256::from(2u64),
+            make_weather_book(U256::from(2u64), dec!(0.80)),
+        );
 
         let strategy = make_weather_strategy_with_positions(books, vec![]);
         let opportunities = strategy.scan_stale_liquidity(&[market]).await;
@@ -6095,7 +6268,10 @@ mod tests {
 
         let mut books = HashMap::new();
         books.insert(U256::from(31u64), yes_book);
-        books.insert(U256::from(32u64), make_weather_book(U256::from(32u64), dec!(0.82)));
+        books.insert(
+            U256::from(32u64),
+            make_weather_book(U256::from(32u64), dec!(0.82)),
+        );
 
         let strategy = make_weather_strategy(books, vec![]);
         let target_date = parse_target_date_server_local(event_title);
@@ -6175,7 +6351,10 @@ mod tests {
 
     #[test]
     fn test_open_meteo_uses_local_timezone_for_supported_cities() {
-        assert_eq!(OpenMeteoClient::timezone_for_location("London"), "Europe/London");
+        assert_eq!(
+            OpenMeteoClient::timezone_for_location("London"),
+            "Europe/London"
+        );
     }
 
     #[test]
@@ -6597,7 +6776,11 @@ mod tests {
 
         let market = make_weather_market("Will the temperature in NYC exceed 100F this summer?");
         let exits = strategy.scan_exits(&[market]).await;
-        assert_eq!(exits.len(), 1, "Relative stop-loss should trigger below 75% of cost");
+        assert_eq!(
+            exits.len(),
+            1,
+            "Relative stop-loss should trigger below 75% of cost"
+        );
         assert!(exits[0].question.contains("[EXIT]"));
     }
 
@@ -6648,7 +6831,11 @@ mod tests {
         let exits = strategy.scan_exits(&[market]).await;
         // model_prob ≈ 1.0 (forecast 110 >> threshold 100), best_bid 0.32 → no model reversal
         // avg_cost 0.40, best_bid 0.32 → above relative stop-loss
-        assert_eq!(exits.len(), 0, "Should not exit while bid stays above relative stop-loss");
+        assert_eq!(
+            exits.len(),
+            0,
+            "Should not exit while bid stays above relative stop-loss"
+        );
     }
 
     // ──── Target City Filter Tests ────
@@ -6725,6 +6912,209 @@ mod tests {
         assert!(strategy.is_target_city("Seattle"));
         assert!(!strategy.is_target_city("London"));
         assert!(!strategy.is_target_city("Anywhere"));
+    }
+
+    #[test]
+    fn test_conservative_city_overlay_matches_chicago_and_default_protected_locations() {
+        let strategy = WeatherAlphaStrategy::new(
+            WeatherConfig::default(),
+            Decimal::ZERO,
+            WeatherAlphaDeps {
+                get_orderbook: Box::new(|_| None),
+                get_available_capital: Box::new(|| Decimal::ZERO),
+                get_position: Box::new(|_| Decimal::ZERO),
+                get_held_positions: Box::new(Vec::new),
+                get_balance: Box::new(|| Decimal::ZERO),
+                neg_risk_events: vec![],
+            },
+        );
+
+        assert!(WeatherAlphaStrategy::uses_conservative_city_overlay("Chicago"));
+        assert!(WeatherAlphaStrategy::uses_conservative_city_overlay(
+            "San Francisco"
+        ));
+        assert!(!WeatherAlphaStrategy::uses_conservative_city_overlay("Miami"));
+        assert!(!WeatherAlphaStrategy::uses_conservative_city_overlay("Atlanta"));
+
+        assert_eq!(
+            strategy.effective_min_edge_bps("Chicago"),
+            strategy.config.min_edge_bps + 100
+        );
+        assert_eq!(
+            strategy.effective_min_edge_bps("San Francisco"),
+            strategy.config.min_edge_bps + 150 + 100
+        );
+        assert_eq!(
+            strategy.effective_min_edge_bps("Miami"),
+            strategy.config.min_edge_bps
+        );
+    }
+
+    #[test]
+    fn test_conservative_city_overlay_tightens_entry_price_and_position_size() {
+        let strategy = WeatherAlphaStrategy::new(
+            WeatherConfig {
+                max_entry_price: dec!(0.35),
+                max_position_usdc: dec!(4),
+                ..Default::default()
+            },
+            Decimal::ZERO,
+            WeatherAlphaDeps {
+                get_orderbook: Box::new(|_| None),
+                get_available_capital: Box::new(|| Decimal::ZERO),
+                get_position: Box::new(|_| Decimal::ZERO),
+                get_held_positions: Box::new(Vec::new),
+                get_balance: Box::new(|| Decimal::ZERO),
+                neg_risk_events: vec![],
+            },
+        );
+
+        assert_eq!(strategy.effective_max_entry_price("Miami"), dec!(0.35));
+        assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(4));
+
+        assert_eq!(strategy.effective_max_entry_price("Chicago"), dec!(0.30));
+        assert_eq!(
+            strategy.effective_max_position_usdc("Chicago"),
+            dec!(3.00)
+        );
+
+        assert_eq!(
+            strategy.effective_max_entry_price("San Francisco"),
+            dec!(0.30)
+        );
+        assert_eq!(
+            strategy.effective_max_position_usdc("San Francisco"),
+            dec!(3.00)
+        );
+    }
+
+    #[test]
+    fn test_short_dated_overlay_tightens_entry_thresholds_for_validated_city() {
+        let strategy = WeatherAlphaStrategy::new(
+            WeatherConfig {
+                min_edge_bps: 500,
+                max_entry_price: dec!(0.35),
+                max_position_usdc: dec!(4),
+                ..Default::default()
+            },
+            Decimal::ZERO,
+            WeatherAlphaDeps {
+                get_orderbook: Box::new(|_| None),
+                get_available_capital: Box::new(|| Decimal::ZERO),
+                get_position: Box::new(|_| Decimal::ZERO),
+                get_held_positions: Box::new(Vec::new),
+                get_balance: Box::new(|| Decimal::ZERO),
+                neg_risk_events: vec![],
+            },
+        );
+
+        assert_eq!(
+            strategy.effective_min_edge_bps_for_resolution("Miami", Some(30)),
+            500
+        );
+        assert_eq!(
+            strategy.effective_max_entry_price_for_resolution("Miami", Some(30)),
+            dec!(0.35)
+        );
+        assert_eq!(
+            strategy.effective_max_position_usdc_for_resolution("Miami", Some(30)),
+            dec!(4)
+        );
+
+        assert_eq!(
+            strategy.effective_min_edge_bps_for_resolution("Miami", Some(24)),
+            600
+        );
+        assert_eq!(
+            strategy.effective_max_entry_price_for_resolution("Miami", Some(24)),
+            dec!(0.28)
+        );
+        assert_eq!(
+            strategy.effective_max_position_usdc_for_resolution("Miami", Some(24)),
+            dec!(3.40)
+        );
+
+        assert_eq!(
+            strategy.effective_min_edge_bps_for_resolution("Miami", Some(12)),
+            700
+        );
+        assert_eq!(
+            strategy.effective_max_entry_price_for_resolution("Miami", Some(12)),
+            dec!(0.25)
+        );
+        assert_eq!(
+            strategy.effective_max_position_usdc_for_resolution("Miami", Some(12)),
+            dec!(3.00)
+        );
+    }
+
+    #[test]
+    fn test_short_dated_overlay_stacks_on_conservative_city_overlay() {
+        let strategy = WeatherAlphaStrategy::new(
+            WeatherConfig {
+                min_edge_bps: 500,
+                max_entry_price: dec!(0.35),
+                max_position_usdc: dec!(4),
+                ..Default::default()
+            },
+            Decimal::ZERO,
+            WeatherAlphaDeps {
+                get_orderbook: Box::new(|_| None),
+                get_available_capital: Box::new(|| Decimal::ZERO),
+                get_position: Box::new(|_| Decimal::ZERO),
+                get_held_positions: Box::new(Vec::new),
+                get_balance: Box::new(|| Decimal::ZERO),
+                neg_risk_events: vec![],
+            },
+        );
+
+        assert_eq!(
+            strategy.effective_min_edge_bps_for_resolution("Chicago", Some(24)),
+            700
+        );
+        assert_eq!(
+            strategy.effective_max_entry_price_for_resolution("Chicago", Some(24)),
+            dec!(0.28)
+        );
+        assert_eq!(
+            strategy.effective_max_position_usdc_for_resolution("Chicago", Some(24)),
+            dec!(2.55)
+        );
+
+        assert_eq!(
+            strategy.effective_min_edge_bps_for_resolution("San Francisco", Some(12)),
+            950
+        );
+        assert_eq!(
+            strategy.effective_max_entry_price_for_resolution("San Francisco", Some(12)),
+            dec!(0.25)
+        );
+        assert_eq!(
+            strategy.effective_max_position_usdc_for_resolution("San Francisco", Some(12)),
+            dec!(2.25)
+        );
+    }
+
+    #[test]
+    fn test_weather_event_key_collapses_same_city_metric_and_date() {
+        let key_a = WeatherAlphaStrategy::weather_event_key(
+            "Chicago",
+            WeatherMetric::TemperatureMax,
+            Some(NaiveDate::from_ymd_opt(2026, 3, 16).unwrap()),
+        );
+        let key_b = WeatherAlphaStrategy::weather_event_key(
+            "chicago",
+            WeatherMetric::TemperatureMax,
+            Some(NaiveDate::from_ymd_opt(2026, 3, 16).unwrap()),
+        );
+        let key_c = WeatherAlphaStrategy::weather_event_key(
+            "Chicago",
+            WeatherMetric::TemperatureMin,
+            Some(NaiveDate::from_ymd_opt(2026, 3, 16).unwrap()),
+        );
+
+        assert_eq!(key_a, key_b);
+        assert_ne!(key_a, key_c);
     }
 
     // ──── Fixed Sizing Tests ────

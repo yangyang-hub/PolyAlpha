@@ -21,6 +21,7 @@ export interface StatusResponse {
   accounts_configured: number;
   accounts_ready: number;
   trading_ready: boolean;
+  wallet_balance: string;
   positions_snapshot_updated_at: string | null;
   accounts: AccountStatusEntry[];
 }
@@ -71,11 +72,31 @@ export interface PositionEntry {
   avg_cost: string;
   cost_basis: string;
   strategy: string | null;
+  asset: string | null;
+  direction: string | null;
   condition_id: string | null;
   question: string | null;
   outcome: string | null;
   current_price: string | null;
   unrealized_pnl: string | null;
+}
+
+export interface CryptoAlphaConfigSection {
+  min_edge_bps: number;
+  max_position_pct: number;
+  kelly_fraction: number;
+  refresh_interval_secs: number;
+  spot_refresh_interval_secs: number;
+  history_refresh_interval_secs: number;
+  iv_refresh_interval_secs: number;
+  coingecko_api_key: string;
+  exit_buffer_bps: number;
+  capital_efficiency_threshold: number;
+  drift_decay: number;
+  max_spread_bps: number;
+  relative_stop_loss_ratio: number;
+  max_exposure_per_asset_pct: number;
+  max_exposure_per_asset_direction_pct: number;
 }
 
 // --- API functions ---
@@ -103,6 +124,10 @@ export function fetchConfig(): Promise<Record<string, unknown>> {
 
 export function fetchSection(section: string): Promise<Record<string, unknown>> {
   return get(`/api/config/${section}`);
+}
+
+export function fetchCryptoAlphaConfig(): Promise<CryptoAlphaConfigSection> {
+  return get("/api/config/crypto_alpha");
 }
 
 export function fetchSectionMeta(section: string): Promise<SectionMeta> {

@@ -262,6 +262,7 @@ PolyAlpha/
 ├── src/
 │   ├── main.rs                      # 主入口：初始化→WS订阅→执行→策略→做市→同步→赎回
 │   └── bin/backtest.rs              # 回测 CLI (clap)
+│   └── bin/crypto_calibrate.rs      # 加密校准 CLI：JSONL 样本 → calibration_overrides 草案
 ├── crates/
 │   ├── pa-core/                     # 核心类型、traits、配置、错误
 │   ├── pa-market-data/              # Gamma API + WS (排序) + Cache + DataAPI + EventCalendar
@@ -316,6 +317,31 @@ cargo test --workspace
 # 5. 启动机器人
 cargo run --release
 ```
+
+### 加密校准草案生成
+
+当你已经有历史加密市场样本，并且每条样本包含 `modeled_prob` 与实际结果时，可以直接生成
+`crypto_alpha.calibration_overrides` 草案：
+
+```bash
+cargo run --bin crypto_calibrate -- \
+  --input tmp/crypto_samples.jsonl \
+  --min-samples 20 \
+  --short-horizon-max-days 1 \
+  --medium-horizon-max-days 7
+```
+
+输入为 JSONL，每行至少需要：
+
+- `modeled_prob`
+- `resolved_yes` 或 `resolved_value`
+- 以及一组可推断分段的字段：
+  - `asset + market_type + days_to_resolution`
+  - 或 `question + days_to_resolution`
+  - 或 `question + observed_at + resolution_at`
+
+生成结果会直接输出带注释的 `[[crypto_alpha.calibration_overrides]]` TOML 片段。
+更完整说明见 [docs/crypto-calibration-workflow.md](docs/crypto-calibration-workflow.md)。
 
 ### Docker 部署
 
@@ -413,11 +439,93 @@ capital_efficiency_threshold = 0.98
 
 [crypto_alpha]
 min_edge_bps = 100
-max_position_usdc = 100.0
+max_position_pct = 0.50
 kelly_fraction = 0.25
+refresh_interval_secs = 300
+spot_refresh_interval_secs = 30
+history_refresh_interval_secs = 1800
+iv_refresh_interval_secs = 300
 coingecko_api_key = ""
 exit_buffer_bps = 50
 capital_efficiency_threshold = 0.98
+drift_decay = 0.0
+max_spread_bps = 1500
+relative_stop_loss_ratio = 0.80
+max_exposure_per_asset_pct = 0.75
+max_exposure_per_asset_direction_pct = 0.45
+low_event_min_edge_multiplier = 1.20
+medium_event_min_edge_multiplier = 1.50
+high_event_min_edge_multiplier = 2.00
+low_event_max_spread_multiplier = 0.90
+medium_event_max_spread_multiplier = 0.80
+high_event_max_spread_multiplier = 0.65
+low_event_sigma_multiplier = 1.05
+medium_event_sigma_multiplier = 1.15
+high_event_sigma_multiplier = 1.30
+low_event_size_multiplier = 0.90
+medium_event_size_multiplier = 0.75
+high_event_size_multiplier = 0.50
+btc_probability_calibration = 0.95
+eth_probability_calibration = 0.93
+alt_probability_calibration = 0.88
+binary_probability_calibration = 0.97
+range_probability_calibration = 0.90
+short_horizon_max_days = 1
+medium_horizon_max_days = 7
+short_horizon_probability_calibration = 0.85
+medium_horizon_probability_calibration = 0.92
+short_horizon_size_multiplier = 0.60
+medium_horizon_size_multiplier = 0.80
+short_horizon_min_edge_multiplier = 1.50
+medium_horizon_min_edge_multiplier = 1.20
+short_horizon_max_spread_multiplier = 0.75
+medium_horizon_max_spread_multiplier = 0.90
+short_horizon_capital_efficiency_threshold = 0.92
+medium_horizon_capital_efficiency_threshold = 0.95
+short_horizon_exit_buffer_multiplier = 0.50
+medium_horizon_exit_buffer_multiplier = 0.80
+hold_min_edge_bps = 100
+short_horizon_hold_edge_multiplier = 1.50
+medium_horizon_hold_edge_multiplier = 1.20
+edge_decay_exit_fraction = 0.25
+edge_decay_exit_fraction_step = 0.10
+edge_decay_moderate_gap_bps = 50
+edge_decay_severe_gap_bps = 150
+edge_decay_moderate_exit_multiplier = 1.25
+edge_decay_severe_exit_multiplier = 1.50
+edge_decay_moderate_cooldown_multiplier = 0.75
+edge_decay_severe_cooldown_multiplier = 0.50
+short_horizon_edge_decay_exit_multiplier = 1.50
+medium_horizon_edge_decay_exit_multiplier = 1.20
+edge_decay_cooldown_secs = 1800
+edge_decay_confirmation_scans = 2
+short_horizon_edge_decay_confirmation_scans = 1
+medium_horizon_edge_decay_confirmation_scans = 2
+edge_decay_moderate_confirmation_scan_multiplier = 0.75
+edge_decay_severe_confirmation_scan_multiplier = 0.50
+edge_decay_confirmation_window_secs = 900
+short_horizon_edge_decay_confirmation_window_multiplier = 0.50
+medium_horizon_edge_decay_confirmation_window_multiplier = 0.75
+edge_decay_moderate_confirmation_window_multiplier = 0.75
+edge_decay_severe_confirmation_window_multiplier = 0.50
+short_horizon_edge_decay_cooldown_multiplier = 0.50
+medium_horizon_edge_decay_cooldown_multiplier = 0.75
+
+[[crypto_alpha.calibration_overrides]]
+asset = "BTCUSDT"
+horizon = "short"
+market_type = "binary"
+probability_calibration = 0.82
+sigma_multiplier = 1.10
+size_multiplier = 0.70
+
+[[crypto_alpha.calibration_overrides]]
+asset = "*"
+horizon = "short"
+market_type = "range"
+probability_calibration = 0.78
+sigma_multiplier = 1.20
+size_multiplier = 0.65
 
 [event_calendar]
 enabled = false

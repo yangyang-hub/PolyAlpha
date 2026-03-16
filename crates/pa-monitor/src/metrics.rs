@@ -1,4 +1,4 @@
-use prometheus::{Gauge, Histogram, IntCounter, IntCounterVec, Registry, histogram_opts};
+use prometheus::{Gauge, GaugeVec, Histogram, IntCounter, IntCounterVec, Registry, histogram_opts};
 use std::sync::LazyLock;
 
 /// Global Prometheus metrics registry.
@@ -48,6 +48,62 @@ pub static WEATHER_REJECTIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
             "Weather strategy opportunities rejected by reason",
         ),
         &["provider", "reason"],
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
+/// Crypto strategy rejection reasons.
+pub static CRYPTO_ALPHA_REJECTIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let counter = IntCounterVec::new(
+        prometheus::Opts::new(
+            "crypto_alpha_rejections_total",
+            "Crypto strategy opportunities rejected by reason",
+        ),
+        &["asset", "reason"],
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
+/// Crypto price cache events by component and outcome.
+pub static CRYPTO_ALPHA_CACHE_EVENTS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let counter = IntCounterVec::new(
+        prometheus::Opts::new(
+            "crypto_alpha_cache_events_total",
+            "Crypto price cache hits and refreshes by component",
+        ),
+        &["asset", "component", "result"],
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(counter.clone())).unwrap();
+    counter
+});
+
+/// Current aggregate crypto exposure tracked per asset.
+pub static CRYPTO_ALPHA_ASSET_EXPOSURE: LazyLock<GaugeVec> = LazyLock::new(|| {
+    let gauge = GaugeVec::new(
+        prometheus::Opts::new(
+            "crypto_alpha_asset_exposure_usd",
+            "Aggregate crypto strategy exposure by asset in USD",
+        ),
+        &["asset"],
+    )
+    .unwrap();
+    REGISTRY.register(Box::new(gauge.clone())).unwrap();
+    gauge
+});
+
+/// Crypto exits by reason.
+pub static CRYPTO_ALPHA_EXITS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let counter = IntCounterVec::new(
+        prometheus::Opts::new(
+            "crypto_alpha_exits_total",
+            "Crypto strategy exits by reason",
+        ),
+        &["reason"],
     )
     .unwrap();
     REGISTRY.register(Box::new(counter.clone())).unwrap();

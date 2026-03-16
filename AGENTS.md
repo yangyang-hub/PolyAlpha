@@ -83,6 +83,266 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-16
+- Area: `yangyang_resume.md`
+- Change: Replaced the resume's `StoryChain` project section with a `PolyAlpha` project entry focused on Rust-based quantitative trading, strategy/risk infrastructure, Polymarket integration, and monitoring/observability.
+- Why: The user wanted this repository experience reflected in the resume instead of the previous Web3 storytelling project, so the resume now better matches the work done in this codebase.
+
+### 2026-03-16
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Added a conservative city overlay for weather entries so `Chicago` and all `DefaultProtected` cities now require an extra `+100bps` edge, cap entry price at `0.30`, and size at `75%` of the normal per-trade USDC limit across both main and stale-liquidity entry paths, with focused regression coverage for validated vs protected cities.
+- Why: Recent live weather trades showed better consistency in cities like Atlanta/Miami than in Chicago and still-unvalidated cities, so the strategy should lean harder into validated locations and automatically be more selective where settlement/behavior confidence is weaker.
+
+### 2026-03-16
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Added short-dated weather entry overlays keyed off each market's `end_date`, so positions resolving within `24h` or `12h` now require higher edge, lower entry-price ceilings, and smaller per-trade size caps on the normal binary and NegRisk entry paths, with focused regression coverage for validated and conservative cities.
+- Why: Recent weather churn was concentrated in near-resolution bins, so entry logic should get materially stricter as the resolution window approaches instead of treating same-day markets like longer-dated setups.
+
+### 2026-03-16
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Reworked same-event weather dedupe to rank binary and NegRisk opportunities together by `location + metric + target_date`, keeping only the single highest-`estimated_profit` normal-entry candidate per event per scan and removing the earlier persistent 30-minute strategy-local cooldown.
+- Why: A strategy-local cooldown was occupying event slots before execution success was known and also let binary scans win by ordering rather than expected value, so same-event throttling should stay scan-local until there is an execution-aware hook.
+
+### 2026-03-16
+- Area: `config/default.toml`, `README.md`
+- Change: Moved the crypto horizon/exit/edge-decay defaults back to the top-level `[crypto_alpha]` section instead of leaving them underneath the last `[[crypto_alpha.calibration_overrides]]` sample row, and corrected the README example to match.
+- Why: TOML table-array scoping had caused those fields to deserialize as part of the final override row rather than as live strategy defaults, so the documented crypto risk profile was not actually the one loaded at runtime.
+
+### 2026-03-16
+- Area: `src/bin/crypto_calibrate.rs`, `docs/crypto-calibration-workflow.md`, `README.md`
+- Change: Added an offline `crypto_calibrate` CLI that reads historical JSONL observations, infers `asset + horizon + market_type`, fits `probability_calibration` overrides for each sufficiently sampled segment, and prints TOML-ready `crypto_alpha.calibration_overrides` blocks with Brier-score comments.
+- Why: The crypto strategy already supports table-driven calibration overrides, so the next missing piece was a practical workflow for turning labeled historical samples into operator-usable override drafts instead of hand-tuning every segment.
+
+### 2026-03-16
+- Area: `frontend/src/components/ConfigSection.tsx`
+- Change: Grouped the crypto calibration override table by `market_type`, rendering separate `binary` / `range` / wildcard sections while still keeping specificity ordering within each section.
+- Why: Once override rows became more numerous, operators needed a faster way to scan one market family at a time instead of mentally filtering a single mixed table.
+
+### 2026-03-16
+- Area: `frontend/src/components/ConfigSection.tsx`
+- Change: Sorted the crypto calibration override table by selector specificity so exact asset/horizon/type rows render before broader wildcard rules, with stable lexical fallback ordering for ties.
+- Why: Operators should see the most targeted calibration rules first instead of scanning past catch-all entries that are less likely to explain a specific strategy behavior.
+
+### 2026-03-16
+- Area: `frontend/src/components/ConfigSection.tsx`
+- Change: Added badge-style scope rendering for `crypto_alpha.calibration_overrides` table cells so wildcard selectors such as `*` and `any` stand out visually from exact asset/horizon/type matches.
+- Why: Once override rows are shown as a table, operators still need to quickly distinguish broad catch-all rules from specific targeted rules without reading every cell character-by-character.
+
+### 2026-03-16
+- Area: `frontend/src/components/ConfigSection.tsx`
+- Change: Added a dedicated read-only table renderer for `crypto_alpha.calibration_overrides`, showing `asset / horizon / market_type / probability / sigma / size` columns with explicit empty-state placeholders instead of falling back to raw JSON.
+- Why: Calibration overrides now drive multiple layers of crypto behavior, so operators need a compact human-readable view rather than an opaque JSON blob in the configuration page.
+
+### 2026-03-16
+- Area: `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `README.md`
+- Change: Extended the new crypto calibration override table so `sigma_multiplier` and `size_multiplier` are now actively read by the strategy, updated grouped-binary sigma handling to use each market's own horizon when applying override-aware multipliers, and expanded focused regression coverage for override sigma/size lookups.
+- Why: A table-driven calibration layer should control more than probability shrinkage, and grouped binary markets should not apply a fixed 30-day override context when a more precise per-market horizon is available.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `crates/pa-strategy/src/crypto_alpha.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added table-driven `crypto_alpha.calibration_overrides` entries keyed by `asset + horizon + market_type`, taught the strategy to prefer override probability calibration factors before falling back to the static defaults, and documented sample override rows plus focused regression coverage.
+- Why: The growing set of static crypto calibration fields was becoming too rigid, so operators need an explicit override table that can target specific model segments without adding another top-level config field each time.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `crates/pa-strategy/src/crypto_alpha.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Split crypto probability calibration by market type with separate `binary` and `range` shrink factors, and wired the new dimension through both entry and exit probability calibration so NegRisk/range markets can be calibrated more conservatively than plain binary markets.
+- Why: Binary and range markets have materially different probability-shape errors, so they should not share one identical post-model shrinkage factor.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `crates/pa-strategy/src/crypto_alpha.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added lightweight crypto probability calibration factors for `BTC / ETH / alt` assets and `short / medium` horizon buckets, then applied the combined shrinkage to GBM probabilities on both entry and exit paths so extreme model probabilities are pulled back toward 50% before edge and sizing decisions.
+- Why: The baseline GBM model was still too confident in tails, especially on shorter-dated and non-major crypto markets, so a conservative post-model calibration layer is a pragmatic first step before any larger distribution rewrite.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `crates/pa-strategy/src/crypto_alpha.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added horizon-based crypto entry size multipliers and wired short/medium expiry buckets directly into Kelly sizing so near-dated markets now open smaller positions even after passing the tighter threshold stack, with focused regression coverage for the horizon sizing helper.
+- Why: Expiry buckets were already making short-dated crypto markets stricter on entry and faster on exit, so position sizing should also be structurally lighter for the same short-term jump risk.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `crates/pa-strategy/src/crypto_alpha.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added impact-tiered crypto event size multipliers and wired matched `low/medium/high` events into entry sizing so event windows now shrink Kelly-based position sizes in addition to tightening thresholds and inflating sigma, with focused regression coverage for the sizing helper.
+- Why: Event risk should affect not only whether a crypto market passes filters but also how much capital is put at risk once it does pass.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `crates/pa-strategy/src/crypto_alpha.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added impact-tiered crypto event sigma multipliers and wired matched `low/medium/high` calendar events into the effective GBM volatility used by both crypto entry evaluation and exit probability recomputation, with focused regression coverage for the sigma scaling helper.
+- Why: Event windows should change the model distribution itself, not only tighten edge/spread gates, so crypto probabilities become more conservative when known macro or token events raise uncertainty.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `crates/pa-strategy/src/crypto_alpha.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added severity-scaled `edge_decay` confirmation-scan multipliers so moderate and severe thin-edge states can require fewer repeated confirmations before trimming, with regression coverage for the updated confirmation ladder.
+- Why: Once edge decay is materially worse, holding the same confirmation count as a mild thin-edge state delays de-risking more than intended.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `crates/pa-strategy/src/crypto_alpha.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added severity-scaled `edge_decay` confirmation-window multipliers so moderate and severe thin-edge states can complete their repeated-confirmation sequence inside a shorter wall-clock gap, with updated regression checks for the new window ladder.
+- Why: Once edge decay is materially worse, requiring the same long confirmation spacing as a mild thin-edge state slows down de-risking unnecessarily.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `crates/pa-strategy/src/crypto_alpha.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added severity-scaled `edge_decay` cooldown multipliers so moderate and severe thin-edge states shorten the next trim cooldown in addition to already increasing trim size, with regression coverage for the new cooldown ladder.
+- Why: When model edge has already decayed materially, waiting the full normal cooldown before allowing another trim is too slow, so repeated de-risking should accelerate alongside severity.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `crates/pa-strategy/src/crypto_alpha.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added moderate/severe `edge_decay` gap bands with configurable gap thresholds and trim multipliers, and made crypto partial exits scale not only with repeated confirmations but also with how far the held-side model edge has decayed below the keep-holding threshold.
+- Why: Thin-edge states are not all equally dangerous, so materially worse edge decay should de-risk faster even before many more confirmation windows accumulate.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `crates/pa-strategy/src/crypto_alpha.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added an `edge_decay` confirmation time window plus horizon-scaled window multipliers, changed crypto confirmation state from a bare scan counter to `(count, last_seen)` tracking, and reset progressive trims when thin-edge confirmations are too far apart in wall-clock time.
+- Why: Pure scan-count confirmation was sensitive to runtime scan frequency, so `edge_decay` needed a time-bounded sequence to keep trim behavior stable across slower or faster polling loops.
+
+### 2026-03-16
+- Area: `src/app/account_runtime.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Threaded the shared event calendar into `crypto_alpha` and made crypto entry filtering event-aware so active matched events now raise the effective `min_edge_bps` and tighten the effective `max_spread_bps`, with focused regression coverage for event-window entry rejection.
+- Why: Engine-level event scaling only reduced size after an opportunity was already generated, so crypto markets still entered too easily around token or macro event windows instead of requiring better edge and cleaner books up front.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-market-data/src/event_calendar.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Split crypto event-window entry controls into low/medium/high impact edge and spread multipliers, added event-calendar impact lookup support, kept the old single crypto event keys as medium-impact aliases, and added regression coverage for impact-tier threshold scaling.
+- Why: A single crypto event tightening profile was too coarse once event-aware entry filtering was live, so the strategy now needs materially stricter thresholds for high-impact events without over-penalizing lower-impact crypto windows.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added short/medium horizon entry buckets to `crypto_alpha`, so near-expiry markets now automatically require higher edge and tighter spreads with configurable day cutoffs and multiplier defaults, plus regression coverage for horizon-tier threshold scaling.
+- Why: Crypto markets close to resolution behave materially differently from longer-dated contracts, so entry filtering should become stricter as expiry approaches instead of sharing one static edge/spread profile.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added short/medium horizon exit buckets to `crypto_alpha`, lowering capital-efficiency thresholds and shrinking model-reversal exit buffers for near-expiry positions, with focused regression tests for earlier short-dated exits.
+- Why: Entry filtering alone was not enough for near-expiry crypto contracts, so held positions now also unwind more aggressively as resolution approaches instead of waiting on the same long-dated exit settings.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added a configurable crypto `edge_decay` exit with short/medium horizon hold-edge multipliers and partial-exit sizing, so positions now trim only part of the size when residual model edge over the bid becomes too thin, with regression coverage for both base and short-dated edge decay behavior.
+- Why: Near-fair-value crypto positions were lingering until full reversal or stop-loss, but immediately fully exiting on small edge decay would be too blunt, so the strategy now frees capital progressively as remaining edge deteriorates.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added token-level `edge_decay` cooldown state and `edge_decay_cooldown_secs` config so repeated thin-edge scans no longer fire partial exit orders every cycle on the same crypto position, with focused regression coverage for cooldown suppression.
+- Why: Once edge-decay became a partial-exit path, the strategy needed a local debounce layer to avoid repeatedly trimming the same token in a tight loop while conditions remain only marginally changed.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Made crypto `edge_decay` cooldown horizon-aware by adding short/medium horizon cooldown multipliers, so near-expiry positions re-arm for further trims sooner than long-dated ones, with regression coverage for cooldown scaling.
+- Why: A single 30-minute debounce was too blunt once edge-decay became the main progressive-exit path, because short-dated markets need to keep trimming faster as expiry approaches.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added `edge_decay_confirmation_scans` and token-level consecutive-confirmation tracking so crypto edge-decay exits now require repeated thin-edge scans before trimming, with updated regression coverage for first-scan confirmation vs second-scan execution.
+- Why: Even with cooldowns, one noisy scan could still trigger an unnecessary trim, so edge-decay now waits for repeated confirmation before acting on marginal residual-edge deterioration.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Made crypto `edge_decay` confirmation counts horizon-aware by adding short/medium confirmation overrides, so near-expiry positions can trim after fewer repeated confirmations than long-dated ones, with regression coverage for confirmation scaling.
+- Why: Once edge-decay confirmation existed, using the same count for all maturities was still too blunt because short-dated contracts should react faster to sustained thin-edge conditions than long-dated ones.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Changed crypto `edge_decay` sizing from a fixed trim fraction to a progressive schedule driven by consecutive confirmations, adding `edge_decay_exit_fraction_step` so repeated confirmed thin-edge states now cut larger portions of the remaining position.
+- Why: Once edge-decay required confirmation, the next useful improvement was making later trims more decisive than the first one, so the strategy can scale out progressively instead of repeating the same small reduction every time.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `crates/pa-strategy/src/crypto_alpha.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Refactored the crypto strategy to split spot/history/IV refresh intervals, added a configurable relative stop-loss and per-asset exposure cap, updated crypto entry sizing to enforce aggregate asset limits across related markets, and documented the new config fields in the monitor UI and README.
+- Why: The previous crypto path used one coarse cache TTL, a hardcoded 50% loss cut, and only token-level sizing, which made fast markets stale and allowed correlated BTC/ETH exposure to stack across multiple contracts without an asset-level cap.
+
+### 2026-03-16
+- Area: `crates/pa-monitor/src/metrics.rs`, `crates/pa-strategy/src/crypto_alpha.rs`
+- Change: Added dedicated crypto strategy Prometheus metrics for cache hit/refresh events, rejection reasons, per-asset aggregate exposure, and exit reasons, and wired the strategy to emit those metrics during scans and exit checks.
+- Why: The crypto refactor added asset-level sizing and split cache refresh paths, so operators need direct observability into whether the strategy is being limited by stale data, spread/edge filters, or per-asset exposure caps.
+
+### 2026-03-16
+- Area: `crates/pa-monitor/src/api.rs`, `src/app/helpers.rs`, `src/app/tasks.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added an `asset` field to API position snapshots by inferring crypto exposure from market questions/event titles, and updated the crypto frontend page to show the live crypto config parameters plus per-asset aggregated exposure and per-position asset labels.
+- Why: Operators wanted the crypto refactor to be inspectable directly in the frontend without depending on Prometheus, so the monitoring UI now surfaces the new refresh/stop-loss/exposure behavior in the crypto page itself.
+
+### 2026-03-16
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Removed the crypto page's dependency on `/metrics` and switched the page summary cards to use only config/status APIs plus live position snapshots, including derived position market value and runtime context display.
+- Why: The crypto workflow should be inspectable directly from frontend/API data without requiring Prometheus scraping or metrics parsing just to understand the current strategy state.
+
+### 2026-03-16
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Turned the crypto page's per-asset exposure table into an expandable grouped view so each asset row can reveal the underlying positions with direction, size, cost basis, and unrealized PnL inline.
+- Why: Asset-level aggregation alone was too coarse to debug stacked BTC/ETH exposure, so operators need one-click drilldown from asset totals to the exact positions contributing to that exposure.
+
+### 2026-03-16
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added a plain-language risk explanation block under the crypto strategy parameter card, summarizing how the current refresh cadence, edge/spread gates, per-asset exposure cap, and relative stop-loss/model-reversal exits affect live behavior.
+- Why: The crypto config fields are now richer after the refactor, so operators need the UI to explain the effective trading behavior directly instead of mentally translating raw numeric parameters.
+
+### 2026-03-16
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added per-position exposure share labels inside each expanded asset group, showing how much of that asset bucket and of the overall crypto strategy cost basis each position represents.
+- Why: Once the asset table became expandable, operators still needed a quick way to spot which single positions dominate the BTC/ETH exposure instead of manually comparing raw cost figures.
+
+### 2026-03-16
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added front-end concentration highlighting to the asset aggregation table, including per-asset strategy-share percentages plus `高集中` / `中集中` badges and row tinting when one asset dominates the crypto strategy cost basis.
+- Why: The crypto page needed a faster visual warning when strategy exposure becomes too concentrated in one asset, even without relying on Prometheus or extra backend state.
+
+### 2026-03-16
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added an explicit UI note clarifying that the asset-table concentration percentages are computed against current crypto-strategy cost basis only, not against total account assets.
+- Why: Once the page started surfacing concentration badges and percentages, operators needed a clear statement of scope to avoid misreading strategy-level exposure concentration as whole-portfolio concentration.
+
+### 2026-03-16
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Tidied the crypto page layout by removing duplicated snapshot-time display, shortening helper copy, and changing the summary stat grid to a 5-card-friendly responsive layout.
+- Why: After several frontend additions, the crypto page had started repeating context and wrapping awkwardly, so the final layout needed a small cleanup pass to stay easy to scan.
+
+### 2026-03-16
+- Area: `crates/pa-strategy/src/crypto_alpha.rs`
+- Change: Changed crypto scan selection so each asset keeps only its single best entry candidate per scan across grouped binary, standalone binary, and NegRisk paths, using estimated profit first and edge/size as tie-breakers, with regression coverage.
+- Why: The crypto strategy could previously surface multiple simultaneous BTC/ETH entries in one scan, which stacked correlated exposure and forced the execution layer to arbitrate redundant candidates instead of the strategy picking the highest-value one upfront.
+
+### 2026-03-16
+- Area: `crates/pa-strategy/src/crypto_alpha.rs`
+- Change: Refined the per-asset entry ranking to compare net profit first, then profit-per-cost efficiency, then lower capital usage, with spread and size only as later tie-breakers, and added focused tests for the ranking helper.
+- Why: Absolute profit alone can prefer a bulkier but less capital-efficient candidate, so the dedupe step should favor entries that deliver the same expected value with better capital efficiency and less additional asset concentration.
+
+### 2026-03-16
+- Area: `crates/pa-strategy/src/crypto_alpha.rs`
+- Change: Extended the per-asset crypto entry ranking to prefer candidates with larger executable depth buffer at the quoted limit price before falling back to capital usage, and added regression coverage for equal-profit/equal-efficiency but shallower books.
+- Why: Two BTC/ETH opportunities can look equally good on model PnL while one sits on much thinner liquidity, so same-asset dedupe should prefer the candidate with more order-book headroom instead of the one that is more likely to fail freshness/depth validation.
+
+### 2026-03-16
+- Area: `crates/pa-strategy/src/crypto_alpha.rs`
+- Change: Upgraded crypto candidate dedupe from `asset` scope to `asset + direction bucket` scope by deriving token-level up/down/range buckets from binary and NegRisk questions, so opposite-direction candidates can coexist while same-direction duplicates are still collapsed to the best one.
+- Why: A pure asset-only dedupe is too blunt once the strategy is ranking opportunities more carefully, because it suppresses legitimate opposite-direction setups on the same asset instead of only removing redundant same-direction candidates.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `crates/pa-strategy/src/crypto_alpha.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added a separate `max_exposure_per_asset_direction_pct` crypto config, wired strategy sizing to enforce both asset-level and asset-direction-level exposure caps using the same direction buckets as candidate dedupe, and added regression coverage for same-direction cap blocking.
+- Why: Even after same-asset candidates were deduped more intelligently, repeated scans could still accumulate too much BTC-up or ETH-down exposure over time, so the crypto strategy needed a first-class directional exposure ceiling rather than relying only on total asset caps.
+
+### 2026-03-16
+- Area: `crates/pa-strategy/src/crypto_alpha.rs`
+- Change: Refined the NegRisk direction buckets from the coarse `Range/Other` pair to explicit `InsideRange/OutsideRange` buckets while keeping `Up/Down` for one-sided thresholds, so range outcomes now reuse clearer semantics across dedupe and directional exposure caps.
+- Why: The original `Other` bucket was too ambiguous once directional risk limits were introduced, and range markets needed a more precise inside-vs-outside split to avoid mixing unrelated NegRisk exposures under one fallback label.
+
+### 2026-03-16
+- Area: `crates/pa-monitor/src/api.rs`, `src/app/helpers.rs`, `src/app/tasks.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added per-position crypto `direction` labels to the monitoring snapshot pipeline and updated the crypto frontend page to aggregate exposure by `asset + direction`, display the direction bucket inline, and surface the new single-direction exposure cap in the config summary/risk explanation.
+- Why: The crypto strategy now reasons and limits risk at the `asset + direction` level, so the frontend needed the same dimension to show whether live exposure is concentrated in `BTC-Up`, `BTC-Down`, `InsideRange`, or `OutsideRange` instead of flattening everything into one asset total.
+
+### 2026-03-16
+- Area: `crates/pa-monitor/src/api.rs`, `src/app/bootstrap.rs`, `src/app/market_runtime.rs`, `src/app/tasks.rs`, `src/main.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added a non-Prometheus `wallet_balance` field to `/api/status`, kept it refreshed alongside shared position snapshots, and used it in the crypto frontend page to highlight `asset + direction` rows that are at or near the configured single-direction exposure cap.
+- Why: Directional exposure limits are defined as a fraction of wallet balance, so the frontend needed the same live balance denominator to warn accurately when `BTC-Up` or similar buckets are approaching their configured cap without depending on metrics scraping.
+
+### 2026-03-16
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Changed the `asset + direction` exposure table to sort primarily by proximity to the configured single-direction cap, with cost basis and PnL only as secondary tie-breakers, and updated the UI copy to explain that ordering.
+- Why: Once direction-cap highlighting was added, the most useful default view is to surface the buckets closest to their limit first instead of forcing operators to scan manually through lower-risk rows.
+
+### 2026-03-16
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added an explicit `已用/上限` numeric readout to each `asset + direction` exposure row, showing the current cost basis against the configured single-direction dollar cap derived from live wallet balance.
+- Why: Color and badge cues were useful but still approximate, so operators needed the exact current-usage-vs-limit numbers inline to judge how close a direction bucket really is to its cap.
+
+### 2026-03-16
 - Area: `crates/pa-core/src/config.rs`, `src/app/bootstrap.rs`
 - Change: Moved the database configuration log to after environment override reapplication and added a direct `PA_DATABASE__URL` backfill onto `settings.database.url`.
 - Why: Local and container runs were logging `No database URL configured` even when `PA_DATABASE__URL` was present, so startup should apply env overrides before logging and should not rely only on nested `config` env deserialization for the database URL.

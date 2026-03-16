@@ -61,10 +61,8 @@ impl RiskManagerImpl {
         if size > Decimal::ZERO {
             self.recent_external_clears.remove(&token_id);
         } else {
-            self.recent_external_clears.insert(
-                token_id,
-                Instant::now() + Duration::from_secs(300),
-            );
+            self.recent_external_clears
+                .insert(token_id, Instant::now() + Duration::from_secs(300));
         }
         self.positions
             .sync_position(token_id, size, avg_cost, strategy_type, condition_id);

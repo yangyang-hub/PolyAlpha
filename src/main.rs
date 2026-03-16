@@ -5,9 +5,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use crate::app::bootstrap::{BootstrapArtifacts, init_tracing, load_runtime_settings};
 use crate::app::account_runtime::spawn_account_runtime;
 use crate::app::accounts::build_account_contexts;
+use crate::app::bootstrap::{BootstrapArtifacts, init_tracing, load_runtime_settings};
 use crate::app::market_runtime::{
     initialize_market_runtime, populate_initial_positions_snapshot, shutdown_runtime,
     spawn_shared_runtime_tasks,
@@ -53,6 +53,7 @@ async fn main() -> Result<()> {
     let lr_runtime_status = runtime.lr_runtime_status;
     let shared_positions = runtime.shared_positions;
     let shared_positions_updated_at = runtime.shared_positions_updated_at;
+    let wallet_balance = runtime.wallet_balance;
     let startup_ready = runtime.startup_ready;
     let shared_markets = runtime.shared_markets;
     let neg_risk_events = runtime.neg_risk_events;
@@ -84,6 +85,7 @@ async fn main() -> Result<()> {
         &market_data,
         &shared_positions,
         &shared_positions_updated_at,
+        &wallet_balance,
     )
     .await;
 
@@ -118,6 +120,7 @@ async fn main() -> Result<()> {
         Arc::clone(&market_data),
         Arc::clone(&shared_positions),
         Arc::clone(&shared_positions_updated_at),
+        Arc::clone(&wallet_balance),
         active_enabled_strategies.clone(),
         smart_money_token_maps,
         cancel.clone(),

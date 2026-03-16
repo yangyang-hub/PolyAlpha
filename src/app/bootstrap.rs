@@ -4,8 +4,8 @@
 //! loading, and API server startup.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
@@ -73,6 +73,7 @@ pub fn start_api_server(
     lr_runtime_status: Arc<tokio::sync::RwLock<LrRuntimeStatus>>,
     shared_positions: Arc<tokio::sync::RwLock<Vec<PositionApiEntry>>>,
     shared_positions_updated_at: Arc<tokio::sync::RwLock<Option<chrono::DateTime<Utc>>>>,
+    wallet_balance: Arc<tokio::sync::RwLock<rust_decimal::Decimal>>,
     startup_ready: Arc<AtomicBool>,
 ) {
     let api_state = Arc::new(ApiState {
@@ -85,6 +86,7 @@ pub fn start_api_server(
         lr_status: Some(lr_runtime_status),
         positions: shared_positions,
         positions_updated_at: shared_positions_updated_at,
+        wallet_balance,
         startup_ready,
     });
     let health_port = settings.monitor.health_port;

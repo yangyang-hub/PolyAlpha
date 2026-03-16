@@ -1,26 +1,29 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use alloy::primitives::U256;
 use async_trait::async_trait;
 use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use uuid::Uuid;
 
 use pa_core::config::CryptoAlphaConfig;
 use pa_core::traits::Strategy;
 use pa_core::types::{
-    BinaryEventGroup, ExecutionPlan, MarketInfo, NegRiskEvent, OrderBook, StrategyType, TradeSide,
-    TradingOpportunity,
+    BinaryEventGroup, EventImpact, ExecutionPlan, MarketInfo, NegRiskEvent, OrderBook,
+    StrategyType, TradeSide, TradingOpportunity,
 };
+use pa_market_data::event_calendar::EventCalendarService;
 
 use crate::profitability::ProfitCalculator;
 use crate::weather::{contains_word, normal_cdf, parse_target_date_server_local, with_retry};
 
 // ──── Asset Mapping ────
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct CryptoAsset {
     pub name: &'static str,
     pub keywords: &'static [&'static str],
@@ -130,6 +133,29 @@ pub enum PriceDirection {
     Below,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum CryptoDirectionBucket {
+    Up,
+    Down,
+    InsideRange,
+    OutsideRange,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CryptoMarketType {
+    Binary,
+    Range,
+}
+
+impl CryptoMarketType {
+    fn as_str(self) -> &'static str {
+        match self {
+            CryptoMarketType::Binary => "binary",
+            CryptoMarketType::Range => "range",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct CryptoQuestion {
     pub asset: &'static CryptoAsset,
@@ -205,6 +231,37 @@ fn parse_suffixed_number(token: &str) -> Option<f64> {
     let cleaned: String = num_part.chars().filter(|c| *c != ',').collect();
     let val: f64 = cleaned.parse().ok()?;
     Some(val * multiplier)
+}
+
+fn direction_bucket_label(bucket: CryptoDirectionBucket) -> &'static str {
+    match bucket {
+        CryptoDirectionBucket::Up => "up",
+        CryptoDirectionBucket::Down => "down",
+        CryptoDirectionBucket::InsideRange => "inside_range",
+        CryptoDirectionBucket::OutsideRange => "outside_range",
+    }
+}
+
+pub fn infer_crypto_direction_label(question: &str, outcome: Option<&str>) -> Option<&'static str> {
+    let is_yes = match outcome {
+        Some("YES") => true,
+        Some("NO") => false,
+        _ => return None,
+    };
+
+    if let Some(parsed) = parse_crypto_question(question) {
+        return Some(direction_bucket_label(
+            CryptoAlphaStrategy::binary_direction_bucket(parsed.direction, is_yes),
+        ));
+    }
+
+    if let Some(range) = parse_crypto_outcome_range(question) {
+        return Some(direction_bucket_label(
+            CryptoAlphaStrategy::range_direction_bucket(&range, is_yes),
+        ));
+    }
+
+    None
 }
 
 /// Parse a crypto prediction market question.
@@ -409,51 +466,78 @@ impl CryptoPriceClient {
         }
     }
 
-    /// Fetch current price + 30-day daily closes from Binance. Falls back to CoinGecko.
-    /// If the asset has a Deribit currency, also fetches DVOL implied volatility.
-    pub async fn get_price_data(&self, asset: &CryptoAsset) -> anyhow::Result<CryptoPriceData> {
-        // Try Binance first
-        let mut data = match self.fetch_binance(asset.binance_symbol).await {
-            Ok(d) => d,
+    pub async fn fetch_current_price(&self, asset: &CryptoAsset) -> anyhow::Result<f64> {
+        match self.fetch_binance_current_price(asset.binance_symbol).await {
+            Ok(price) => Ok(price),
             Err(e) => {
                 tracing::warn!(
                     asset = asset.name,
                     error = %e,
-                    "Binance fetch failed, trying CoinGecko fallback"
+                    "Binance spot fetch failed, trying CoinGecko fallback"
                 );
-                // Fallback to CoinGecko
                 if self
                     .coingecko_api_key
                     .as_ref()
                     .is_some_and(|k| !k.is_empty())
                 {
-                    self.fetch_coingecko(asset.coingecko_id).await?
+                    self.fetch_coingecko_current_price(asset.coingecko_id).await
                 } else {
                     anyhow::bail!(
-                        "Binance failed and CoinGecko API key not configured for {}",
+                        "Binance spot fetch failed and CoinGecko API key not configured for {}",
                         asset.name
                     )
                 }
             }
-        };
+        }
+    }
 
-        // Fetch Deribit DVOL for BTC/ETH
-        if let Some(currency) = asset.deribit_currency {
-            match self.fetch_deribit_dvol(currency).await {
-                Ok(iv) => {
-                    tracing::debug!(asset = asset.name, iv, "Fetched Deribit DVOL");
-                    data.implied_vol = Some(iv);
-                }
-                Err(e) => {
-                    tracing::warn!(asset = asset.name, error = %e, "Deribit DVOL fetch failed, using historical vol only");
+    pub async fn fetch_daily_closes(&self, asset: &CryptoAsset) -> anyhow::Result<Vec<f64>> {
+        match self.fetch_binance_daily_closes(asset.binance_symbol).await {
+            Ok(closes) => Ok(closes),
+            Err(e) => {
+                tracing::warn!(
+                    asset = asset.name,
+                    error = %e,
+                    "Binance history fetch failed, trying CoinGecko fallback"
+                );
+                if self
+                    .coingecko_api_key
+                    .as_ref()
+                    .is_some_and(|k| !k.is_empty())
+                {
+                    self.fetch_coingecko_daily_closes(asset.coingecko_id).await
+                } else {
+                    anyhow::bail!(
+                        "Binance history fetch failed and CoinGecko API key not configured for {}",
+                        asset.name
+                    )
                 }
             }
         }
-
-        Ok(data)
     }
 
-    async fn fetch_binance(&self, symbol: &str) -> anyhow::Result<CryptoPriceData> {
+    pub async fn fetch_implied_vol(&self, asset: &CryptoAsset) -> anyhow::Result<Option<f64>> {
+        let Some(currency) = asset.deribit_currency else {
+            return Ok(None);
+        };
+
+        match self.fetch_deribit_dvol(currency).await {
+            Ok(iv) => {
+                tracing::debug!(asset = asset.name, iv, "Fetched Deribit DVOL");
+                Ok(Some(iv))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    asset = asset.name,
+                    error = %e,
+                    "Deribit DVOL fetch failed, using historical vol only"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    async fn fetch_binance_current_price(&self, symbol: &str) -> anyhow::Result<f64> {
         // Current price
         let price_url = format!(
             "https://api.binance.com/api/v3/ticker/price?symbol={}",
@@ -476,6 +560,10 @@ impl CryptoPriceClient {
         })
         .await?;
 
+        Ok(current_price)
+    }
+
+    async fn fetch_binance_daily_closes(&self, symbol: &str) -> anyhow::Result<Vec<f64>> {
         // 30-day klines
         let kline_url = format!(
             "https://api.binance.com/api/v3/klines?symbol={}&interval=1d&limit=30",
@@ -508,14 +596,10 @@ impl CryptoPriceClient {
         })
         .await?;
 
-        Ok(CryptoPriceData {
-            current_price,
-            daily_closes,
-            implied_vol: None,
-        })
+        Ok(daily_closes)
     }
 
-    async fn fetch_coingecko(&self, coin_id: &str) -> anyhow::Result<CryptoPriceData> {
+    async fn fetch_coingecko_current_price(&self, coin_id: &str) -> anyhow::Result<f64> {
         let api_key = self
             .coingecko_api_key
             .as_ref()
@@ -549,6 +633,15 @@ impl CryptoPriceClient {
             }
         })
         .await?;
+
+        Ok(current_price)
+    }
+
+    async fn fetch_coingecko_daily_closes(&self, coin_id: &str) -> anyhow::Result<Vec<f64>> {
+        let api_key = self
+            .coingecko_api_key
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("CoinGecko API key not set"))?;
 
         // 30-day history
         let chart_url = format!(
@@ -585,11 +678,7 @@ impl CryptoPriceClient {
         })
         .await?;
 
-        Ok(CryptoPriceData {
-            current_price,
-            daily_closes,
-            implied_vol: None,
-        })
+        Ok(daily_closes)
     }
 
     /// Fetch the latest Deribit DVOL (30-day implied volatility index) for BTC or ETH.
@@ -704,10 +793,20 @@ pub fn gbm_probability(current_price: f64, threshold: f64, mu: f64, sigma: f64, 
 const BASELINE_CRYPTO_SIGMA: f64 = 0.60;
 
 struct CachedPrice {
-    data: CryptoPriceData,
-    fetched_at: chrono::DateTime<Utc>,
+    current_price: Option<f64>,
+    current_price_fetched_at: Option<chrono::DateTime<Utc>>,
+    daily_closes: Option<Vec<f64>>,
+    daily_closes_fetched_at: Option<chrono::DateTime<Utc>>,
+    implied_vol: Option<f64>,
+    implied_vol_fetched_at: Option<chrono::DateTime<Utc>>,
     /// Last computed annualized volatility, used to shorten cache TTL during high-vol periods.
     last_sigma: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EdgeDecayConfirmationState {
+    count: u32,
+    last_seen: Instant,
 }
 
 // ──── Strategy ────
@@ -726,6 +825,9 @@ pub struct CryptoAlphaStrategy {
     price_cache: Arc<Mutex<HashMap<String, CachedPrice>>>,
     neg_risk_events: Vec<NegRiskEvent>,
     binary_event_groups: Vec<BinaryEventGroup>,
+    event_calendar: Option<Arc<EventCalendarService>>,
+    edge_decay_cooldowns: Arc<Mutex<HashMap<U256, Instant>>>,
+    edge_decay_confirmations: Arc<Mutex<HashMap<U256, EdgeDecayConfirmationState>>>,
     /// Scan counter for periodic diagnostics (every ~600 scans ≈ 1 min at 100ms interval).
     scan_count: Arc<std::sync::atomic::AtomicU64>,
     /// Best near-miss edge (bps) seen since last diagnostic — shows how close to threshold.
@@ -740,9 +842,60 @@ pub struct CryptoAlphaDeps {
     pub get_balance: Box<dyn Fn() -> Decimal + Send + Sync>,
     pub neg_risk_events: Vec<NegRiskEvent>,
     pub binary_event_groups: Vec<BinaryEventGroup>,
+    pub event_calendar: Option<Arc<EventCalendarService>>,
 }
 
 impl CryptoAlphaStrategy {
+    fn binary_direction_bucket(direction: PriceDirection, is_yes: bool) -> CryptoDirectionBucket {
+        match (direction, is_yes) {
+            (PriceDirection::Above, true) | (PriceDirection::Below, false) => {
+                CryptoDirectionBucket::Up
+            }
+            (PriceDirection::Below, true) | (PriceDirection::Above, false) => {
+                CryptoDirectionBucket::Down
+            }
+        }
+    }
+
+    fn range_direction_bucket(range: &CryptoPriceRange, is_yes: bool) -> CryptoDirectionBucket {
+        match (range, is_yes) {
+            (CryptoPriceRange::AtOrAbove(_), true) | (CryptoPriceRange::AtOrBelow(_), false) => {
+                CryptoDirectionBucket::Up
+            }
+            (CryptoPriceRange::AtOrBelow(_), true) | (CryptoPriceRange::AtOrAbove(_), false) => {
+                CryptoDirectionBucket::Down
+            }
+            (CryptoPriceRange::Range(_, _), true) => CryptoDirectionBucket::InsideRange,
+            (CryptoPriceRange::Range(_, _), false) => CryptoDirectionBucket::OutsideRange,
+        }
+    }
+
+    fn record_rejection(asset: &CryptoAsset, reason: &'static str) {
+        pa_monitor::metrics::CRYPTO_ALPHA_REJECTIONS
+            .with_label_values(&[asset.name, reason])
+            .inc();
+    }
+
+    fn refresh_interval_or_legacy(&self, granular: u64) -> u64 {
+        if granular > 0 {
+            granular
+        } else {
+            self.config.refresh_interval_secs
+        }
+    }
+
+    fn spot_refresh_interval_secs(&self) -> u64 {
+        self.refresh_interval_or_legacy(self.config.spot_refresh_interval_secs)
+    }
+
+    fn history_refresh_interval_secs(&self) -> u64 {
+        self.refresh_interval_or_legacy(self.config.history_refresh_interval_secs)
+    }
+
+    fn iv_refresh_interval_secs(&self) -> u64 {
+        self.refresh_interval_or_legacy(self.config.iv_refresh_interval_secs)
+    }
+
     pub fn new(config: CryptoAlphaConfig, gas_cost_usd: Decimal, deps: CryptoAlphaDeps) -> Self {
         let CryptoAlphaDeps {
             get_orderbook,
@@ -752,6 +905,7 @@ impl CryptoAlphaStrategy {
             get_balance,
             neg_risk_events,
             binary_event_groups,
+            event_calendar,
         } = deps;
 
         let coingecko_key = if config.coingecko_api_key.is_empty() {
@@ -771,55 +925,667 @@ impl CryptoAlphaStrategy {
             price_cache: Arc::new(Mutex::new(HashMap::new())),
             neg_risk_events,
             binary_event_groups,
+            event_calendar,
+            edge_decay_cooldowns: Arc::new(Mutex::new(HashMap::new())),
+            edge_decay_confirmations: Arc::new(Mutex::new(HashMap::new())),
             scan_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             near_miss_edge_bps: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
-    /// Get price data, using cache if fresh enough.
-    /// TTL is dynamically shortened when recent volatility exceeds the baseline.
+    async fn effective_entry_thresholds(
+        &self,
+        market_text: &str,
+        days_to_resolution: u32,
+    ) -> (u32, u32) {
+        let mut min_edge_bps = self.config.min_edge_bps;
+        let mut max_spread_bps = self.config.max_spread_bps;
+
+        let (horizon_edge_multiplier, horizon_spread_multiplier) =
+            if days_to_resolution <= self.config.short_horizon_max_days {
+                (
+                    self.config.short_horizon_min_edge_multiplier,
+                    self.config.short_horizon_max_spread_multiplier,
+                )
+            } else if days_to_resolution <= self.config.medium_horizon_max_days {
+                (
+                    self.config.medium_horizon_min_edge_multiplier,
+                    self.config.medium_horizon_max_spread_multiplier,
+                )
+            } else {
+                (Decimal::ONE, Decimal::ONE)
+            };
+
+        min_edge_bps = (Decimal::from(min_edge_bps) * horizon_edge_multiplier)
+            .ceil()
+            .to_u32()
+            .unwrap_or(u32::MAX);
+        max_spread_bps = (Decimal::from(max_spread_bps) * horizon_spread_multiplier)
+            .floor()
+            .to_u32()
+            .unwrap_or(0);
+
+        let Some(event_calendar) = &self.event_calendar else {
+            return (min_edge_bps, max_spread_bps);
+        };
+
+        let Some(impact) = event_calendar
+            .matching_impact(market_text, Utc::now())
+            .await
+        else {
+            return (min_edge_bps, max_spread_bps);
+        };
+
+        let (edge_multiplier, spread_multiplier) = match impact {
+            EventImpact::Low => (
+                self.config.low_event_min_edge_multiplier,
+                self.config.low_event_max_spread_multiplier,
+            ),
+            EventImpact::Medium => (
+                self.config.medium_event_min_edge_multiplier,
+                self.config.medium_event_max_spread_multiplier,
+            ),
+            EventImpact::High => (
+                self.config.high_event_min_edge_multiplier,
+                self.config.high_event_max_spread_multiplier,
+            ),
+        };
+
+        min_edge_bps = (Decimal::from(min_edge_bps) * edge_multiplier)
+            .ceil()
+            .to_u32()
+            .unwrap_or(u32::MAX);
+        max_spread_bps = (Decimal::from(max_spread_bps) * spread_multiplier)
+            .floor()
+            .to_u32()
+            .unwrap_or(0);
+
+        (min_edge_bps, max_spread_bps)
+    }
+
+    async fn effective_event_sigma_multiplier(&self, market_text: &str) -> f64 {
+        let Some(event_calendar) = &self.event_calendar else {
+            return 1.0;
+        };
+
+        let Some(impact) = event_calendar
+            .matching_impact(market_text, Utc::now())
+            .await
+        else {
+            return 1.0;
+        };
+
+        let multiplier = match impact {
+            EventImpact::Low => self.config.low_event_sigma_multiplier,
+            EventImpact::Medium => self.config.medium_event_sigma_multiplier,
+            EventImpact::High => self.config.high_event_sigma_multiplier,
+        };
+
+        multiplier.to_f64().unwrap_or(1.0).max(1.0)
+    }
+
+    async fn effective_event_size_multiplier(&self, market_text: &str) -> Decimal {
+        let Some(event_calendar) = &self.event_calendar else {
+            return Decimal::ONE;
+        };
+
+        let Some(impact) = event_calendar
+            .matching_impact(market_text, Utc::now())
+            .await
+        else {
+            return Decimal::ONE;
+        };
+
+        match impact {
+            EventImpact::Low => self.config.low_event_size_multiplier,
+            EventImpact::Medium => self.config.medium_event_size_multiplier,
+            EventImpact::High => self.config.high_event_size_multiplier,
+        }
+        .min(Decimal::ONE)
+        .max(Decimal::ZERO)
+    }
+
+    async fn effective_sigma_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+        market_text: &str,
+    ) -> f64 {
+        let event_multiplier = self.effective_event_sigma_multiplier(market_text).await;
+        let override_multiplier = self
+            .calibration_override_sigma_multiplier(asset, days_to_resolution, market_type)
+            .unwrap_or(Decimal::ONE)
+            .to_f64()
+            .unwrap_or(1.0);
+        (event_multiplier * override_multiplier).max(0.0)
+    }
+
+    async fn effective_size_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+        market_text: &str,
+    ) -> Decimal {
+        let event_multiplier = self.effective_event_size_multiplier(market_text).await;
+        let horizon_multiplier = self.effective_horizon_size_multiplier(days_to_resolution);
+        let override_multiplier = self
+            .calibration_override_size_multiplier(asset, days_to_resolution, market_type)
+            .unwrap_or(Decimal::ONE);
+        (event_multiplier * horizon_multiplier * override_multiplier)
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO)
+    }
+
+    fn effective_horizon_size_multiplier(&self, days_to_resolution: u32) -> Decimal {
+        if days_to_resolution <= self.config.short_horizon_max_days {
+            self.config.short_horizon_size_multiplier
+        } else if days_to_resolution <= self.config.medium_horizon_max_days {
+            self.config.medium_horizon_size_multiplier
+        } else {
+            Decimal::ONE
+        }
+        .min(Decimal::ONE)
+        .max(Decimal::ZERO)
+    }
+
+    fn horizon_bucket(&self, days_to_resolution: u32) -> &'static str {
+        if days_to_resolution <= self.config.short_horizon_max_days {
+            "short"
+        } else if days_to_resolution <= self.config.medium_horizon_max_days {
+            "medium"
+        } else {
+            "long"
+        }
+    }
+
+    fn calibration_override_entry(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+    ) -> Option<&pa_core::config::CryptoCalibrationOverride> {
+        let horizon = self.horizon_bucket(days_to_resolution);
+        self.config.calibration_overrides.iter().find(|entry| {
+            let asset_match = entry.asset.is_empty()
+                || entry.asset == "*"
+                || entry.asset.eq_ignore_ascii_case(asset.binance_symbol);
+            let horizon_match = entry.horizon.is_empty()
+                || entry.horizon.eq_ignore_ascii_case("any")
+                || entry.horizon.eq_ignore_ascii_case(horizon);
+            let market_type_match = entry.market_type.is_empty()
+                || entry.market_type.eq_ignore_ascii_case("any")
+                || entry.market_type.eq_ignore_ascii_case(market_type.as_str());
+            asset_match && horizon_match && market_type_match
+        })
+    }
+
+    fn calibration_override_probability(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+    ) -> Option<Decimal> {
+        self.calibration_override_entry(asset, days_to_resolution, market_type)
+            .and_then(|entry| entry.probability_calibration)
+            .map(|v| v.min(Decimal::ONE).max(Decimal::ZERO))
+    }
+
+    fn calibration_override_sigma_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+    ) -> Option<Decimal> {
+        self.calibration_override_entry(asset, days_to_resolution, market_type)
+            .and_then(|entry| entry.sigma_multiplier)
+            .map(|v| v.max(Decimal::ZERO))
+    }
+
+    fn calibration_override_size_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+    ) -> Option<Decimal> {
+        self.calibration_override_entry(asset, days_to_resolution, market_type)
+            .and_then(|entry| entry.size_multiplier)
+            .map(|v| v.min(Decimal::ONE).max(Decimal::ZERO))
+    }
+
+    fn effective_probability_calibration_factor(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+    ) -> Decimal {
+        if let Some(override_factor) =
+            self.calibration_override_probability(asset, days_to_resolution, market_type)
+        {
+            return override_factor;
+        }
+        let asset_factor = match asset.binance_symbol {
+            "BTCUSDT" => self.config.btc_probability_calibration,
+            "ETHUSDT" => self.config.eth_probability_calibration,
+            _ => self.config.alt_probability_calibration,
+        };
+        let horizon_factor = if days_to_resolution <= self.config.short_horizon_max_days {
+            self.config.short_horizon_probability_calibration
+        } else if days_to_resolution <= self.config.medium_horizon_max_days {
+            self.config.medium_horizon_probability_calibration
+        } else {
+            Decimal::ONE
+        };
+        let market_type_factor = match market_type {
+            CryptoMarketType::Binary => self.config.binary_probability_calibration,
+            CryptoMarketType::Range => self.config.range_probability_calibration,
+        };
+
+        (asset_factor * horizon_factor * market_type_factor)
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO)
+    }
+
+    fn calibrate_probability(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+        raw_prob: Decimal,
+    ) -> Decimal {
+        let factor =
+            self.effective_probability_calibration_factor(asset, days_to_resolution, market_type);
+        (dec!(0.5) + ((raw_prob - dec!(0.5)) * factor))
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO)
+    }
+
+    fn effective_exit_thresholds(&self, days_to_resolution: u32) -> (Decimal, Decimal) {
+        if days_to_resolution <= self.config.short_horizon_max_days {
+            (
+                self.config.short_horizon_capital_efficiency_threshold,
+                (Decimal::from(self.config.exit_buffer_bps) / dec!(10000))
+                    * self.config.short_horizon_exit_buffer_multiplier,
+            )
+        } else if days_to_resolution <= self.config.medium_horizon_max_days {
+            (
+                self.config.medium_horizon_capital_efficiency_threshold,
+                (Decimal::from(self.config.exit_buffer_bps) / dec!(10000))
+                    * self.config.medium_horizon_exit_buffer_multiplier,
+            )
+        } else {
+            (
+                self.config.capital_efficiency_threshold,
+                Decimal::from(self.config.exit_buffer_bps) / dec!(10000),
+            )
+        }
+    }
+
+    fn effective_hold_edge_threshold(&self, days_to_resolution: u32) -> Decimal {
+        let multiplier = if days_to_resolution <= self.config.short_horizon_max_days {
+            self.config.short_horizon_hold_edge_multiplier
+        } else if days_to_resolution <= self.config.medium_horizon_max_days {
+            self.config.medium_horizon_hold_edge_multiplier
+        } else {
+            Decimal::ONE
+        };
+
+        (Decimal::from(self.config.hold_min_edge_bps) / dec!(10000)) * multiplier
+    }
+
+    fn effective_edge_decay_exit_fraction(&self, days_to_resolution: u32) -> Decimal {
+        let multiplier = if days_to_resolution <= self.config.short_horizon_max_days {
+            self.config.short_horizon_edge_decay_exit_multiplier
+        } else if days_to_resolution <= self.config.medium_horizon_max_days {
+            self.config.medium_horizon_edge_decay_exit_multiplier
+        } else {
+            Decimal::ONE
+        };
+
+        (self.config.edge_decay_exit_fraction * multiplier)
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO)
+    }
+
+    fn edge_decay_severity_multiplier(
+        &self,
+        edge_shortfall: Decimal,
+        moderate_multiplier: Decimal,
+        severe_multiplier: Decimal,
+    ) -> Decimal {
+        if edge_shortfall >= Decimal::from(self.config.edge_decay_severe_gap_bps) / dec!(10000) {
+            severe_multiplier
+        } else if edge_shortfall
+            >= Decimal::from(self.config.edge_decay_moderate_gap_bps) / dec!(10000)
+        {
+            moderate_multiplier
+        } else {
+            Decimal::ONE
+        }
+    }
+
+    fn planned_edge_decay_exit_size(
+        &self,
+        position_size: Decimal,
+        best_bid: Decimal,
+        days_to_resolution: u32,
+        confirmations: u32,
+        edge_shortfall: Decimal,
+    ) -> Decimal {
+        let required_confirmations =
+            self.effective_edge_decay_confirmation_scans(days_to_resolution, edge_shortfall);
+        let extra_confirmations = confirmations.saturating_sub(required_confirmations);
+        let severity_multiplier = self.edge_decay_severity_multiplier(
+            edge_shortfall,
+            self.config.edge_decay_moderate_exit_multiplier,
+            self.config.edge_decay_severe_exit_multiplier,
+        );
+        let fraction = ((self.effective_edge_decay_exit_fraction(days_to_resolution)
+            + (self.config.edge_decay_exit_fraction_step * Decimal::from(extra_confirmations)))
+            * severity_multiplier)
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO);
+        let partial = (position_size * fraction).round_dp(2);
+        if partial <= Decimal::ZERO
+            || (best_bid > Decimal::ZERO && partial * best_bid < Decimal::ONE)
+        {
+            position_size
+        } else {
+            partial.min(position_size)
+        }
+    }
+
+    fn edge_decay_cooldown_active(&self, token_id: U256) -> bool {
+        let cooldowns = self.edge_decay_cooldowns.lock().unwrap();
+        cooldowns
+            .get(&token_id)
+            .is_some_and(|until| *until > Instant::now())
+    }
+
+    fn effective_edge_decay_cooldown_secs(
+        &self,
+        days_to_resolution: u32,
+        edge_shortfall: Decimal,
+    ) -> u64 {
+        let horizon_multiplier = if days_to_resolution <= self.config.short_horizon_max_days {
+            self.config.short_horizon_edge_decay_cooldown_multiplier
+        } else if days_to_resolution <= self.config.medium_horizon_max_days {
+            self.config.medium_horizon_edge_decay_cooldown_multiplier
+        } else {
+            Decimal::ONE
+        };
+        let severity_multiplier = self.edge_decay_severity_multiplier(
+            edge_shortfall,
+            self.config.edge_decay_moderate_cooldown_multiplier,
+            self.config.edge_decay_severe_cooldown_multiplier,
+        );
+
+        (Decimal::from(self.config.edge_decay_cooldown_secs)
+            * horizon_multiplier
+            * severity_multiplier)
+            .round()
+            .to_u64()
+            .unwrap_or(self.config.edge_decay_cooldown_secs)
+            .max(1)
+    }
+
+    fn effective_edge_decay_confirmation_scans(
+        &self,
+        days_to_resolution: u32,
+        edge_shortfall: Decimal,
+    ) -> u32 {
+        let base = if days_to_resolution <= self.config.short_horizon_max_days {
+            self.config.short_horizon_edge_decay_confirmation_scans
+        } else if days_to_resolution <= self.config.medium_horizon_max_days {
+            self.config.medium_horizon_edge_decay_confirmation_scans
+        } else {
+            self.config.edge_decay_confirmation_scans
+        };
+        let severity_multiplier = self.edge_decay_severity_multiplier(
+            edge_shortfall,
+            self.config.edge_decay_moderate_confirmation_scan_multiplier,
+            self.config.edge_decay_severe_confirmation_scan_multiplier,
+        );
+
+        (Decimal::from(base) * severity_multiplier)
+            .ceil()
+            .to_u32()
+            .unwrap_or(base)
+            .max(1)
+    }
+
+    fn effective_edge_decay_confirmation_window_secs(
+        &self,
+        days_to_resolution: u32,
+        edge_shortfall: Decimal,
+    ) -> u64 {
+        let horizon_multiplier = if days_to_resolution <= self.config.short_horizon_max_days {
+            self.config
+                .short_horizon_edge_decay_confirmation_window_multiplier
+        } else if days_to_resolution <= self.config.medium_horizon_max_days {
+            self.config
+                .medium_horizon_edge_decay_confirmation_window_multiplier
+        } else {
+            Decimal::ONE
+        };
+        let severity_multiplier = self.edge_decay_severity_multiplier(
+            edge_shortfall,
+            self.config
+                .edge_decay_moderate_confirmation_window_multiplier,
+            self.config.edge_decay_severe_confirmation_window_multiplier,
+        );
+
+        (Decimal::from(self.config.edge_decay_confirmation_window_secs)
+            * horizon_multiplier
+            * severity_multiplier)
+            .round()
+            .to_u64()
+            .unwrap_or(self.config.edge_decay_confirmation_window_secs)
+            .max(1)
+    }
+
+    fn set_edge_decay_cooldown(
+        &self,
+        token_id: U256,
+        days_to_resolution: u32,
+        edge_shortfall: Decimal,
+    ) {
+        let mut cooldowns = self.edge_decay_cooldowns.lock().unwrap();
+        cooldowns.insert(
+            token_id,
+            Instant::now()
+                + Duration::from_secs(
+                    self.effective_edge_decay_cooldown_secs(days_to_resolution, edge_shortfall),
+                ),
+        );
+        if cooldowns.len() > 512 {
+            let now = Instant::now();
+            cooldowns.retain(|_, until| *until > now);
+        }
+    }
+
+    fn note_edge_decay_confirmation(
+        &self,
+        token_id: U256,
+        days_to_resolution: u32,
+        edge_shortfall: Decimal,
+    ) -> u32 {
+        let mut confirmations = self.edge_decay_confirmations.lock().unwrap();
+        let now = Instant::now();
+        let window = Duration::from_secs(
+            self.effective_edge_decay_confirmation_window_secs(days_to_resolution, edge_shortfall),
+        );
+        let count = {
+            let state = confirmations
+                .entry(token_id)
+                .or_insert(EdgeDecayConfirmationState {
+                    count: 0,
+                    last_seen: now,
+                });
+            if now.duration_since(state.last_seen) <= window {
+                state.count = state.count.saturating_add(1);
+            } else {
+                state.count = 1;
+            }
+            state.last_seen = now;
+            state.count
+        };
+        if confirmations.len() > 512 {
+            let max_window_secs = self
+                .config
+                .edge_decay_confirmation_window_secs
+                .max(self.effective_edge_decay_confirmation_window_secs(
+                    self.config.medium_horizon_max_days,
+                    Decimal::ZERO,
+                ))
+                .max(self.effective_edge_decay_confirmation_window_secs(
+                    self.config.short_horizon_max_days,
+                    Decimal::ZERO,
+                ));
+            let max_window = Duration::from_secs(max_window_secs);
+            confirmations
+                .retain(|_, existing| now.duration_since(existing.last_seen) <= max_window);
+        }
+        count
+    }
+
+    fn reset_edge_decay_confirmation(&self, token_id: U256) {
+        let mut confirmations = self.edge_decay_confirmations.lock().unwrap();
+        confirmations.remove(&token_id);
+    }
+
+    /// Get price data, using independently refreshed cache components.
+    /// Spot TTL is dynamically shortened when recent volatility exceeds the baseline.
     async fn get_price_data(&self, asset: &CryptoAsset) -> anyhow::Result<CryptoPriceData> {
         let cache_key = asset.binance_symbol.to_string();
-        let refresh_secs = self.config.refresh_interval_secs;
-
-        // Check cache with dynamic TTL
-        {
+        let now = Utc::now();
+        let (
+            mut current_price,
+            mut daily_closes,
+            mut implied_vol,
+            last_sigma,
+            spot_fetched_at,
+            history_fetched_at,
+            iv_fetched_at,
+        ) = {
             let cache = self.price_cache.lock().unwrap();
             if let Some(cached) = cache.get(&cache_key) {
-                let age = Utc::now()
-                    .signed_duration_since(cached.fetched_at)
-                    .num_seconds();
-                let effective_ttl = match cached.last_sigma {
-                    Some(sigma) if sigma > 0.0 => {
-                        let scale = (sigma / BASELINE_CRYPTO_SIGMA).max(1.0);
-                        refresh_secs as f64 / scale
-                    }
-                    _ => refresh_secs as f64,
-                };
-                if age < effective_ttl as i64 {
-                    return Ok(cached.data.clone());
+                (
+                    cached.current_price,
+                    cached.daily_closes.clone(),
+                    cached.implied_vol,
+                    cached.last_sigma,
+                    cached.current_price_fetched_at,
+                    cached.daily_closes_fetched_at,
+                    cached.implied_vol_fetched_at,
+                )
+            } else {
+                (None, None, None, None, None, None, None)
+            }
+        };
+
+        let spot_ttl = match last_sigma {
+            Some(sigma) if sigma > 0.0 => {
+                let scale = (sigma / BASELINE_CRYPTO_SIGMA).max(1.0);
+                self.spot_refresh_interval_secs() as f64 / scale
+            }
+            _ => self.spot_refresh_interval_secs() as f64,
+        };
+
+        let spot_fresh = spot_fetched_at
+            .map(|ts| now.signed_duration_since(ts).num_seconds() < spot_ttl as i64)
+            .unwrap_or(false);
+        let mut spot_refreshed = false;
+        if !spot_fresh || current_price.is_none() {
+            pa_monitor::metrics::CRYPTO_ALPHA_CACHE_EVENTS
+                .with_label_values(&[asset.name, "spot", "refresh"])
+                .inc();
+            current_price = Some(self.price_client.fetch_current_price(asset).await?);
+            spot_refreshed = true;
+        } else {
+            pa_monitor::metrics::CRYPTO_ALPHA_CACHE_EVENTS
+                .with_label_values(&[asset.name, "spot", "hit"])
+                .inc();
+        }
+
+        let history_fresh = history_fetched_at
+            .map(|ts| {
+                now.signed_duration_since(ts).num_seconds()
+                    < self.history_refresh_interval_secs() as i64
+            })
+            .unwrap_or(false);
+        let mut history_refreshed = false;
+        if !history_fresh || daily_closes.is_none() {
+            pa_monitor::metrics::CRYPTO_ALPHA_CACHE_EVENTS
+                .with_label_values(&[asset.name, "history", "refresh"])
+                .inc();
+            daily_closes = Some(self.price_client.fetch_daily_closes(asset).await?);
+            history_refreshed = true;
+        } else {
+            pa_monitor::metrics::CRYPTO_ALPHA_CACHE_EVENTS
+                .with_label_values(&[asset.name, "history", "hit"])
+                .inc();
+        }
+
+        let iv_required = asset.deribit_currency.is_some();
+        let iv_fresh = iv_fetched_at
+            .map(|ts| {
+                now.signed_duration_since(ts).num_seconds() < self.iv_refresh_interval_secs() as i64
+            })
+            .unwrap_or(false);
+        let mut iv_refreshed = false;
+        if iv_required && (!iv_fresh || implied_vol.is_none()) {
+            pa_monitor::metrics::CRYPTO_ALPHA_CACHE_EVENTS
+                .with_label_values(&[asset.name, "iv", "refresh"])
+                .inc();
+            implied_vol = self.price_client.fetch_implied_vol(asset).await?;
+            iv_refreshed = true;
+        } else if iv_required {
+            pa_monitor::metrics::CRYPTO_ALPHA_CACHE_EVENTS
+                .with_label_values(&[asset.name, "iv", "hit"])
+                .inc();
+        }
+
+        {
+            let mut cache = self.price_cache.lock().unwrap();
+            let entry = cache.entry(cache_key).or_insert(CachedPrice {
+                current_price: None,
+                current_price_fetched_at: None,
+                daily_closes: None,
+                daily_closes_fetched_at: None,
+                implied_vol: None,
+                implied_vol_fetched_at: None,
+                last_sigma,
+            });
+
+            if let Some(price) = current_price {
+                entry.current_price = Some(price);
+                if spot_refreshed {
+                    entry.current_price_fetched_at = Some(now);
+                }
+            }
+            if let Some(ref closes) = daily_closes {
+                entry.daily_closes = Some(closes.clone());
+                if history_refreshed {
+                    entry.daily_closes_fetched_at = Some(now);
+                }
+            }
+            if iv_required {
+                entry.implied_vol = implied_vol;
+                if iv_refreshed {
+                    entry.implied_vol_fetched_at = Some(now);
                 }
             }
         }
 
-        // Fetch fresh data
-        let data = self.price_client.get_price_data(asset).await?;
-
-        // Update cache (preserve last_sigma from previous entry if available)
-        {
-            let mut cache = self.price_cache.lock().unwrap();
-            let prev_sigma = cache.get(&cache_key).and_then(|c| c.last_sigma);
-            cache.insert(
-                cache_key,
-                CachedPrice {
-                    data: data.clone(),
-                    fetched_at: Utc::now(),
-                    last_sigma: prev_sigma,
-                },
-            );
-        }
-
-        Ok(data)
+        Ok(CryptoPriceData {
+            current_price: current_price
+                .ok_or_else(|| anyhow::anyhow!("Missing cached/fetched current price"))?,
+            daily_closes: daily_closes
+                .ok_or_else(|| anyhow::anyhow!("Missing cached/fetched daily closes"))?,
+            implied_vol,
+        })
     }
 
     /// Update the cached volatility for dynamic TTL calculation.
@@ -831,13 +1597,318 @@ impl CryptoAlphaStrategy {
         }
     }
 
+    fn build_token_asset_map(&self, markets: &[MarketInfo]) -> HashMap<U256, &'static CryptoAsset> {
+        let mut token_assets = HashMap::new();
+
+        for market in markets {
+            if let Some(asset) = parse_crypto_question(&market.question).map(|q| q.asset) {
+                for token in &market.tokens {
+                    token_assets.insert(token.token_id, asset);
+                }
+                continue;
+            }
+
+            if let Some(title) = market.event_title.as_ref()
+                && let Some((asset, _)) = parse_crypto_event_title(title)
+            {
+                for token in &market.tokens {
+                    token_assets.insert(token.token_id, asset);
+                }
+            }
+        }
+
+        for event in &self.neg_risk_events {
+            if let Some((asset, _)) = parse_crypto_event_title(&event.title) {
+                for market in &event.markets {
+                    for token in &market.tokens {
+                        token_assets.insert(token.token_id, asset);
+                    }
+                }
+            }
+        }
+
+        for group in &self.binary_event_groups {
+            if let Some(asset) = find_asset(&group.title).or_else(|| {
+                group
+                    .markets
+                    .iter()
+                    .find_map(|market| parse_crypto_question(&market.question).map(|q| q.asset))
+            }) {
+                for market in &group.markets {
+                    for token in &market.tokens {
+                        token_assets.insert(token.token_id, asset);
+                    }
+                }
+            }
+        }
+
+        token_assets
+    }
+
+    fn build_token_direction_map(
+        &self,
+        markets: &[MarketInfo],
+    ) -> HashMap<U256, CryptoDirectionBucket> {
+        let mut token_directions = HashMap::new();
+
+        for market in markets {
+            if let Some(question) = parse_crypto_question(&market.question)
+                && market.tokens.len() >= 2
+            {
+                token_directions.insert(
+                    market.tokens[0].token_id,
+                    Self::binary_direction_bucket(question.direction, true),
+                );
+                token_directions.insert(
+                    market.tokens[1].token_id,
+                    Self::binary_direction_bucket(question.direction, false),
+                );
+                continue;
+            }
+
+            if let Some(range) = parse_crypto_outcome_range(&market.question)
+                && market.tokens.len() >= 2
+            {
+                token_directions.insert(
+                    market.tokens[0].token_id,
+                    Self::range_direction_bucket(&range, true),
+                );
+                token_directions.insert(
+                    market.tokens[1].token_id,
+                    Self::range_direction_bucket(&range, false),
+                );
+            }
+        }
+
+        for event in &self.neg_risk_events {
+            for market in &event.markets {
+                if let Some(range) = parse_crypto_outcome_range(&market.question)
+                    && market.tokens.len() >= 2
+                {
+                    token_directions.insert(
+                        market.tokens[0].token_id,
+                        Self::range_direction_bucket(&range, true),
+                    );
+                    token_directions.insert(
+                        market.tokens[1].token_id,
+                        Self::range_direction_bucket(&range, false),
+                    );
+                }
+            }
+        }
+
+        for group in &self.binary_event_groups {
+            for market in &group.markets {
+                if let Some(question) = parse_crypto_question(&market.question)
+                    && market.tokens.len() >= 2
+                {
+                    token_directions.insert(
+                        market.tokens[0].token_id,
+                        Self::binary_direction_bucket(question.direction, true),
+                    );
+                    token_directions.insert(
+                        market.tokens[1].token_id,
+                        Self::binary_direction_bucket(question.direction, false),
+                    );
+                }
+            }
+        }
+
+        token_directions
+    }
+
+    fn current_asset_exposure(
+        &self,
+        asset: &CryptoAsset,
+        token_assets: &HashMap<U256, &'static CryptoAsset>,
+    ) -> Decimal {
+        (self.get_held_positions)()
+            .into_iter()
+            .filter_map(|(token_id, size, avg_cost)| {
+                let held_asset = token_assets.get(&token_id)?;
+                if held_asset.binance_symbol == asset.binance_symbol {
+                    Some(size * avg_cost)
+                } else {
+                    None
+                }
+            })
+            .sum()
+    }
+
+    fn current_asset_direction_exposure(
+        &self,
+        asset: &CryptoAsset,
+        direction: CryptoDirectionBucket,
+        token_assets: &HashMap<U256, &'static CryptoAsset>,
+        token_directions: &HashMap<U256, CryptoDirectionBucket>,
+    ) -> Decimal {
+        (self.get_held_positions)()
+            .into_iter()
+            .filter_map(|(token_id, size, avg_cost)| {
+                let held_asset = token_assets.get(&token_id)?;
+                let held_direction = token_directions.get(&token_id)?;
+                if held_asset.binance_symbol == asset.binance_symbol && *held_direction == direction
+                {
+                    Some(size * avg_cost)
+                } else {
+                    None
+                }
+            })
+            .sum()
+    }
+
+    fn size_entry(
+        &self,
+        asset: &CryptoAsset,
+        direction: CryptoDirectionBucket,
+        token_id: U256,
+        ask_price: Decimal,
+        edge: Decimal,
+        days_to_resolution: u32,
+        event_size_multiplier: Decimal,
+        current_asset_exposure: Decimal,
+        current_asset_direction_exposure: Decimal,
+    ) -> Option<Decimal> {
+        let wallet_balance = (self.get_balance)();
+        let market_cap = wallet_balance * self.config.max_position_pct;
+        let asset_cap = wallet_balance * self.config.max_exposure_per_asset_pct;
+        let asset_direction_cap = wallet_balance * self.config.max_exposure_per_asset_direction_pct;
+        let available = (self.get_available_capital)();
+
+        let existing_cost = (self.get_position)(token_id) * ask_price;
+        let remaining_market = (market_cap - existing_cost).max(Decimal::ZERO);
+        let remaining_asset = (asset_cap - current_asset_exposure).max(Decimal::ZERO);
+        let remaining_asset_direction =
+            (asset_direction_cap - current_asset_direction_exposure).max(Decimal::ZERO);
+        let effective_max = remaining_market
+            .min(remaining_asset)
+            .min(remaining_asset_direction);
+        if effective_max <= Decimal::ZERO {
+            Self::record_rejection(asset, "asset_exposure_cap");
+            tracing::debug!(
+                asset = asset.name,
+                direction = ?direction,
+                market_cap = %market_cap,
+                asset_cap = %asset_cap,
+                asset_direction_cap = %asset_direction_cap,
+                existing_cost = %existing_cost,
+                current_asset_exposure = %current_asset_exposure,
+                current_asset_direction_exposure = %current_asset_direction_exposure,
+                "[CryptoAlpha] Rejecting: no remaining asset/market exposure room"
+            );
+            return None;
+        }
+
+        let kelly_raw = if ask_price > Decimal::ZERO && ask_price < dec!(0.99) {
+            (edge / (Decimal::ONE - ask_price)).min(Decimal::TWO)
+        } else {
+            Decimal::ZERO
+        };
+        let horizon_size_multiplier = self.effective_horizon_size_multiplier(days_to_resolution);
+        let kelly_size = kelly_raw
+            * self.config.kelly_fraction
+            * event_size_multiplier
+            * horizon_size_multiplier
+            * effective_max;
+        let size = kelly_size.min(effective_max).min(available);
+
+        let size = if size > Decimal::ZERO && ask_price > Decimal::ZERO && kelly_raw >= dec!(0.04) {
+            let min_cost_size = (Decimal::ONE / ask_price).ceil();
+            size.max(min_cost_size)
+        } else {
+            size
+        };
+        let size = size.min(effective_max).min(available);
+
+        if size <= Decimal::ZERO || (ask_price > Decimal::ZERO && size * ask_price < Decimal::ONE) {
+            Self::record_rejection(asset, "min_order_or_budget");
+            return None;
+        }
+
+        Some(size)
+    }
+
+    fn entry_depth_buffer(&self, opp: &TradingOpportunity) -> Decimal {
+        let ExecutionPlan::DirectionalBuy {
+            token_id,
+            side,
+            price,
+            size,
+            ..
+        } = &opp.execution_plan;
+        let Some(book) = (self.get_orderbook)(*token_id) else {
+            return Decimal::ZERO;
+        };
+        if *size <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+        let depth = book.available_depth(*side, *price);
+        depth / *size
+    }
+
+    fn keep_better_entry(
+        &self,
+        best_by_asset: &mut HashMap<(&'static str, CryptoDirectionBucket), TradingOpportunity>,
+        asset: &'static CryptoAsset,
+        direction: CryptoDirectionBucket,
+        candidate: TradingOpportunity,
+    ) {
+        fn profit_efficiency(opp: &TradingOpportunity) -> Decimal {
+            let cost = opp.execution_plan.estimated_cost();
+            if cost > Decimal::ZERO {
+                opp.estimated_profit / cost
+            } else {
+                Decimal::ZERO
+            }
+        }
+
+        match best_by_asset.get_mut(&(asset.binance_symbol, direction)) {
+            Some(existing) => {
+                let candidate_cost = candidate.execution_plan.estimated_cost();
+                let existing_cost = existing.execution_plan.estimated_cost();
+                let candidate_efficiency = profit_efficiency(&candidate);
+                let existing_efficiency = profit_efficiency(existing);
+                let candidate_depth_buffer = self.entry_depth_buffer(&candidate);
+                let existing_depth_buffer = self.entry_depth_buffer(existing);
+                let candidate_better = candidate.estimated_profit > existing.estimated_profit
+                    || (candidate.estimated_profit == existing.estimated_profit
+                        && candidate_efficiency > existing_efficiency)
+                    || (candidate.estimated_profit == existing.estimated_profit
+                        && candidate_efficiency == existing_efficiency
+                        && candidate_depth_buffer > existing_depth_buffer)
+                    || (candidate.estimated_profit == existing.estimated_profit
+                        && candidate_efficiency == existing_efficiency
+                        && candidate_depth_buffer == existing_depth_buffer
+                        && candidate_cost < existing_cost)
+                    || (candidate.estimated_profit == existing.estimated_profit
+                        && candidate_efficiency == existing_efficiency
+                        && candidate_depth_buffer == existing_depth_buffer
+                        && candidate_cost == existing_cost
+                        && candidate.spread > existing.spread)
+                    || (candidate.estimated_profit == existing.estimated_profit
+                        && candidate_efficiency == existing_efficiency
+                        && candidate_depth_buffer == existing_depth_buffer
+                        && candidate_cost == existing_cost
+                        && candidate.spread == existing.spread
+                        && candidate.size > existing.size);
+                if candidate_better {
+                    *existing = candidate;
+                }
+            }
+            None => {
+                best_by_asset.insert((asset.binance_symbol, direction), candidate);
+            }
+        }
+    }
+
     /// Detect a crypto alpha opportunity on a single market.
-    pub async fn detect_crypto_opportunity(
+    async fn detect_crypto_opportunity(
         &self,
         market: &MarketInfo,
+        current_asset_exposure: Decimal,
+        asset_direction_exposure: &HashMap<(&'static str, CryptoDirectionBucket), Decimal>,
     ) -> Option<TradingOpportunity> {
         let question = parse_crypto_question(&market.question)?;
-
         // Require a target date
         let target_date = question.target_date?;
         let now_date = Utc::now().date_naive();
@@ -845,6 +1916,9 @@ impl CryptoAlphaStrategy {
         if days <= 0 {
             return None;
         }
+        let (effective_min_edge_bps, effective_max_spread_bps) = self
+            .effective_entry_thresholds(&market.question, days as u32)
+            .await;
 
         // Fetch price data
         let price_data = match self.get_price_data(question.asset).await {
@@ -862,7 +1936,15 @@ impl CryptoAlphaStrategy {
         // Calculate volatility
         let (mu, sigma) = calculate_volatility(&price_data.daily_closes)?;
         let mu = mu * self.config.drift_decay;
-        let sigma = effective_volatility(sigma, price_data.implied_vol);
+        let sigma = effective_volatility(sigma, price_data.implied_vol)
+            * self
+                .effective_sigma_multiplier(
+                    question.asset,
+                    days as u32,
+                    CryptoMarketType::Binary,
+                    &market.question,
+                )
+                .await;
         self.update_cache_sigma(question.asset.binance_symbol, sigma);
 
         // GBM probability P(S_T > K)
@@ -914,29 +1996,47 @@ impl CryptoAlphaStrategy {
             use rust_decimal::prelude::ToPrimitive;
             (max_spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
         };
-        if spread_bps > self.config.max_spread_bps {
+        if spread_bps > effective_max_spread_bps {
+            Self::record_rejection(question.asset, "spread_too_wide");
             tracing::debug!(
                 question = %market.question,
                 yes_spread_bps = %((yes_spread * dec!(10000)).round()),
                 no_spread_bps = %((no_spread * dec!(10000)).round()),
-                max_allowed = self.config.max_spread_bps,
+                max_allowed = effective_max_spread_bps,
                 "[CryptoAlpha] Rejecting: spread too wide"
             );
             return None;
         }
 
         // Check both YES and NO sides, pick larger edge
-        let model_prob = Decimal::from_f64_retain(model_prob_f64)?;
+        let model_prob = self.calibrate_probability(
+            question.asset,
+            days as u32,
+            CryptoMarketType::Binary,
+            Decimal::from_f64_retain(model_prob_f64)?,
+        );
         let model_prob_no = Decimal::ONE - model_prob;
 
         let yes_edge = model_prob - yes_ask;
         let no_edge = model_prob_no - no_ask;
 
-        let (token_id, ask_price, edge, prob_for_sizing) =
+        let (token_id, ask_price, edge, prob_for_sizing, direction_bucket) =
             if yes_edge > no_edge && yes_edge > Decimal::ZERO {
-                (yes_token.token_id, yes_ask, yes_edge, model_prob)
+                (
+                    yes_token.token_id,
+                    yes_ask,
+                    yes_edge,
+                    model_prob,
+                    Self::binary_direction_bucket(question.direction, true),
+                )
             } else if no_edge > Decimal::ZERO {
-                (no_token.token_id, no_ask, no_edge, model_prob_no)
+                (
+                    no_token.token_id,
+                    no_ask,
+                    no_edge,
+                    model_prob_no,
+                    Self::binary_direction_bucket(question.direction, false),
+                )
             } else {
                 return None;
             };
@@ -946,7 +2046,8 @@ impl CryptoAlphaStrategy {
             use rust_decimal::prelude::ToPrimitive;
             (edge * dec!(10000)).to_u32().unwrap_or(0)
         };
-        if edge_bps < self.config.min_edge_bps {
+        if edge_bps < effective_min_edge_bps {
+            Self::record_rejection(question.asset, "edge_below_threshold");
             self.near_miss_edge_bps
                 .fetch_max(edge_bps, std::sync::atomic::Ordering::Relaxed);
             tracing::debug!(
@@ -956,46 +2057,31 @@ impl CryptoAlphaStrategy {
                 model_prob = %prob_for_sizing,
                 ask = %ask_price,
                 edge_bps,
-                min_edge_bps = self.config.min_edge_bps,
+                min_edge_bps = effective_min_edge_bps,
                 "[CryptoAlpha] near-miss: edge below threshold"
             );
             return None;
         }
 
-        // Dynamic position cap: fraction of current wallet balance
-        let effective_max = (self.get_balance)() * self.config.max_position_pct;
-
-        // Kelly sizing: f* = edge / (1 - price)
-        let kelly_raw = if ask_price > Decimal::ZERO && ask_price < dec!(0.99) {
-            (edge / (Decimal::ONE - ask_price)).min(Decimal::TWO)
-        } else {
-            Decimal::ZERO
-        };
-        let kelly_size = kelly_raw * self.config.kelly_fraction * effective_max;
-        let available = (self.get_available_capital)();
-
-        // Position-aware sizing (convert shares to USDC cost for correct unit comparison)
-        let existing_cost = (self.get_position)(token_id) * ask_price;
-        let remaining = (effective_max - existing_cost).max(Decimal::ZERO);
-        let size = kelly_size.min(remaining).min(available);
-
-        // Ensure size meets CLOB minimum cost ($1.00).
-        // Only bump up when kelly_raw >= 0.04 (meaningful conviction).
-        // If kelly_raw is tiny, the edge is noise — don't force a $1 bet.
-        let size = if size > Decimal::ZERO && ask_price > Decimal::ZERO && kelly_raw >= dec!(0.04) {
-            let min_cost_size = (Decimal::ONE / ask_price).ceil();
-            size.max(min_cost_size)
-        } else {
-            size
-        };
-        // Cap again after bump-up: never exceed available capital or remaining room
-        let size = size.min(remaining).min(available);
-
-        // After capping, verify we still meet CLOB minimum ($1.00 cost).
-        // E.g. at price $0.019, min_cost_size=53 but available may only allow 2 shares.
-        if size <= Decimal::ZERO || (ask_price > Decimal::ZERO && size * ask_price < Decimal::ONE) {
-            return None;
-        }
+        let size = self.size_entry(
+            question.asset,
+            direction_bucket,
+            token_id,
+            ask_price,
+            edge,
+            days as u32,
+            self.effective_size_multiplier(
+                question.asset,
+                days as u32,
+                CryptoMarketType::Binary,
+                &market.question,
+            )
+            .await,
+            current_asset_exposure,
+            *asset_direction_exposure
+                .get(&(question.asset.binance_symbol, direction_bucket))
+                .unwrap_or(&Decimal::ZERO),
+        )?;
 
         // Profitability check
         let est = self.profit_calc.directional_buy_profit(
@@ -1051,7 +2137,13 @@ impl CryptoAlphaStrategy {
         event: &NegRiskEvent,
         asset: &'static CryptoAsset,
         days: f64,
+        current_asset_exposure: Decimal,
+        asset_direction_exposure: &HashMap<(&'static str, CryptoDirectionBucket), Decimal>,
     ) -> Option<TradingOpportunity> {
+        let event_market_text = format!("{} {}", event.title, asset.name);
+        let (effective_min_edge_bps, effective_max_spread_bps) = self
+            .effective_entry_thresholds(&event_market_text, days.ceil() as u32)
+            .await;
         // Fetch price data
         let price_data = match self.get_price_data(asset).await {
             Ok(d) => d,
@@ -1067,7 +2159,15 @@ impl CryptoAlphaStrategy {
 
         let (mu, sigma) = calculate_volatility(&price_data.daily_closes)?;
         let mu = mu * self.config.drift_decay;
-        let sigma = effective_volatility(sigma, price_data.implied_vol);
+        let sigma = effective_volatility(sigma, price_data.implied_vol)
+            * self
+                .effective_sigma_multiplier(
+                    asset,
+                    days.ceil() as u32,
+                    CryptoMarketType::Range,
+                    &event_market_text,
+                )
+                .await;
         self.update_cache_sigma(asset.binance_symbol, sigma);
 
         // Evaluate each outcome market
@@ -1078,6 +2178,7 @@ impl CryptoAlphaStrategy {
             Decimal, // ask_price
             Decimal, // effective_prob
             Decimal, // edge
+            CryptoDirectionBucket,
         )> = None;
 
         for market in &event.markets {
@@ -1092,7 +2193,12 @@ impl CryptoAlphaStrategy {
 
             let model_prob_f64 =
                 gbm_range_probability(price_data.current_price, &range, mu, sigma, days);
-            let model_prob = Decimal::from_f64_retain(model_prob_f64)?;
+            let model_prob = self.calibrate_probability(
+                asset,
+                days.ceil() as u32,
+                CryptoMarketType::Range,
+                Decimal::from_f64_retain(model_prob_f64)?,
+            );
 
             let yes_token = &market.tokens[0];
             let no_token = &market.tokens[1];
@@ -1111,7 +2217,8 @@ impl CryptoAlphaStrategy {
                     use rust_decimal::prelude::ToPrimitive;
                     (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
                 };
-                if spread_bps > self.config.max_spread_bps {
+                if spread_bps > effective_max_spread_bps {
+                    Self::record_rejection(asset, "spread_too_wide");
                     skip_outcome = true;
                 }
             }
@@ -1127,14 +2234,15 @@ impl CryptoAlphaStrategy {
                     use rust_decimal::prelude::ToPrimitive;
                     (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
                 };
-                if spread_bps > self.config.max_spread_bps {
+                if spread_bps > effective_max_spread_bps {
+                    Self::record_rejection(asset, "spread_too_wide");
                     skip_outcome = true;
                 }
             }
             if skip_outcome {
                 tracing::debug!(
                     outcome = %market.question,
-                    max_allowed = self.config.max_spread_bps,
+                    max_allowed = effective_max_spread_bps,
                     "[CryptoAlpha NegRisk] Skipping: spread too wide"
                 );
                 continue;
@@ -1149,8 +2257,14 @@ impl CryptoAlphaStrategy {
                     let edge = model_prob - yes_ask;
                     if edge > best_edge {
                         best_edge = edge;
-                        best_candidate =
-                            Some((market, yes_token.token_id, yes_ask, model_prob, edge));
+                        best_candidate = Some((
+                            market,
+                            yes_token.token_id,
+                            yes_ask,
+                            model_prob,
+                            edge,
+                            Self::range_direction_bucket(&range, true),
+                        ));
                     }
                 }
             }
@@ -1165,21 +2279,28 @@ impl CryptoAlphaStrategy {
                     let edge = no_model_prob - no_ask;
                     if edge > best_edge {
                         best_edge = edge;
-                        best_candidate =
-                            Some((market, no_token.token_id, no_ask, no_model_prob, edge));
+                        best_candidate = Some((
+                            market,
+                            no_token.token_id,
+                            no_ask,
+                            no_model_prob,
+                            edge,
+                            Self::range_direction_bucket(&range, false),
+                        ));
                     }
                 }
             }
         }
 
-        let (market, token_id, ask_price, effective_prob, edge) = best_candidate?;
+        let (market, token_id, ask_price, effective_prob, edge, direction_bucket) = best_candidate?;
 
         // Check minimum edge threshold
         let edge_bps = {
             use rust_decimal::prelude::ToPrimitive;
             (edge * dec!(10000)).to_u32().unwrap_or(0)
         };
-        if edge_bps < self.config.min_edge_bps {
+        if edge_bps < effective_min_edge_bps {
+            Self::record_rejection(asset, "edge_below_threshold");
             self.near_miss_edge_bps
                 .fetch_max(edge_bps, std::sync::atomic::Ordering::Relaxed);
             tracing::debug!(
@@ -1188,46 +2309,31 @@ impl CryptoAlphaStrategy {
                 model_prob = %effective_prob,
                 ask = %ask_price,
                 edge_bps,
-                min_edge_bps = self.config.min_edge_bps,
+                min_edge_bps = effective_min_edge_bps,
                 "[CryptoAlpha] NegRisk near-miss: edge below threshold"
             );
             return None;
         }
 
-        // Dynamic position cap: fraction of current wallet balance
-        let effective_max = (self.get_balance)() * self.config.max_position_pct;
-
-        // Kelly sizing
-        let kelly_raw = if ask_price > Decimal::ZERO && ask_price < dec!(0.99) {
-            (edge / (Decimal::ONE - ask_price)).min(Decimal::TWO)
-        } else {
-            Decimal::ZERO
-        };
-        let kelly_size = kelly_raw * self.config.kelly_fraction * effective_max;
-        let available = (self.get_available_capital)();
-
-        // Position-aware sizing (convert shares to USDC cost for correct unit comparison)
-        let existing_cost = (self.get_position)(token_id) * ask_price;
-        let remaining = (effective_max - existing_cost).max(Decimal::ZERO);
-        let size = kelly_size.min(remaining).min(available);
-
-        // Ensure size meets CLOB minimum cost ($1.00).
-        // Only bump up when kelly_raw >= 0.04 (meaningful conviction).
-        // If kelly_raw is tiny, the edge is noise — don't force a $1 bet.
-        let size = if size > Decimal::ZERO && ask_price > Decimal::ZERO && kelly_raw >= dec!(0.04) {
-            let min_cost_size = (Decimal::ONE / ask_price).ceil();
-            size.max(min_cost_size)
-        } else {
-            size
-        };
-        // Cap again after bump-up: never exceed available capital or remaining room
-        let size = size.min(remaining).min(available);
-
-        // After capping, verify we still meet CLOB minimum ($1.00 cost).
-        // E.g. at price $0.019, min_cost_size=53 but available may only allow 2 shares.
-        if size <= Decimal::ZERO || (ask_price > Decimal::ZERO && size * ask_price < Decimal::ONE) {
-            return None;
-        }
+        let size = self.size_entry(
+            asset,
+            direction_bucket,
+            token_id,
+            ask_price,
+            edge,
+            days.ceil() as u32,
+            self.effective_size_multiplier(
+                asset,
+                days.ceil() as u32,
+                CryptoMarketType::Range,
+                &event_market_text,
+            )
+            .await,
+            current_asset_exposure,
+            *asset_direction_exposure
+                .get(&(asset.binance_symbol, direction_bucket))
+                .unwrap_or(&Decimal::ZERO),
+        )?;
 
         // Profitability check
         let est = self.profit_calc.directional_buy_profit(
@@ -1279,7 +2385,12 @@ impl CryptoAlphaStrategy {
     /// the same event title (e.g. "What price will Bitcoin hit in 2026?").
     /// Fetches price data once for the shared asset, then evaluates all
     /// markets to find the best edge.
-    async fn detect_crypto_group(&self, group: &BinaryEventGroup) -> Option<TradingOpportunity> {
+    async fn detect_crypto_group(
+        &self,
+        group: &BinaryEventGroup,
+        current_asset_exposure: Decimal,
+        asset_direction_exposure: &HashMap<(&'static str, CryptoDirectionBucket), Decimal>,
+    ) -> Option<TradingOpportunity> {
         // Try to identify crypto asset from the group title first, then from individual markets
         let asset = find_asset(&group.title).or_else(|| {
             group
@@ -1287,7 +2398,6 @@ impl CryptoAlphaStrategy {
                 .iter()
                 .find_map(|m| parse_crypto_question(&m.question).map(|q| q.asset))
         })?;
-
         // Fetch price data once for the entire group
         let price_data = match self.get_price_data(asset).await {
             Ok(d) => d,
@@ -1302,10 +2412,9 @@ impl CryptoAlphaStrategy {
             }
         };
 
-        let (mu, sigma) = calculate_volatility(&price_data.daily_closes)?;
+        let (mu, sigma_base) = calculate_volatility(&price_data.daily_closes)?;
         let mu = mu * self.config.drift_decay;
-        let sigma = effective_volatility(sigma, price_data.implied_vol);
-        self.update_cache_sigma(asset.binance_symbol, sigma);
+        let base_effective_sigma = effective_volatility(sigma_base, price_data.implied_vol);
 
         // Evaluate each market in the group, track the best edge
         let mut best_edge = Decimal::ZERO;
@@ -1316,6 +2425,7 @@ impl CryptoAlphaStrategy {
             Decimal, // effective_prob (for sizing)
             Decimal, // edge
             u32,     // edge_bps
+            CryptoDirectionBucket,
         )> = None;
 
         for market in &group.markets {
@@ -1338,6 +2448,24 @@ impl CryptoAlphaStrategy {
             if days <= 0 {
                 continue;
             }
+            let group_market_text = if group.title.is_empty() {
+                market.question.clone()
+            } else {
+                format!("{} {}", group.title, market.question)
+            };
+            let (_, effective_max_spread_bps) = self
+                .effective_entry_thresholds(&group_market_text, days as u32)
+                .await;
+            let sigma = base_effective_sigma
+                * self
+                    .effective_sigma_multiplier(
+                        asset,
+                        days as u32,
+                        CryptoMarketType::Binary,
+                        &group_market_text,
+                    )
+                    .await;
+            self.update_cache_sigma(asset.binance_symbol, sigma);
 
             // GBM probability
             let prob_above = gbm_probability(
@@ -1351,7 +2479,12 @@ impl CryptoAlphaStrategy {
                 PriceDirection::Above => prob_above,
                 PriceDirection::Below => 1.0 - prob_above,
             };
-            let model_prob = Decimal::from_f64_retain(model_prob_f64)?;
+            let model_prob = self.calibrate_probability(
+                asset,
+                days as u32,
+                CryptoMarketType::Binary,
+                Decimal::from_f64_retain(model_prob_f64)?,
+            );
             let model_prob_no = Decimal::ONE - model_prob;
 
             let yes_token = &market.tokens[0];
@@ -1371,7 +2504,8 @@ impl CryptoAlphaStrategy {
                     use rust_decimal::prelude::ToPrimitive;
                     (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
                 };
-                if spread_bps > self.config.max_spread_bps {
+                if spread_bps > effective_max_spread_bps {
+                    Self::record_rejection(asset, "spread_too_wide");
                     skip_market = true;
                 }
             }
@@ -1387,14 +2521,15 @@ impl CryptoAlphaStrategy {
                     use rust_decimal::prelude::ToPrimitive;
                     (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX)
                 };
-                if spread_bps > self.config.max_spread_bps {
+                if spread_bps > effective_max_spread_bps {
+                    Self::record_rejection(asset, "spread_too_wide");
                     skip_market = true;
                 }
             }
             if skip_market {
                 tracing::debug!(
                     question = %market.question,
-                    max_allowed = self.config.max_spread_bps,
+                    max_allowed = effective_max_spread_bps,
                     "[CryptoAlpha Group] Skipping: spread too wide"
                 );
                 continue;
@@ -1420,6 +2555,7 @@ impl CryptoAlphaStrategy {
                             model_prob,
                             edge,
                             edge_bps,
+                            Self::binary_direction_bucket(question.direction, true),
                         ));
                     }
                 }
@@ -1445,16 +2581,33 @@ impl CryptoAlphaStrategy {
                             model_prob_no,
                             edge,
                             edge_bps,
+                            Self::binary_direction_bucket(question.direction, false),
                         ));
                     }
                 }
             }
         }
 
-        let (market, token_id, ask_price, effective_prob, edge, edge_bps) = best_candidate?;
+        let (market, token_id, ask_price, effective_prob, edge, edge_bps, direction_bucket) =
+            best_candidate?;
+        let winner_question = parse_crypto_question(&market.question)?;
+        let winner_target_date = winner_question.target_date?;
+        let winner_days = (winner_target_date - Utc::now().date_naive()).num_days();
+        if winner_days <= 0 {
+            return None;
+        }
+        let winner_market_text = if group.title.is_empty() {
+            market.question.clone()
+        } else {
+            format!("{} {}", group.title, market.question)
+        };
+        let (effective_min_edge_bps, _) = self
+            .effective_entry_thresholds(&winner_market_text, winner_days as u32)
+            .await;
 
         // Check minimum edge threshold
-        if edge_bps < self.config.min_edge_bps {
+        if edge_bps < effective_min_edge_bps {
+            Self::record_rejection(asset, "edge_below_threshold");
             self.near_miss_edge_bps
                 .fetch_max(edge_bps, std::sync::atomic::Ordering::Relaxed);
             tracing::debug!(
@@ -1463,46 +2616,31 @@ impl CryptoAlphaStrategy {
                 model_prob = %effective_prob,
                 ask = %ask_price,
                 edge_bps,
-                min_edge_bps = self.config.min_edge_bps,
+                min_edge_bps = effective_min_edge_bps,
                 "[CryptoAlpha] group near-miss: edge below threshold"
             );
             return None;
         }
 
-        // Dynamic position cap: fraction of current wallet balance
-        let effective_max = (self.get_balance)() * self.config.max_position_pct;
-
-        // Kelly sizing
-        let kelly_raw = if ask_price > Decimal::ZERO && ask_price < dec!(0.99) {
-            (edge / (Decimal::ONE - ask_price)).min(Decimal::TWO)
-        } else {
-            Decimal::ZERO
-        };
-        let kelly_size = kelly_raw * self.config.kelly_fraction * effective_max;
-        let available = (self.get_available_capital)();
-
-        // Position-aware sizing (convert shares to USDC cost for correct unit comparison)
-        let existing_cost = (self.get_position)(token_id) * ask_price;
-        let remaining = (effective_max - existing_cost).max(Decimal::ZERO);
-        let size = kelly_size.min(remaining).min(available);
-
-        // Ensure size meets CLOB minimum cost ($1.00).
-        // Only bump up when kelly_raw >= 0.04 (meaningful conviction).
-        // If kelly_raw is tiny, the edge is noise — don't force a $1 bet.
-        let size = if size > Decimal::ZERO && ask_price > Decimal::ZERO && kelly_raw >= dec!(0.04) {
-            let min_cost_size = (Decimal::ONE / ask_price).ceil();
-            size.max(min_cost_size)
-        } else {
-            size
-        };
-        // Cap again after bump-up: never exceed available capital or remaining room
-        let size = size.min(remaining).min(available);
-
-        // After capping, verify we still meet CLOB minimum ($1.00 cost).
-        // E.g. at price $0.019, min_cost_size=53 but available may only allow 2 shares.
-        if size <= Decimal::ZERO || (ask_price > Decimal::ZERO && size * ask_price < Decimal::ONE) {
-            return None;
-        }
+        let size = self.size_entry(
+            asset,
+            direction_bucket,
+            token_id,
+            ask_price,
+            edge,
+            winner_days as u32,
+            self.effective_size_multiplier(
+                asset,
+                winner_days as u32,
+                CryptoMarketType::Binary,
+                &group.title,
+            )
+            .await,
+            current_asset_exposure,
+            *asset_direction_exposure
+                .get(&(asset.binance_symbol, direction_bucket))
+                .unwrap_or(&Decimal::ZERO),
+        )?;
 
         // Profitability check
         let est = self.profit_calc.directional_buy_profit(
@@ -1566,7 +2704,6 @@ impl CryptoAlphaStrategy {
             .flat_map(|m| m.tokens.iter().map(move |t| (t.token_id, m)))
             .collect();
 
-        let exit_buffer = Decimal::from(self.config.exit_buffer_bps) / dec!(10000);
         let mut exits = Vec::new();
 
         for (token_id, size, avg_cost) in &held {
@@ -1585,47 +2722,6 @@ impl CryptoAlphaStrategy {
                 }
             };
 
-            // Capital efficiency exit: bid >= threshold
-            if best_bid >= self.config.capital_efficiency_threshold {
-                tracing::debug!(
-                    token_id = %token_id,
-                    best_bid = %best_bid,
-                    "[EXIT] Capital efficiency — crypto"
-                );
-                exits.push(self.build_exit_opportunity(
-                    *token_id,
-                    *size,
-                    *avg_cost,
-                    best_bid,
-                    &token_to_market,
-                ));
-                continue;
-            }
-
-            // Deep loss exit: cut losses regardless of model when position has lost >= 50%.
-            // The model reversal check below only triggers when model_prob < best_bid,
-            // which is nearly impossible at low prices. This provides a model-independent
-            // exit when the loss is severe.
-            if *avg_cost > Decimal::ZERO && best_bid < *avg_cost * dec!(0.50) {
-                let loss_pct = ((*avg_cost - best_bid) / *avg_cost * dec!(100)).round_dp(1);
-                tracing::debug!(
-                    token_id = %token_id,
-                    best_bid = %best_bid,
-                    avg_cost = %avg_cost,
-                    loss_pct = %loss_pct,
-                    "[EXIT] Deep loss detected — crypto position lost >= 50%"
-                );
-                exits.push(self.build_exit_opportunity(
-                    *token_id,
-                    *size,
-                    *avg_cost,
-                    best_bid,
-                    &token_to_market,
-                ));
-                continue;
-            }
-
-            // Model reversal: recompute model probability
             let market = match token_to_market.get(token_id) {
                 Some(m) => *m,
                 None => {
@@ -1638,6 +2734,78 @@ impl CryptoAlphaStrategy {
                 }
             };
 
+            let days_to_resolution = if let Some(parsed) = parse_crypto_question(&market.question) {
+                parsed
+                    .target_date
+                    .map(|d| (d - Utc::now().date_naive()).num_days().max(1) as u32)
+                    .unwrap_or(30)
+            } else if let Some((_asset, target_date)) = market
+                .event_title
+                .as_deref()
+                .and_then(parse_crypto_event_title)
+            {
+                target_date
+                    .map(|d| (d - Utc::now().date_naive()).num_days().max(1) as u32)
+                    .unwrap_or(30)
+            } else {
+                30
+            };
+            let (capital_efficiency_threshold, exit_buffer) =
+                self.effective_exit_thresholds(days_to_resolution);
+
+            // Capital efficiency exit: bid >= threshold
+            if best_bid >= capital_efficiency_threshold {
+                self.reset_edge_decay_confirmation(*token_id);
+                pa_monitor::metrics::CRYPTO_ALPHA_EXITS
+                    .with_label_values(&["capital_efficiency"])
+                    .inc();
+                tracing::debug!(
+                    token_id = %token_id,
+                    best_bid = %best_bid,
+                    capital_efficiency_threshold = %capital_efficiency_threshold,
+                    days_to_resolution,
+                    "[EXIT] Capital efficiency — crypto"
+                );
+                exits.push(self.build_exit_opportunity(
+                    *token_id,
+                    *size,
+                    *avg_cost,
+                    best_bid,
+                    &token_to_market,
+                ));
+                continue;
+            }
+
+            // Relative stop-loss: cut losses regardless of model once the bid falls through
+            // a configurable fraction of average cost.
+            if *avg_cost > Decimal::ZERO
+                && self.config.relative_stop_loss_ratio > Decimal::ZERO
+                && best_bid < *avg_cost * self.config.relative_stop_loss_ratio
+            {
+                self.reset_edge_decay_confirmation(*token_id);
+                pa_monitor::metrics::CRYPTO_ALPHA_EXITS
+                    .with_label_values(&["relative_stop_loss"])
+                    .inc();
+                let loss_pct = ((*avg_cost - best_bid) / *avg_cost * dec!(100)).round_dp(1);
+                tracing::debug!(
+                    token_id = %token_id,
+                    best_bid = %best_bid,
+                    avg_cost = %avg_cost,
+                    loss_pct = %loss_pct,
+                    stop_loss_ratio = %self.config.relative_stop_loss_ratio,
+                    "[EXIT] Relative stop-loss — crypto"
+                );
+                exits.push(self.build_exit_opportunity(
+                    *token_id,
+                    *size,
+                    *avg_cost,
+                    best_bid,
+                    &token_to_market,
+                ));
+                continue;
+            }
+
+            // Model reversal: recompute model probability
             // Try binary market parsing first, then fall back to NegRisk range parsing
             let held_side_prob = if let Some(parsed) = parse_crypto_question(&market.question) {
                 // Binary market: standard GBM probability
@@ -1657,7 +2825,10 @@ impl CryptoAlphaStrategy {
                     }
                 };
                 let mu = mu * self.config.drift_decay;
-                let sigma = effective_volatility(sigma, price_data.implied_vol);
+                let sigma = effective_volatility(sigma, price_data.implied_vol)
+                    * self
+                        .effective_event_sigma_multiplier(&market.question)
+                        .await;
                 self.update_cache_sigma(parsed.asset.binance_symbol, sigma);
                 if sigma <= 0.0 {
                     continue;
@@ -1676,10 +2847,22 @@ impl CryptoAlphaStrategy {
                     sigma,
                     days_to_target,
                 );
-                let effective_prob = match parsed.direction {
+                let calibrated_prob = match Decimal::from_f64_retain(match parsed.direction {
                     PriceDirection::Above => model_prob,
                     PriceDirection::Below => 1.0 - model_prob,
+                }) {
+                    Some(v) => v,
+                    None => continue,
                 };
+                let effective_prob = self
+                    .calibrate_probability(
+                        parsed.asset,
+                        days_to_target.ceil() as u32,
+                        CryptoMarketType::Binary,
+                        calibrated_prob,
+                    )
+                    .to_f64()
+                    .unwrap_or(0.5);
 
                 let is_yes = market
                     .tokens
@@ -1727,7 +2910,15 @@ impl CryptoAlphaStrategy {
                     }
                 };
                 let mu = mu * self.config.drift_decay;
-                let sigma = effective_volatility(sigma, price_data.implied_vol);
+                let event_market_text = if let Some(title) = market.event_title.as_deref() {
+                    format!("{} {}", title, market.question)
+                } else {
+                    market.question.clone()
+                };
+                let sigma = effective_volatility(sigma, price_data.implied_vol)
+                    * self
+                        .effective_event_sigma_multiplier(&event_market_text)
+                        .await;
                 self.update_cache_sigma(asset.binance_symbol, sigma);
                 if sigma <= 0.0 {
                     continue;
@@ -1745,6 +2936,18 @@ impl CryptoAlphaStrategy {
                     sigma,
                     days_to_target,
                 );
+                let calibrated_range_prob = match Decimal::from_f64_retain(range_prob) {
+                    Some(v) => self
+                        .calibrate_probability(
+                            asset,
+                            days_to_target.ceil() as u32,
+                            CryptoMarketType::Range,
+                            v,
+                        )
+                        .to_f64()
+                        .unwrap_or(0.5),
+                    None => continue,
+                };
 
                 // NegRisk: YES token = tokens[0], NO token = tokens[1]
                 let is_yes = market
@@ -1752,7 +2955,11 @@ impl CryptoAlphaStrategy {
                     .first()
                     .map(|t| t.token_id == *token_id)
                     .unwrap_or(false);
-                if is_yes { range_prob } else { 1.0 - range_prob }
+                if is_yes {
+                    calibrated_range_prob
+                } else {
+                    1.0 - calibrated_range_prob
+                }
             } else {
                 tracing::debug!(token_id = %token_id, question = %market.question, "[CryptoAlpha EXIT] could not parse question or outcome range");
                 continue;
@@ -1761,12 +2968,18 @@ impl CryptoAlphaStrategy {
                 Some(d) => d,
                 None => continue,
             };
+            let hold_edge_threshold = self.effective_hold_edge_threshold(days_to_resolution);
 
             if model_prob_dec < best_bid - exit_buffer {
+                self.reset_edge_decay_confirmation(*token_id);
+                pa_monitor::metrics::CRYPTO_ALPHA_EXITS
+                    .with_label_values(&["model_reversal"])
+                    .inc();
                 tracing::debug!(
                     token_id = %token_id,
                     model_prob = %model_prob_dec,
                     best_bid = %best_bid,
+                    days_to_resolution,
                     "[EXIT] Model reversal — crypto"
                 );
                 exits.push(self.build_exit_opportunity(
@@ -1776,12 +2989,74 @@ impl CryptoAlphaStrategy {
                     best_bid,
                     &token_to_market,
                 ));
-            } else {
+            } else if model_prob_dec < best_bid + hold_edge_threshold {
+                let edge_shortfall =
+                    ((best_bid + hold_edge_threshold) - model_prob_dec).max(Decimal::ZERO);
+                let confirmations = self.note_edge_decay_confirmation(
+                    *token_id,
+                    days_to_resolution,
+                    edge_shortfall,
+                );
+                let edge_decay_exit_size = self.planned_edge_decay_exit_size(
+                    *size,
+                    best_bid,
+                    days_to_resolution,
+                    confirmations,
+                    edge_shortfall,
+                );
+                if self.edge_decay_cooldown_active(*token_id) {
+                    tracing::debug!(
+                        token_id = %token_id,
+                        best_bid = %best_bid,
+                        model_prob = %model_prob_dec,
+                        edge_shortfall = %edge_shortfall,
+                        confirmations,
+                        "[CryptoAlpha EXIT] edge-decay cooldown active"
+                    );
+                    continue;
+                }
+                let required_confirmations = self
+                    .effective_edge_decay_confirmation_scans(days_to_resolution, edge_shortfall);
+                if confirmations < required_confirmations {
+                    tracing::debug!(
+                        token_id = %token_id,
+                        confirmations,
+                        required = required_confirmations,
+                        "[CryptoAlpha EXIT] edge-decay awaiting confirmation"
+                    );
+                    continue;
+                }
+                pa_monitor::metrics::CRYPTO_ALPHA_EXITS
+                    .with_label_values(&["edge_decay"])
+                    .inc();
                 tracing::debug!(
                     token_id = %token_id,
                     model_prob = %model_prob_dec,
                     best_bid = %best_bid,
+                    days_to_resolution,
+                    edge_shortfall = %edge_shortfall,
+                    hold_edge_threshold = %hold_edge_threshold,
+                    exit_size = %edge_decay_exit_size,
+                    threshold = %(best_bid + hold_edge_threshold),
+                    "[EXIT] Edge decay — crypto"
+                );
+                exits.push(self.build_exit_opportunity(
+                    *token_id,
+                    edge_decay_exit_size,
+                    *avg_cost,
+                    best_bid,
+                    &token_to_market,
+                ));
+                self.set_edge_decay_cooldown(*token_id, days_to_resolution, edge_shortfall);
+            } else {
+                self.reset_edge_decay_confirmation(*token_id);
+                tracing::debug!(
+                    token_id = %token_id,
+                    model_prob = %model_prob_dec,
+                    best_bid = %best_bid,
+                    days_to_resolution,
                     exit_buffer = %exit_buffer,
+                    hold_edge_threshold = %hold_edge_threshold,
                     threshold = %(best_bid - exit_buffer),
                     "[CryptoAlpha EXIT] No reversal: model_prob >= best_bid - buffer"
                 );
@@ -1841,6 +3116,10 @@ impl Strategy for CryptoAlphaStrategy {
 
     async fn scan(&self, markets: &[MarketInfo]) -> pa_core::Result<Vec<TradingOpportunity>> {
         let mut opportunities = Vec::new();
+        let mut best_entries_by_asset: HashMap<
+            (&'static str, CryptoDirectionBucket),
+            TradingOpportunity,
+        > = HashMap::new();
         let count = self
             .scan_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1850,6 +3129,46 @@ impl Strategy for CryptoAlphaStrategy {
         let mut binary_group_crypto = 0u32;
         let mut neg_risk_matched = 0u32;
         let mut neg_risk_expired = 0u32;
+        let token_assets = self.build_token_asset_map(markets);
+        let token_directions = self.build_token_direction_map(markets);
+        let mut asset_exposure: HashMap<&'static str, Decimal> = HashMap::new();
+        let mut asset_direction_exposure: HashMap<(&'static str, CryptoDirectionBucket), Decimal> =
+            HashMap::new();
+        for asset in token_assets.values() {
+            asset_exposure
+                .entry(asset.binance_symbol)
+                .or_insert_with(|| self.current_asset_exposure(asset, &token_assets));
+        }
+        for asset in token_assets.values() {
+            for direction in [
+                CryptoDirectionBucket::Up,
+                CryptoDirectionBucket::Down,
+                CryptoDirectionBucket::InsideRange,
+                CryptoDirectionBucket::OutsideRange,
+            ] {
+                asset_direction_exposure
+                    .entry((asset.binance_symbol, direction))
+                    .or_insert_with(|| {
+                        self.current_asset_direction_exposure(
+                            asset,
+                            direction,
+                            &token_assets,
+                            &token_directions,
+                        )
+                    });
+            }
+        }
+        for asset in CRYPTO_ASSETS {
+            let exposure = asset_exposure
+                .get(asset.binance_symbol)
+                .copied()
+                .unwrap_or(Decimal::ZERO);
+            if let Some(exposure_f64) = rust_decimal::prelude::ToPrimitive::to_f64(&exposure) {
+                pa_monitor::metrics::CRYPTO_ALPHA_ASSET_EXPOSURE
+                    .with_label_values(&[asset.name])
+                    .set(exposure_f64);
+            }
+        }
 
         // Build a set of condition_ids that belong to binary event groups,
         // so we skip them in the individual market loop (avoid double-processing).
@@ -1871,8 +3190,27 @@ impl Strategy for CryptoAlphaStrategy {
                 continue;
             }
             binary_group_crypto += 1;
-            if let Some(opp) = self.detect_crypto_group(group).await {
-                opportunities.push(opp);
+            let Some(asset) = find_asset(&group.title).or_else(|| {
+                group
+                    .markets
+                    .iter()
+                    .find_map(|m| parse_crypto_question(&m.question).map(|q| q.asset))
+            }) else {
+                continue;
+            };
+            let current_asset_exposure = *asset_exposure
+                .get(asset.binance_symbol)
+                .unwrap_or(&Decimal::ZERO);
+            if let Some(opp) = self
+                .detect_crypto_group(group, current_asset_exposure, &asset_direction_exposure)
+                .await
+            {
+                let direction = opp
+                    .execution_plan
+                    .token_id()
+                    .and_then(|token_id| token_directions.get(&token_id).copied())
+                    .unwrap_or(CryptoDirectionBucket::OutsideRange);
+                self.keep_better_entry(&mut best_entries_by_asset, asset, direction, opp);
             }
         }
 
@@ -1895,8 +3233,26 @@ impl Strategy for CryptoAlphaStrategy {
                 }
             }
 
-            if let Some(opp) = self.detect_crypto_opportunity(market).await {
-                opportunities.push(opp);
+            let Some(asset) = parse_crypto_question(&market.question).map(|q| q.asset) else {
+                continue;
+            };
+            let current_asset_exposure = *asset_exposure
+                .get(asset.binance_symbol)
+                .unwrap_or(&Decimal::ZERO);
+            if let Some(opp) = self
+                .detect_crypto_opportunity(
+                    market,
+                    current_asset_exposure,
+                    &asset_direction_exposure,
+                )
+                .await
+            {
+                let direction = opp
+                    .execution_plan
+                    .token_id()
+                    .and_then(|token_id| token_directions.get(&token_id).copied())
+                    .unwrap_or(CryptoDirectionBucket::OutsideRange);
+                self.keep_better_entry(&mut best_entries_by_asset, asset, direction, opp);
             }
         }
 
@@ -1910,10 +3266,40 @@ impl Strategy for CryptoAlphaStrategy {
                     continue;
                 }
                 neg_risk_matched += 1;
-                if let Some(opp) = self.detect_crypto_neg_risk(event, asset, days as f64).await {
-                    opportunities.push(opp);
+                let current_asset_exposure = *asset_exposure
+                    .get(asset.binance_symbol)
+                    .unwrap_or(&Decimal::ZERO);
+                if let Some(opp) = self
+                    .detect_crypto_neg_risk(
+                        event,
+                        asset,
+                        days as f64,
+                        current_asset_exposure,
+                        &asset_direction_exposure,
+                    )
+                    .await
+                {
+                    let direction = opp
+                        .execution_plan
+                        .token_id()
+                        .and_then(|token_id| token_directions.get(&token_id).copied())
+                        .unwrap_or(CryptoDirectionBucket::OutsideRange);
+                    self.keep_better_entry(&mut best_entries_by_asset, asset, direction, opp);
                 }
             }
+        }
+
+        for ((asset_symbol, direction), opp) in best_entries_by_asset {
+            let cost = opp.execution_plan.estimated_cost();
+            asset_exposure
+                .entry(asset_symbol)
+                .and_modify(|exposure| *exposure += cost)
+                .or_insert(cost);
+            asset_direction_exposure
+                .entry((asset_symbol, direction))
+                .and_modify(|exposure| *exposure += cost)
+                .or_insert(cost);
+            opportunities.push(opp);
         }
 
         if log_diag {
@@ -2335,6 +3721,8 @@ mod tests {
     // ──── Exit Tests ────
 
     use alloy::primitives::B256;
+    use pa_core::config::{EventCalendarConfig, StaticEventConfig};
+    use pa_core::types::EventImpact;
     use pa_core::types::{Outcome, PriceLevel, TokenInfo};
 
     fn make_crypto_market(question: &str) -> MarketInfo {
@@ -2389,6 +3777,41 @@ mod tests {
         }
     }
 
+    fn market_with_token_ids(
+        mut market: MarketInfo,
+        yes_token: U256,
+        no_token: U256,
+        condition_id: B256,
+    ) -> MarketInfo {
+        market.condition_id = condition_id;
+        market.question_id = condition_id;
+        market.tokens[0].token_id = yes_token;
+        market.tokens[0].complement_id = no_token;
+        market.tokens[1].token_id = no_token;
+        market.tokens[1].complement_id = yes_token;
+        market
+    }
+
+    fn seed_price_cache(strategy: &CryptoAlphaStrategy, asset: &CryptoAsset, current_price: f64) {
+        let mut cache = strategy.price_cache.lock().unwrap();
+        cache.insert(
+            asset.binance_symbol.to_string(),
+            CachedPrice {
+                current_price: Some(current_price),
+                current_price_fetched_at: Some(Utc::now()),
+                daily_closes: Some(
+                    (0..30)
+                        .map(|i| current_price * (0.98 + 0.001 * i as f64))
+                        .collect(),
+                ),
+                daily_closes_fetched_at: Some(Utc::now()),
+                implied_vol: None,
+                implied_vol_fetched_at: None,
+                last_sigma: Some(0.60),
+            },
+        );
+    }
+
     fn make_crypto_strategy(
         books: HashMap<U256, OrderBook>,
         held: Vec<(U256, Decimal, Decimal)>,
@@ -2398,11 +3821,75 @@ mod tests {
             max_position_pct: dec!(0.50),
             kelly_fraction: dec!(0.25),
             refresh_interval_secs: 300,
+            spot_refresh_interval_secs: 30,
+            history_refresh_interval_secs: 1800,
+            iv_refresh_interval_secs: 300,
             coingecko_api_key: String::new(),
             exit_buffer_bps: 50,
             capital_efficiency_threshold: dec!(0.98),
             drift_decay: 0.0,
             max_spread_bps: 1500,
+            relative_stop_loss_ratio: dec!(0.80),
+            max_exposure_per_asset_pct: dec!(0.75),
+            max_exposure_per_asset_direction_pct: dec!(0.45),
+            low_event_min_edge_multiplier: dec!(1.20),
+            medium_event_min_edge_multiplier: dec!(1.50),
+            high_event_min_edge_multiplier: dec!(2.00),
+            low_event_max_spread_multiplier: dec!(0.90),
+            medium_event_max_spread_multiplier: dec!(0.80),
+            high_event_max_spread_multiplier: dec!(0.65),
+            low_event_sigma_multiplier: dec!(1.05),
+            medium_event_sigma_multiplier: dec!(1.15),
+            high_event_sigma_multiplier: dec!(1.30),
+            low_event_size_multiplier: dec!(0.90),
+            medium_event_size_multiplier: dec!(0.75),
+            high_event_size_multiplier: dec!(0.50),
+            btc_probability_calibration: dec!(0.95),
+            eth_probability_calibration: dec!(0.93),
+            alt_probability_calibration: dec!(0.88),
+            binary_probability_calibration: dec!(0.97),
+            range_probability_calibration: dec!(0.90),
+            calibration_overrides: vec![],
+            short_horizon_max_days: 1,
+            medium_horizon_max_days: 7,
+            short_horizon_probability_calibration: dec!(0.85),
+            medium_horizon_probability_calibration: dec!(0.92),
+            short_horizon_size_multiplier: dec!(0.60),
+            medium_horizon_size_multiplier: dec!(0.80),
+            short_horizon_min_edge_multiplier: dec!(1.50),
+            medium_horizon_min_edge_multiplier: dec!(1.20),
+            short_horizon_max_spread_multiplier: dec!(0.75),
+            medium_horizon_max_spread_multiplier: dec!(0.90),
+            short_horizon_capital_efficiency_threshold: dec!(0.92),
+            medium_horizon_capital_efficiency_threshold: dec!(0.95),
+            short_horizon_exit_buffer_multiplier: dec!(0.50),
+            medium_horizon_exit_buffer_multiplier: dec!(0.80),
+            hold_min_edge_bps: 100,
+            short_horizon_hold_edge_multiplier: dec!(1.50),
+            medium_horizon_hold_edge_multiplier: dec!(1.20),
+            edge_decay_exit_fraction: dec!(0.25),
+            edge_decay_exit_fraction_step: dec!(0.10),
+            edge_decay_moderate_gap_bps: 50,
+            edge_decay_severe_gap_bps: 150,
+            edge_decay_moderate_exit_multiplier: dec!(1.25),
+            edge_decay_severe_exit_multiplier: dec!(1.50),
+            edge_decay_moderate_cooldown_multiplier: dec!(0.75),
+            edge_decay_severe_cooldown_multiplier: dec!(0.50),
+            short_horizon_edge_decay_exit_multiplier: dec!(1.50),
+            medium_horizon_edge_decay_exit_multiplier: dec!(1.20),
+            edge_decay_cooldown_secs: 1800,
+            edge_decay_confirmation_scans: 2,
+            short_horizon_edge_decay_confirmation_scans: 1,
+            medium_horizon_edge_decay_confirmation_scans: 2,
+            edge_decay_moderate_confirmation_scan_multiplier: dec!(0.75),
+            edge_decay_severe_confirmation_scan_multiplier: dec!(0.50),
+            edge_decay_confirmation_window_secs: 900,
+            short_horizon_edge_decay_confirmation_window_multiplier: dec!(0.50),
+            medium_horizon_edge_decay_confirmation_window_multiplier: dec!(0.75),
+            edge_decay_moderate_confirmation_window_multiplier: dec!(0.75),
+            edge_decay_severe_confirmation_window_multiplier: dec!(0.50),
+            short_horizon_edge_decay_cooldown_multiplier: dec!(0.50),
+            medium_horizon_edge_decay_cooldown_multiplier: dec!(0.75),
         };
         let books = Arc::new(books);
         CryptoAlphaStrategy::new(
@@ -2416,8 +3903,27 @@ mod tests {
                 get_balance: Box::new(|| dec!(200)), // test balance $200
                 neg_risk_events: vec![],
                 binary_event_groups: vec![],
+                event_calendar: None,
             },
         )
+    }
+
+    fn make_event_calendar(keyword: &str, impact: EventImpact) -> Arc<EventCalendarService> {
+        Arc::new(EventCalendarService::new(EventCalendarConfig {
+            enabled: true,
+            static_events: vec![StaticEventConfig {
+                title: format!("{keyword} event"),
+                category: "crypto".to_string(),
+                event_time: Utc::now().to_rfc3339(),
+                impact: match impact {
+                    EventImpact::Low => "low".to_string(),
+                    EventImpact::Medium => "medium".to_string(),
+                    EventImpact::High => "high".to_string(),
+                },
+                keywords: vec![keyword.to_string()],
+            }],
+            ..EventCalendarConfig::default()
+        }))
     }
 
     #[tokio::test]
@@ -2473,26 +3979,250 @@ mod tests {
         // Pre-populate price cache with Bitcoin data: current=$95k, 30 daily closes ~$95k
         // GBM with these numbers for $500k target → probability ≈ 0.0
         let parsed = parse_crypto_question(question).unwrap();
-        let cache_key = parsed.asset.binance_symbol.to_string();
-        {
-            let mut cache = strategy.price_cache.lock().unwrap();
-            cache.insert(
-                cache_key,
-                CachedPrice {
-                    data: CryptoPriceData {
-                        current_price: 95000.0,
-                        daily_closes: (0..30).map(|i| 94000.0 + (i as f64) * 100.0).collect(),
-                        implied_vol: None,
-                    },
-                    fetched_at: Utc::now(),
-                    last_sigma: None,
-                },
-            );
-        }
+        seed_price_cache(&strategy, parsed.asset, 95000.0);
 
         let exits = strategy.scan_exits(&[market]).await;
         assert_eq!(exits.len(), 1, "Should detect model reversal exit");
         assert!(exits[0].question.starts_with("[EXIT]"));
+    }
+
+    #[tokio::test]
+    async fn test_exit_relative_stop_loss_crypto() {
+        let token_id = U256::from(1u64);
+        let question = "Will Bitcoin exceed $120,000 by December 31, 2026?";
+        let market = make_crypto_market(question);
+
+        let mut books = HashMap::new();
+        books.insert(token_id, make_crypto_book(token_id, dec!(0.55)));
+        books.insert(
+            U256::from(2u64),
+            make_crypto_book(U256::from(2u64), dec!(0.45)),
+        );
+
+        let held = vec![(token_id, dec!(25), dec!(0.80))];
+        let strategy = make_crypto_strategy(books, held);
+
+        let exits = strategy.scan_exits(&[market]).await;
+        assert_eq!(exits.len(), 1, "Relative stop-loss should trigger");
+        assert!(exits[0].question.starts_with("[EXIT]"));
+    }
+
+    #[tokio::test]
+    async fn test_short_horizon_capital_efficiency_exits_earlier() {
+        let token_id = U256::from(1u64);
+        let question = "Will Bitcoin exceed $100,000 by March 17, 2026?";
+        let market = make_crypto_market(question);
+
+        let mut books = HashMap::new();
+        books.insert(token_id, make_crypto_book(token_id, dec!(0.95)));
+        books.insert(
+            U256::from(2u64),
+            make_crypto_book(U256::from(2u64), dec!(0.05)),
+        );
+
+        let held = vec![(token_id, dec!(20), dec!(0.70))];
+        let strategy = make_crypto_strategy(books, held);
+
+        let exits = strategy.scan_exits(&[market]).await;
+        assert_eq!(
+            exits.len(),
+            1,
+            "short-dated capital efficiency threshold should trigger earlier exit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_short_horizon_model_reversal_uses_tighter_buffer() {
+        let token_id = U256::from(1u64);
+        let question = "Will Bitcoin exceed $90,000 by March 17, 2026?";
+        let market = make_crypto_market(question);
+
+        let mut yes_book = make_crypto_book(token_id, dec!(0.60));
+        yes_book.asks[0].price = dec!(0.62);
+
+        let mut books = HashMap::new();
+        books.insert(token_id, yes_book);
+        books.insert(
+            U256::from(2u64),
+            make_crypto_book(U256::from(2u64), dec!(0.40)),
+        );
+
+        let held = vec![(token_id, dec!(15), dec!(0.52))];
+        let strategy = make_crypto_strategy(books, held);
+        seed_price_cache(&strategy, &CRYPTO_ASSETS[0], 89_500.0);
+
+        let exits = strategy.scan_exits(&[market]).await;
+        assert_eq!(
+            exits.len(),
+            1,
+            "short-dated model reversal should use a tighter exit buffer"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_exit_edge_decay_crypto() {
+        let token_id = U256::from(1u64);
+        let question = "Will Bitcoin exceed $90,000 by December 31, 2026?";
+        let market = make_crypto_market(question);
+
+        let mut books = HashMap::new();
+        books.insert(token_id, make_crypto_book(token_id, dec!(0.60)));
+        books.insert(
+            U256::from(2u64),
+            make_crypto_book(U256::from(2u64), dec!(0.40)),
+        );
+
+        let held = vec![(token_id, dec!(10), dec!(0.50))];
+        let strategy = make_crypto_strategy(books, held);
+        seed_price_cache(&strategy, &CRYPTO_ASSETS[0], 90_500.0);
+        assert_eq!(
+            strategy.note_edge_decay_confirmation(token_id, 30, dec!(0.0025)),
+            1
+        );
+
+        let exits = strategy.scan_exits(&[market]).await;
+        assert_eq!(
+            exits.len(),
+            1,
+            "confirmed thin-edge state should trigger edge-decay exit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_edge_decay_exit_respects_cooldown() {
+        let token_id = U256::from(1u64);
+        let strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        assert!(!strategy.edge_decay_cooldown_active(token_id));
+        strategy.set_edge_decay_cooldown(token_id, 30, Decimal::ZERO);
+        assert!(
+            strategy.edge_decay_cooldown_active(token_id),
+            "token should enter edge-decay cooldown immediately after a trim"
+        );
+    }
+
+    #[test]
+    fn test_short_horizon_hold_edge_threshold_is_stricter() {
+        let strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        assert_eq!(strategy.effective_hold_edge_threshold(30), dec!(0.01));
+        assert_eq!(strategy.effective_hold_edge_threshold(7), dec!(0.012));
+        assert_eq!(strategy.effective_hold_edge_threshold(1), dec!(0.015));
+        assert_eq!(strategy.effective_edge_decay_exit_fraction(30), dec!(0.25));
+        assert_eq!(strategy.effective_edge_decay_exit_fraction(7), dec!(0.30));
+        assert_eq!(strategy.effective_edge_decay_exit_fraction(1), dec!(0.375));
+        assert_eq!(
+            strategy.effective_edge_decay_confirmation_scans(30, Decimal::ZERO),
+            2
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_confirmation_scans(7, Decimal::ZERO),
+            2
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_confirmation_scans(1, Decimal::ZERO),
+            1
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_confirmation_scans(30, dec!(0.0050)),
+            2
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_confirmation_scans(30, dec!(0.0150)),
+            1
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_confirmation_window_secs(30, Decimal::ZERO),
+            900
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_confirmation_window_secs(7, Decimal::ZERO),
+            675
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_confirmation_window_secs(1, Decimal::ZERO),
+            450
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_confirmation_window_secs(30, dec!(0.0050)),
+            675
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_confirmation_window_secs(30, dec!(0.0150)),
+            450
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_cooldown_secs(30, Decimal::ZERO),
+            1800
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_cooldown_secs(7, Decimal::ZERO),
+            1350
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_cooldown_secs(1, Decimal::ZERO),
+            900
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_cooldown_secs(30, dec!(0.0050)),
+            1350
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_cooldown_secs(30, dec!(0.0150)),
+            900
+        );
+        assert_eq!(strategy.config.edge_decay_confirmation_scans, 2);
+        assert_eq!(
+            strategy.planned_edge_decay_exit_size(dec!(10), dec!(0.60), 30, 2, dec!(0.0025)),
+            dec!(2.50)
+        );
+        assert_eq!(
+            strategy.planned_edge_decay_exit_size(dec!(10), dec!(0.60), 30, 4, dec!(0.0025)),
+            dec!(4.50)
+        );
+        assert_eq!(
+            strategy.planned_edge_decay_exit_size(dec!(10), dec!(0.60), 1, 1, dec!(0.0025)),
+            dec!(3.75)
+        );
+        assert_eq!(
+            strategy.planned_edge_decay_exit_size(dec!(10), dec!(0.60), 1, 3, dec!(0.0025)),
+            dec!(5.75)
+        );
+        assert_eq!(
+            strategy.planned_edge_decay_exit_size(dec!(10), dec!(0.60), 30, 2, dec!(0.0050)),
+            dec!(3.12)
+        );
+        assert_eq!(
+            strategy.planned_edge_decay_exit_size(dec!(10), dec!(0.60), 30, 2, dec!(0.0150)),
+            dec!(5.25)
+        );
+        let token_id = U256::from(42u64);
+        assert_eq!(
+            strategy.note_edge_decay_confirmation(token_id, 30, dec!(0.0025)),
+            1
+        );
+        assert_eq!(
+            strategy.note_edge_decay_confirmation(token_id, 30, dec!(0.0025)),
+            2
+        );
+        {
+            let mut confirmations = strategy.edge_decay_confirmations.lock().unwrap();
+            confirmations.insert(
+                token_id,
+                EdgeDecayConfirmationState {
+                    count: 2,
+                    last_seen: Instant::now() - Duration::from_secs(901),
+                },
+            );
+        }
+        assert_eq!(
+            strategy.note_edge_decay_confirmation(token_id, 30, dec!(0.0025)),
+            1,
+            "expired confirmation window should reset the sequence"
+        );
+        strategy.reset_edge_decay_confirmation(token_id);
+        assert_eq!(
+            strategy.note_edge_decay_confirmation(token_id, 30, dec!(0.0025)),
+            1
+        );
     }
 
     // ──── Drift Decay Tests ────
@@ -2627,11 +4357,75 @@ mod tests {
             max_position_pct: dec!(0.50),
             kelly_fraction: dec!(0.25),
             refresh_interval_secs: 300,
+            spot_refresh_interval_secs: 30,
+            history_refresh_interval_secs: 1800,
+            iv_refresh_interval_secs: 300,
             coingecko_api_key: String::new(),
             exit_buffer_bps: 50,
             capital_efficiency_threshold: dec!(0.98),
             drift_decay: 0.0,
             max_spread_bps: 1200,
+            relative_stop_loss_ratio: dec!(0.80),
+            max_exposure_per_asset_pct: dec!(0.75),
+            max_exposure_per_asset_direction_pct: dec!(0.45),
+            low_event_min_edge_multiplier: dec!(1.20),
+            medium_event_min_edge_multiplier: dec!(1.50),
+            high_event_min_edge_multiplier: dec!(2.00),
+            low_event_max_spread_multiplier: dec!(0.90),
+            medium_event_max_spread_multiplier: dec!(0.80),
+            high_event_max_spread_multiplier: dec!(0.65),
+            low_event_sigma_multiplier: dec!(1.05),
+            medium_event_sigma_multiplier: dec!(1.15),
+            high_event_sigma_multiplier: dec!(1.30),
+            low_event_size_multiplier: dec!(0.90),
+            medium_event_size_multiplier: dec!(0.75),
+            high_event_size_multiplier: dec!(0.50),
+            btc_probability_calibration: dec!(0.95),
+            eth_probability_calibration: dec!(0.93),
+            alt_probability_calibration: dec!(0.88),
+            binary_probability_calibration: dec!(0.97),
+            range_probability_calibration: dec!(0.90),
+            calibration_overrides: vec![],
+            short_horizon_max_days: 1,
+            medium_horizon_max_days: 7,
+            short_horizon_probability_calibration: dec!(0.85),
+            medium_horizon_probability_calibration: dec!(0.92),
+            short_horizon_size_multiplier: dec!(0.60),
+            medium_horizon_size_multiplier: dec!(0.80),
+            short_horizon_min_edge_multiplier: dec!(1.50),
+            medium_horizon_min_edge_multiplier: dec!(1.20),
+            short_horizon_max_spread_multiplier: dec!(0.75),
+            medium_horizon_max_spread_multiplier: dec!(0.90),
+            short_horizon_capital_efficiency_threshold: dec!(0.92),
+            medium_horizon_capital_efficiency_threshold: dec!(0.95),
+            short_horizon_exit_buffer_multiplier: dec!(0.50),
+            medium_horizon_exit_buffer_multiplier: dec!(0.80),
+            hold_min_edge_bps: 100,
+            short_horizon_hold_edge_multiplier: dec!(1.50),
+            medium_horizon_hold_edge_multiplier: dec!(1.20),
+            edge_decay_exit_fraction: dec!(0.25),
+            edge_decay_exit_fraction_step: dec!(0.10),
+            edge_decay_moderate_gap_bps: 50,
+            edge_decay_severe_gap_bps: 150,
+            edge_decay_moderate_exit_multiplier: dec!(1.25),
+            edge_decay_severe_exit_multiplier: dec!(1.50),
+            edge_decay_moderate_cooldown_multiplier: dec!(0.75),
+            edge_decay_severe_cooldown_multiplier: dec!(0.50),
+            short_horizon_edge_decay_exit_multiplier: dec!(1.50),
+            medium_horizon_edge_decay_exit_multiplier: dec!(1.20),
+            edge_decay_cooldown_secs: 1800,
+            edge_decay_confirmation_scans: 2,
+            short_horizon_edge_decay_confirmation_scans: 1,
+            medium_horizon_edge_decay_confirmation_scans: 2,
+            edge_decay_moderate_confirmation_scan_multiplier: dec!(0.75),
+            edge_decay_severe_confirmation_scan_multiplier: dec!(0.50),
+            edge_decay_confirmation_window_secs: 900,
+            short_horizon_edge_decay_confirmation_window_multiplier: dec!(0.50),
+            medium_horizon_edge_decay_confirmation_window_multiplier: dec!(0.75),
+            edge_decay_moderate_confirmation_window_multiplier: dec!(0.75),
+            edge_decay_severe_confirmation_window_multiplier: dec!(0.50),
+            short_horizon_edge_decay_cooldown_multiplier: dec!(0.50),
+            medium_horizon_edge_decay_cooldown_multiplier: dec!(0.75),
         };
         let books = Arc::new(books);
         let strategy = CryptoAlphaStrategy::new(
@@ -2645,13 +4439,16 @@ mod tests {
                 get_balance: Box::new(|| dec!(200)),
                 neg_risk_events: vec![],
                 binary_event_groups: vec![],
+                event_calendar: None,
             },
         );
 
         // Use a far future date so the question parses with days > 0
         let question = "Will Bitcoin exceed $50,000 by December 31?";
         let market = make_crypto_market(question);
-        let result = strategy.detect_crypto_opportunity(&market).await;
+        let result = strategy
+            .detect_crypto_opportunity(&market, Decimal::ZERO, &HashMap::new())
+            .await;
         assert!(
             result.is_none(),
             "Market with 20% spread should be rejected (max 12%)"
@@ -2685,5 +4482,790 @@ mod tests {
             "20% spread (2000 bps) should fail 12% filter"
         );
         assert_eq!(wide_bps, 2000);
+    }
+
+    #[tokio::test]
+    async fn test_crypto_event_window_raises_min_edge_threshold() {
+        let yes_token = U256::from(31u64);
+        let no_token = U256::from(32u64);
+        let market = market_with_token_ids(
+            make_crypto_market("Will Bitcoin exceed $105,000 by December 31, 2026?"),
+            yes_token,
+            no_token,
+            B256::from([3u8; 32]),
+        );
+
+        let mut books = HashMap::new();
+        books.insert(
+            yes_token,
+            OrderBook {
+                token_id: yes_token,
+                bids: vec![PriceLevel {
+                    price: dec!(0.07),
+                    size: dec!(500),
+                }],
+                asks: vec![PriceLevel {
+                    price: dec!(0.08),
+                    size: dec!(500),
+                }],
+                timestamp: Utc::now(),
+            },
+        );
+        books.insert(
+            no_token,
+            OrderBook {
+                token_id: no_token,
+                bids: vec![PriceLevel {
+                    price: dec!(0.92),
+                    size: dec!(500),
+                }],
+                asks: vec![PriceLevel {
+                    price: dec!(0.94),
+                    size: dec!(500),
+                }],
+                timestamp: Utc::now(),
+            },
+        );
+
+        let base_config = CryptoAlphaConfig {
+            min_edge_bps: 500,
+            max_position_pct: dec!(0.50),
+            kelly_fraction: dec!(0.25),
+            refresh_interval_secs: 300,
+            spot_refresh_interval_secs: 30,
+            history_refresh_interval_secs: 1800,
+            iv_refresh_interval_secs: 300,
+            coingecko_api_key: String::new(),
+            exit_buffer_bps: 50,
+            capital_efficiency_threshold: dec!(0.98),
+            drift_decay: 0.0,
+            max_spread_bps: 1500,
+            relative_stop_loss_ratio: dec!(0.80),
+            max_exposure_per_asset_pct: dec!(0.75),
+            max_exposure_per_asset_direction_pct: dec!(0.45),
+            low_event_min_edge_multiplier: dec!(1.20),
+            medium_event_min_edge_multiplier: dec!(1.50),
+            high_event_min_edge_multiplier: dec!(2.00),
+            low_event_max_spread_multiplier: dec!(0.90),
+            medium_event_max_spread_multiplier: dec!(0.80),
+            high_event_max_spread_multiplier: dec!(0.65),
+            low_event_sigma_multiplier: dec!(1.05),
+            medium_event_sigma_multiplier: dec!(1.15),
+            high_event_sigma_multiplier: dec!(1.30),
+            low_event_size_multiplier: dec!(0.90),
+            medium_event_size_multiplier: dec!(0.75),
+            high_event_size_multiplier: dec!(0.50),
+            btc_probability_calibration: dec!(0.95),
+            eth_probability_calibration: dec!(0.93),
+            alt_probability_calibration: dec!(0.88),
+            binary_probability_calibration: dec!(0.97),
+            range_probability_calibration: dec!(0.90),
+            calibration_overrides: vec![],
+            short_horizon_max_days: 1,
+            medium_horizon_max_days: 7,
+            short_horizon_probability_calibration: dec!(0.85),
+            medium_horizon_probability_calibration: dec!(0.92),
+            short_horizon_size_multiplier: dec!(0.60),
+            medium_horizon_size_multiplier: dec!(0.80),
+            short_horizon_min_edge_multiplier: dec!(1.50),
+            medium_horizon_min_edge_multiplier: dec!(1.20),
+            short_horizon_max_spread_multiplier: dec!(0.75),
+            medium_horizon_max_spread_multiplier: dec!(0.90),
+            short_horizon_capital_efficiency_threshold: dec!(0.92),
+            medium_horizon_capital_efficiency_threshold: dec!(0.95),
+            short_horizon_exit_buffer_multiplier: dec!(0.50),
+            medium_horizon_exit_buffer_multiplier: dec!(0.80),
+            hold_min_edge_bps: 100,
+            short_horizon_hold_edge_multiplier: dec!(1.50),
+            medium_horizon_hold_edge_multiplier: dec!(1.20),
+            edge_decay_exit_fraction: dec!(0.25),
+            edge_decay_exit_fraction_step: dec!(0.10),
+            edge_decay_moderate_gap_bps: 50,
+            edge_decay_severe_gap_bps: 150,
+            edge_decay_moderate_exit_multiplier: dec!(1.25),
+            edge_decay_severe_exit_multiplier: dec!(1.50),
+            edge_decay_moderate_cooldown_multiplier: dec!(0.75),
+            edge_decay_severe_cooldown_multiplier: dec!(0.50),
+            short_horizon_edge_decay_exit_multiplier: dec!(1.50),
+            medium_horizon_edge_decay_exit_multiplier: dec!(1.20),
+            edge_decay_cooldown_secs: 1800,
+            edge_decay_confirmation_scans: 2,
+            short_horizon_edge_decay_confirmation_scans: 1,
+            medium_horizon_edge_decay_confirmation_scans: 2,
+            edge_decay_moderate_confirmation_scan_multiplier: dec!(0.75),
+            edge_decay_severe_confirmation_scan_multiplier: dec!(0.50),
+            edge_decay_confirmation_window_secs: 900,
+            short_horizon_edge_decay_confirmation_window_multiplier: dec!(0.50),
+            medium_horizon_edge_decay_confirmation_window_multiplier: dec!(0.75),
+            edge_decay_moderate_confirmation_window_multiplier: dec!(0.75),
+            edge_decay_severe_confirmation_window_multiplier: dec!(0.50),
+            short_horizon_edge_decay_cooldown_multiplier: dec!(0.50),
+            medium_horizon_edge_decay_cooldown_multiplier: dec!(0.75),
+        };
+        let books = Arc::new(books);
+
+        let strategy_without_event = CryptoAlphaStrategy::new(
+            base_config.clone(),
+            Decimal::ZERO,
+            CryptoAlphaDeps {
+                get_orderbook: Box::new({
+                    let books = Arc::clone(&books);
+                    move |tid| books.get(&tid).cloned()
+                }),
+                get_available_capital: Box::new(|| Decimal::MAX),
+                get_position: Box::new(|_| Decimal::ZERO),
+                get_held_positions: Box::new(Vec::new),
+                get_balance: Box::new(|| dec!(200)),
+                neg_risk_events: vec![],
+                binary_event_groups: vec![],
+                event_calendar: None,
+            },
+        );
+        seed_price_cache(&strategy_without_event, &CRYPTO_ASSETS[0], 95_000.0);
+        let baseline = strategy_without_event
+            .detect_crypto_opportunity(&market, Decimal::ZERO, &HashMap::new())
+            .await;
+        assert!(
+            baseline.is_some(),
+            "baseline market should pass normal min-edge filter"
+        );
+
+        let strategy_with_event = CryptoAlphaStrategy::new(
+            base_config,
+            Decimal::ZERO,
+            CryptoAlphaDeps {
+                get_orderbook: Box::new({
+                    let books = Arc::clone(&books);
+                    move |tid| books.get(&tid).cloned()
+                }),
+                get_available_capital: Box::new(|| Decimal::MAX),
+                get_position: Box::new(|_| Decimal::ZERO),
+                get_held_positions: Box::new(Vec::new),
+                get_balance: Box::new(|| dec!(200)),
+                neg_risk_events: vec![],
+                binary_event_groups: vec![],
+                event_calendar: Some(make_event_calendar("bitcoin", EventImpact::High)),
+            },
+        );
+        seed_price_cache(&strategy_with_event, &CRYPTO_ASSETS[0], 95_000.0);
+        let tightened = strategy_with_event
+            .detect_crypto_opportunity(&market, Decimal::ZERO, &HashMap::new())
+            .await;
+        assert!(
+            tightened.is_none(),
+            "event window should tighten min-edge enough to reject the same market"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_crypto_event_thresholds_scale_by_impact() {
+        let strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        assert_eq!(
+            strategy
+                .effective_entry_thresholds("unmatched market", 30)
+                .await,
+            (500, 1500)
+        );
+
+        let mut low_strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        low_strategy.event_calendar = Some(make_event_calendar("bitcoin", EventImpact::Low));
+        assert_eq!(
+            low_strategy
+                .effective_entry_thresholds("Will Bitcoin rally?", 30)
+                .await,
+            (600, 1350)
+        );
+
+        let mut high_strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        high_strategy.event_calendar = Some(make_event_calendar("bitcoin", EventImpact::High));
+        assert_eq!(
+            high_strategy
+                .effective_entry_thresholds("Will Bitcoin rally?", 30)
+                .await,
+            (1000, 975)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_crypto_event_sigma_scales_by_impact() {
+        let strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        assert_eq!(
+            strategy
+                .effective_event_sigma_multiplier("unmatched market")
+                .await,
+            1.0
+        );
+
+        let mut low_strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        low_strategy.event_calendar = Some(make_event_calendar("bitcoin", EventImpact::Low));
+        assert_eq!(
+            low_strategy
+                .effective_event_sigma_multiplier("Will Bitcoin rally?")
+                .await,
+            1.05
+        );
+
+        let mut medium_strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        medium_strategy.event_calendar = Some(make_event_calendar("bitcoin", EventImpact::Medium));
+        assert_eq!(
+            medium_strategy
+                .effective_event_sigma_multiplier("Will Bitcoin rally?")
+                .await,
+            1.15
+        );
+
+        let mut high_strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        high_strategy.event_calendar = Some(make_event_calendar("bitcoin", EventImpact::High));
+        assert_eq!(
+            high_strategy
+                .effective_event_sigma_multiplier("Will Bitcoin rally?")
+                .await,
+            1.30
+        );
+    }
+
+    #[tokio::test]
+    async fn test_crypto_event_size_scales_by_impact() {
+        let strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        assert_eq!(
+            strategy
+                .effective_event_size_multiplier("unmatched market")
+                .await,
+            Decimal::ONE
+        );
+
+        let mut low_strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        low_strategy.event_calendar = Some(make_event_calendar("bitcoin", EventImpact::Low));
+        assert_eq!(
+            low_strategy
+                .effective_event_size_multiplier("Will Bitcoin rally?")
+                .await,
+            dec!(0.90)
+        );
+
+        let mut medium_strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        medium_strategy.event_calendar = Some(make_event_calendar("bitcoin", EventImpact::Medium));
+        assert_eq!(
+            medium_strategy
+                .effective_event_size_multiplier("Will Bitcoin rally?")
+                .await,
+            dec!(0.75)
+        );
+
+        let mut high_strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        high_strategy.event_calendar = Some(make_event_calendar("bitcoin", EventImpact::High));
+        assert_eq!(
+            high_strategy
+                .effective_event_size_multiplier("Will Bitcoin rally?")
+                .await,
+            dec!(0.50)
+        );
+    }
+
+    #[test]
+    fn test_crypto_horizon_size_scales_by_bucket() {
+        let strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        assert_eq!(strategy.effective_horizon_size_multiplier(30), Decimal::ONE);
+        assert_eq!(strategy.effective_horizon_size_multiplier(7), dec!(0.80));
+        assert_eq!(strategy.effective_horizon_size_multiplier(1), dec!(0.60));
+    }
+
+    #[test]
+    fn test_crypto_probability_calibration_shrinks_extremes_by_asset_and_horizon() {
+        let strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        let raw = dec!(0.90);
+        assert_eq!(
+            strategy.calibrate_probability(&CRYPTO_ASSETS[0], 30, CryptoMarketType::Binary, raw),
+            dec!(0.8686)
+        );
+        assert_eq!(
+            strategy.calibrate_probability(&CRYPTO_ASSETS[1], 30, CryptoMarketType::Binary, raw),
+            dec!(0.86084)
+        );
+        assert_eq!(
+            strategy.calibrate_probability(&CRYPTO_ASSETS[2], 30, CryptoMarketType::Binary, raw),
+            dec!(0.84144)
+        );
+        assert_eq!(
+            strategy.calibrate_probability(&CRYPTO_ASSETS[0], 1, CryptoMarketType::Binary, raw),
+            dec!(0.81331)
+        );
+        assert_eq!(
+            strategy.calibrate_probability(&CRYPTO_ASSETS[2], 1, CryptoMarketType::Binary, raw),
+            dec!(0.790224)
+        );
+        assert_eq!(
+            strategy.calibrate_probability(&CRYPTO_ASSETS[0], 30, CryptoMarketType::Range, raw),
+            dec!(0.842)
+        );
+    }
+
+    #[test]
+    fn test_crypto_probability_calibration_override_table() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.config.calibration_overrides = vec![
+            pa_core::config::CryptoCalibrationOverride {
+                asset: "BTCUSDT".to_string(),
+                horizon: "short".to_string(),
+                market_type: "binary".to_string(),
+                probability_calibration: Some(dec!(0.82)),
+                sigma_multiplier: Some(dec!(1.10)),
+                size_multiplier: Some(dec!(0.70)),
+            },
+            pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                horizon: "short".to_string(),
+                market_type: "range".to_string(),
+                probability_calibration: Some(dec!(0.78)),
+                sigma_multiplier: Some(dec!(1.20)),
+                size_multiplier: Some(dec!(0.65)),
+            },
+        ];
+
+        let raw = dec!(0.90);
+        assert_eq!(
+            strategy.calibrate_probability(&CRYPTO_ASSETS[0], 1, CryptoMarketType::Binary, raw),
+            dec!(0.828)
+        );
+        assert_eq!(
+            strategy.calibrate_probability(&CRYPTO_ASSETS[2], 1, CryptoMarketType::Range, raw),
+            dec!(0.812)
+        );
+        assert_eq!(
+            strategy.calibrate_probability(&CRYPTO_ASSETS[0], 30, CryptoMarketType::Binary, raw),
+            dec!(0.8686)
+        );
+        assert_eq!(
+            strategy.calibration_override_sigma_multiplier(
+                &CRYPTO_ASSETS[0],
+                1,
+                CryptoMarketType::Binary
+            ),
+            Some(dec!(1.10))
+        );
+        assert_eq!(
+            strategy.calibration_override_size_multiplier(
+                &CRYPTO_ASSETS[2],
+                1,
+                CryptoMarketType::Range
+            ),
+            Some(dec!(0.65))
+        );
+        assert_eq!(
+            strategy.calibration_override_sigma_multiplier(
+                &CRYPTO_ASSETS[0],
+                30,
+                CryptoMarketType::Binary
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn test_crypto_entry_thresholds_tighten_for_short_horizon() {
+        let strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        assert_eq!(
+            strategy
+                .effective_entry_thresholds("Will Bitcoin rally?", 1)
+                .await,
+            (750, 1125)
+        );
+        assert_eq!(
+            strategy
+                .effective_entry_thresholds("Will Bitcoin rally?", 7)
+                .await,
+            (600, 1350)
+        );
+        assert_eq!(
+            strategy
+                .effective_entry_thresholds("Will Bitcoin rally?", 30)
+                .await,
+            (500, 1500)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_crypto_asset_exposure_cap_limits_new_entry() {
+        let held_market = market_with_token_ids(
+            make_crypto_market("Will Bitcoin exceed $500,000 by December 31, 2026?"),
+            U256::from(11u64),
+            U256::from(12u64),
+            B256::from([1u8; 32]),
+        );
+        let target_market = market_with_token_ids(
+            make_crypto_market("Will Bitcoin exceed $50,000 by December 31, 2026?"),
+            U256::from(21u64),
+            U256::from(22u64),
+            B256::from([2u8; 32]),
+        );
+
+        let mut books = HashMap::new();
+        books.insert(
+            U256::from(11u64),
+            make_crypto_book(U256::from(11u64), dec!(0.60)),
+        );
+        books.insert(
+            U256::from(12u64),
+            make_crypto_book(U256::from(12u64), dec!(0.40)),
+        );
+        books.insert(
+            U256::from(21u64),
+            make_crypto_book(U256::from(21u64), dec!(0.18)),
+        );
+        books.insert(
+            U256::from(22u64),
+            make_crypto_book(U256::from(22u64), dec!(0.82)),
+        );
+
+        let held = vec![(U256::from(11u64), dec!(50), dec!(0.60))];
+        let mut strategy = make_crypto_strategy(books, held);
+        strategy.config.max_exposure_per_asset_pct = dec!(0.25); // $50 cap on $200 balance
+
+        seed_price_cache(&strategy, &CRYPTO_ASSETS[0], 95_000.0);
+
+        let opportunities = pa_core::traits::Strategy::scan(
+            &strategy,
+            &[held_market.clone(), target_market.clone()],
+        )
+        .await
+        .unwrap();
+
+        let entry = opportunities
+            .into_iter()
+            .find(|opp| !opp.question.starts_with("[EXIT]"))
+            .expect("expected one entry opportunity");
+
+        match entry.execution_plan {
+            ExecutionPlan::DirectionalBuy { price, size, .. } => {
+                assert!(
+                    price * size <= dec!(20.00),
+                    "asset cap should limit new BTC exposure to remaining $20"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_crypto_scan_keeps_only_best_entry_per_asset() {
+        let market_a = market_with_token_ids(
+            make_crypto_market("Will Bitcoin exceed $90,000 by December 31, 2026?"),
+            U256::from(31u64),
+            U256::from(32u64),
+            B256::from([3u8; 32]),
+        );
+        let market_b = market_with_token_ids(
+            make_crypto_market("Will Bitcoin exceed $100,000 by December 31, 2026?"),
+            U256::from(41u64),
+            U256::from(42u64),
+            B256::from([4u8; 32]),
+        );
+
+        let mut books = HashMap::new();
+        let mut book_a = make_crypto_book(U256::from(31u64), dec!(0.50));
+        book_a.asks[0].price = dec!(0.52);
+        books.insert(U256::from(31u64), book_a);
+        books.insert(
+            U256::from(32u64),
+            make_crypto_book(U256::from(32u64), dec!(0.48)),
+        );
+
+        let mut book_b = make_crypto_book(U256::from(41u64), dec!(0.20));
+        book_b.asks[0].price = dec!(0.22);
+        books.insert(U256::from(41u64), book_b);
+        books.insert(
+            U256::from(42u64),
+            make_crypto_book(U256::from(42u64), dec!(0.78)),
+        );
+
+        let held = vec![];
+        let strategy = make_crypto_strategy(books, held);
+        seed_price_cache(&strategy, &CRYPTO_ASSETS[0], 95_000.0);
+
+        let opportunities = pa_core::traits::Strategy::scan(&strategy, &[market_a, market_b])
+            .await
+            .unwrap();
+
+        let entries: Vec<_> = opportunities
+            .into_iter()
+            .filter(|opp| !opp.question.starts_with("[EXIT]"))
+            .collect();
+
+        assert_eq!(entries.len(), 1, "only one BTC entry should survive dedupe");
+        assert!(
+            entries[0].question.contains("$100,000"),
+            "higher-profit BTC candidate should win"
+        );
+    }
+
+    #[test]
+    fn test_keep_better_entry_prefers_higher_efficiency_then_lower_cost_and_better_depth() {
+        let asset = &CRYPTO_ASSETS[0];
+        let strategy = make_crypto_strategy(
+            HashMap::from([
+                (
+                    U256::from(1u64),
+                    OrderBook {
+                        token_id: U256::from(1u64),
+                        bids: vec![],
+                        asks: vec![PriceLevel {
+                            price: dec!(0.50),
+                            size: dec!(20),
+                        }],
+                        timestamp: Utc::now(),
+                    },
+                ),
+                (
+                    U256::from(2u64),
+                    OrderBook {
+                        token_id: U256::from(2u64),
+                        bids: vec![],
+                        asks: vec![PriceLevel {
+                            price: dec!(0.40),
+                            size: dec!(30),
+                        }],
+                        timestamp: Utc::now(),
+                    },
+                ),
+                (
+                    U256::from(3u64),
+                    OrderBook {
+                        token_id: U256::from(3u64),
+                        bids: vec![],
+                        asks: vec![PriceLevel {
+                            price: dec!(0.80),
+                            size: dec!(20),
+                        }],
+                        timestamp: Utc::now(),
+                    },
+                ),
+                (
+                    U256::from(4u64),
+                    OrderBook {
+                        token_id: U256::from(4u64),
+                        bids: vec![],
+                        asks: vec![PriceLevel {
+                            price: dec!(0.40),
+                            size: dec!(10),
+                        }],
+                        timestamp: Utc::now(),
+                    },
+                ),
+            ]),
+            vec![],
+        );
+        let mut best = HashMap::new();
+
+        let baseline = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([9u8; 32]),
+            question: "baseline".into(),
+            spread: dec!(0.10),
+            estimated_profit: dec!(4.00),
+            size: dec!(20),
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(1u64),
+                side: TradeSide::Buy,
+                price: dec!(0.50),
+                size: dec!(20),
+                condition_id: B256::from([9u8; 32]),
+            },
+        };
+        strategy.keep_better_entry(&mut best, asset, CryptoDirectionBucket::Up, baseline);
+
+        let higher_efficiency_same_profit = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([10u8; 32]),
+            question: "better-efficiency".into(),
+            spread: dec!(0.09),
+            estimated_profit: dec!(4.00),
+            size: dec!(10),
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(2u64),
+                side: TradeSide::Buy,
+                price: dec!(0.40),
+                size: dec!(10),
+                condition_id: B256::from([10u8; 32]),
+            },
+        };
+        strategy.keep_better_entry(
+            &mut best,
+            asset,
+            CryptoDirectionBucket::Up,
+            higher_efficiency_same_profit,
+        );
+
+        assert_eq!(
+            best.get(&(asset.binance_symbol, CryptoDirectionBucket::Up))
+                .map(|opp| opp.question.as_str()),
+            Some("better-efficiency")
+        );
+
+        let worse_depth_same_profit_efficiency = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([12u8; 32]),
+            question: "worse-depth".into(),
+            spread: dec!(0.11),
+            estimated_profit: dec!(4.00),
+            size: dec!(10),
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(4u64),
+                side: TradeSide::Buy,
+                price: dec!(0.40),
+                size: dec!(10),
+                condition_id: B256::from([12u8; 32]),
+            },
+        };
+        strategy.keep_better_entry(
+            &mut best,
+            asset,
+            CryptoDirectionBucket::Up,
+            worse_depth_same_profit_efficiency,
+        );
+
+        assert_eq!(
+            best.get(&(asset.binance_symbol, CryptoDirectionBucket::Up))
+                .map(|opp| opp.question.as_str()),
+            Some("better-efficiency"),
+            "shallower candidate should not replace equally efficient deeper one"
+        );
+
+        let same_efficiency_higher_cost = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([11u8; 32]),
+            question: "same-efficiency-higher-cost".into(),
+            spread: dec!(0.20),
+            estimated_profit: dec!(4.00),
+            size: dec!(20),
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(3u64),
+                side: TradeSide::Buy,
+                price: dec!(0.80),
+                size: dec!(10),
+                condition_id: B256::from([11u8; 32]),
+            },
+        };
+        strategy.keep_better_entry(
+            &mut best,
+            asset,
+            CryptoDirectionBucket::Up,
+            same_efficiency_higher_cost,
+        );
+
+        assert_eq!(
+            best.get(&(asset.binance_symbol, CryptoDirectionBucket::Up))
+                .map(|opp| opp.question.as_str()),
+            Some("better-efficiency"),
+            "higher-cost candidate should not replace equally efficient incumbent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_crypto_scan_keeps_opposite_directions_for_same_asset() {
+        let up_market = market_with_token_ids(
+            make_crypto_market("Will Bitcoin exceed $100,000 by December 31, 2026?"),
+            U256::from(51u64),
+            U256::from(52u64),
+            B256::from([5u8; 32]),
+        );
+        let down_market = market_with_token_ids(
+            make_crypto_market("Will Bitcoin dip to $85,000 by December 31, 2026?"),
+            U256::from(61u64),
+            U256::from(62u64),
+            B256::from([6u8; 32]),
+        );
+
+        let mut books = HashMap::new();
+        let mut up_book = make_crypto_book(U256::from(51u64), dec!(0.20));
+        up_book.asks[0].price = dec!(0.22);
+        books.insert(U256::from(51u64), up_book);
+        books.insert(
+            U256::from(52u64),
+            make_crypto_book(U256::from(52u64), dec!(0.78)),
+        );
+
+        let mut down_book = make_crypto_book(U256::from(61u64), dec!(0.20));
+        down_book.asks[0].price = dec!(0.22);
+        books.insert(U256::from(61u64), down_book);
+        books.insert(
+            U256::from(62u64),
+            make_crypto_book(U256::from(62u64), dec!(0.78)),
+        );
+
+        let strategy = make_crypto_strategy(books, vec![]);
+        seed_price_cache(&strategy, &CRYPTO_ASSETS[0], 95_000.0);
+
+        let opportunities = pa_core::traits::Strategy::scan(&strategy, &[up_market, down_market])
+            .await
+            .unwrap();
+
+        let entries: Vec<_> = opportunities
+            .into_iter()
+            .filter(|opp| !opp.question.starts_with("[EXIT]"))
+            .collect();
+
+        assert_eq!(entries.len(), 2, "up/down BTC candidates should coexist");
+    }
+
+    #[tokio::test]
+    async fn test_crypto_asset_direction_exposure_cap_limits_same_direction_entry() {
+        let held_market = market_with_token_ids(
+            make_crypto_market("Will Bitcoin exceed $90,000 by December 31, 2026?"),
+            U256::from(71u64),
+            U256::from(72u64),
+            B256::from([7u8; 32]),
+        );
+        let target_market = market_with_token_ids(
+            make_crypto_market("Will Bitcoin exceed $100,000 by December 31, 2026?"),
+            U256::from(81u64),
+            U256::from(82u64),
+            B256::from([8u8; 32]),
+        );
+
+        let mut books = HashMap::new();
+        let mut held_book = make_crypto_book(U256::from(71u64), dec!(0.50));
+        held_book.asks[0].price = dec!(0.52);
+        books.insert(U256::from(71u64), held_book);
+        books.insert(
+            U256::from(72u64),
+            make_crypto_book(U256::from(72u64), dec!(0.48)),
+        );
+
+        let mut target_book = make_crypto_book(U256::from(81u64), dec!(0.20));
+        target_book.asks[0].price = dec!(0.22);
+        books.insert(U256::from(81u64), target_book);
+        books.insert(
+            U256::from(82u64),
+            make_crypto_book(U256::from(82u64), dec!(0.78)),
+        );
+
+        let held = vec![(U256::from(71u64), dec!(70), dec!(0.60))];
+        let mut strategy = make_crypto_strategy(books, held);
+        strategy.config.max_exposure_per_asset_pct = dec!(0.90);
+        strategy.config.max_exposure_per_asset_direction_pct = dec!(0.20); // $40 cap on $200
+
+        seed_price_cache(&strategy, &CRYPTO_ASSETS[0], 95_000.0);
+
+        let opportunities =
+            pa_core::traits::Strategy::scan(&strategy, &[held_market, target_market])
+                .await
+                .unwrap();
+
+        let entries: Vec<_> = opportunities
+            .into_iter()
+            .filter(|opp| !opp.question.starts_with("[EXIT]"))
+            .collect();
+
+        assert!(
+            entries.is_empty(),
+            "same-direction BTC entry should be blocked by direction cap"
+        );
     }
 }

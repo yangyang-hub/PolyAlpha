@@ -5,8 +5,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use pa_core::weather::{
-    normalize_weather_location_name, settlement_validation_status, weather_location,
-    SettlementValidationStatus,
+    SettlementValidationStatus, normalize_weather_location_name, settlement_validation_status,
+    weather_location,
 };
 use pa_strategy::weather::{
     parse_target_date_server_local, parse_weather_event_title, parse_weather_question,

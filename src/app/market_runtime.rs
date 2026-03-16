@@ -24,8 +24,8 @@ pub struct MarketRuntimeArtifacts {
     pub market_data: Arc<MarketDataService>,
     pub lr_runtime_status: Arc<tokio::sync::RwLock<pa_monitor::api::LrRuntimeStatus>>,
     pub shared_positions: Arc<tokio::sync::RwLock<Vec<pa_monitor::api::PositionApiEntry>>>,
-    pub shared_positions_updated_at:
-        Arc<tokio::sync::RwLock<Option<chrono::DateTime<Utc>>>>,
+    pub shared_positions_updated_at: Arc<tokio::sync::RwLock<Option<chrono::DateTime<Utc>>>>,
+    pub wallet_balance: Arc<tokio::sync::RwLock<rust_decimal::Decimal>>,
     pub startup_ready: Arc<AtomicBool>,
     pub shared_markets: Arc<tokio::sync::RwLock<Vec<pa_core::types::MarketInfo>>>,
     pub neg_risk_events: Vec<pa_core::types::NegRiskEvent>,
@@ -47,12 +47,14 @@ pub async fn initialize_market_runtime(
     tracing::info!("Market data service initialized");
 
     let ws_connected = market_data.ws_feed_ws_connected().await;
-    let lr_runtime_status: Arc<tokio::sync::RwLock<pa_monitor::api::LrRuntimeStatus>> =
-        Arc::new(tokio::sync::RwLock::new(pa_monitor::api::LrRuntimeStatus::default()));
+    let lr_runtime_status: Arc<tokio::sync::RwLock<pa_monitor::api::LrRuntimeStatus>> = Arc::new(
+        tokio::sync::RwLock::new(pa_monitor::api::LrRuntimeStatus::default()),
+    );
     let shared_positions: Arc<tokio::sync::RwLock<Vec<pa_monitor::api::PositionApiEntry>>> =
         Arc::new(tokio::sync::RwLock::new(Vec::new()));
     let shared_positions_updated_at: Arc<tokio::sync::RwLock<Option<chrono::DateTime<Utc>>>> =
         Arc::new(tokio::sync::RwLock::new(None));
+    let wallet_balance = Arc::new(tokio::sync::RwLock::new(rust_decimal::Decimal::ZERO));
     let startup_ready = Arc::new(AtomicBool::new(false));
     start_api_server(
         settings,
@@ -61,10 +63,12 @@ pub async fn initialize_market_runtime(
         Arc::clone(&lr_runtime_status),
         Arc::clone(&shared_positions),
         Arc::clone(&shared_positions_updated_at),
+        Arc::clone(&wallet_balance),
         Arc::clone(&startup_ready),
     );
 
-    let Some(markets) = crate::app::bootstrap::discover_initial_markets(market_data.as_ref()).await else {
+    let Some(markets) = crate::app::bootstrap::discover_initial_markets(market_data.as_ref()).await
+    else {
         return Ok(None);
     };
     tracing::info!(count = markets.len(), "Markets discovered");
@@ -72,14 +76,20 @@ pub async fn initialize_market_runtime(
     let neg_risk_events = GammaFeed::group_neg_risk_events(&markets);
     tracing::info!(
         neg_risk_events = neg_risk_events.len(),
-        neg_risk_outcomes = neg_risk_events.iter().map(|e| e.markets.len()).sum::<usize>(),
+        neg_risk_outcomes = neg_risk_events
+            .iter()
+            .map(|e| e.markets.len())
+            .sum::<usize>(),
         "NegRisk events discovered"
     );
 
     let binary_event_groups = GammaFeed::group_binary_events(&markets);
     tracing::info!(
         binary_event_groups = binary_event_groups.len(),
-        grouped_markets = binary_event_groups.iter().map(|g| g.markets.len()).sum::<usize>(),
+        grouped_markets = binary_event_groups
+            .iter()
+            .map(|g| g.markets.len())
+            .sum::<usize>(),
         "Binary event groups discovered"
     );
 
@@ -100,7 +110,11 @@ pub async fn initialize_market_runtime(
             }
         }
 
-        tracing::info!(seeded, no_price_data, "OrderBookCache seeded with gamma prices");
+        tracing::info!(
+            seeded,
+            no_price_data,
+            "OrderBookCache seeded with gamma prices"
+        );
     }
 
     let held_position_token_ids = load_held_position_token_ids(resolved_accounts).await;
@@ -114,7 +128,10 @@ pub async fn initialize_market_runtime(
             ws_max,
         );
 
-        tracing::info!(tokens = token_ids.len(), "Subscribing to order book updates (smart ordering)");
+        tracing::info!(
+            tokens = token_ids.len(),
+            "Subscribing to order book updates (smart ordering)"
+        );
         market_data.subscribe(&token_ids).await?;
         pa_monitor::metrics::ACTIVE_SUBSCRIPTIONS.set(token_ids.len() as f64);
     }
@@ -124,6 +141,7 @@ pub async fn initialize_market_runtime(
         lr_runtime_status,
         shared_positions,
         shared_positions_updated_at,
+        wallet_balance,
         startup_ready,
         shared_markets,
         neg_risk_events,
@@ -137,13 +155,19 @@ pub async fn populate_initial_positions_snapshot(
     market_data: &Arc<MarketDataService>,
     shared_positions: &Arc<tokio::sync::RwLock<Vec<pa_monitor::api::PositionApiEntry>>>,
     shared_positions_updated_at: &Arc<tokio::sync::RwLock<Option<chrono::DateTime<Utc>>>>,
+    wallet_balance: &Arc<tokio::sync::RwLock<rust_decimal::Decimal>>,
 ) {
     let markets_snapshot = shared_markets.read().await;
     let api_cache = market_data.cache().clone();
     let entries = build_position_snapshot(account_contexts, &markets_snapshot, &api_cache);
     let count = entries.len();
+    let total_balance: rust_decimal::Decimal = account_contexts
+        .iter()
+        .map(|ctx| **ctx.usdc_balance.load())
+        .sum();
     *shared_positions.write().await = entries;
     *shared_positions_updated_at.write().await = Some(Utc::now());
+    *wallet_balance.write().await = total_balance;
     if count > 0 {
         tracing::info!(positions = count, "API positions snapshot populated");
     }
@@ -156,6 +180,7 @@ pub fn spawn_shared_runtime_tasks(
     market_data: Arc<MarketDataService>,
     shared_positions: Arc<tokio::sync::RwLock<Vec<pa_monitor::api::PositionApiEntry>>>,
     shared_positions_updated_at: Arc<tokio::sync::RwLock<Option<chrono::DateTime<Utc>>>>,
+    wallet_balance: Arc<tokio::sync::RwLock<rust_decimal::Decimal>>,
     active_enabled_strategies: Vec<String>,
     smart_money_token_maps: Vec<
         Arc<
@@ -172,6 +197,7 @@ pub fn spawn_shared_runtime_tasks(
         market_data.cache().as_ref().clone(),
         shared_positions,
         shared_positions_updated_at,
+        wallet_balance,
         cancel.clone(),
     );
 

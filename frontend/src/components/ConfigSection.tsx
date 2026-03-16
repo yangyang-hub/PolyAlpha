@@ -61,13 +61,76 @@ const FIELD_HINTS: Record<string, Record<string, string>> = {
     min_edge_bps: "最小 edge（GBM模型概率 - 市场价，基点）",
     max_position_pct: "仓位占余额比例上限（0-1）",
     kelly_fraction: "Kelly 公式分数上限（0-1）",
-    refresh_interval_secs: "价格数据刷新间隔（秒）",
+    refresh_interval_secs: "兼容旧配置的共享刷新间隔（秒）",
+    spot_refresh_interval_secs: "现价刷新间隔（秒）",
+    history_refresh_interval_secs: "30日历史收盘价刷新间隔（秒）",
+    iv_refresh_interval_secs: "隐含波动率刷新间隔（秒）",
     coingecko_api_key: "CoinGecko Demo API Key（留空则禁用备用源）",
     exit_buffer_bps: "模型反转退出缓冲（基点）",
     capital_efficiency_threshold: "资金效率退出阈值（0-1）",
     drift_decay: "漂移衰减：0=风险中性(Black-Scholes)，1=完全历史漂移",
     max_spread_bps: "最大买卖价差（基点），超过则跳过",
-    max_position_usdc: "单笔最大仓位（USDC）",
+    relative_stop_loss_ratio: "相对止损比率：bid 跌破持仓成本 × 此比率时退出",
+    max_exposure_per_asset_pct: "单资产总敞口上限，占余额比例（0-1）",
+    max_exposure_per_asset_direction_pct: "单资产单方向敞口上限，占余额比例（0-1）",
+    low_event_min_edge_multiplier: "低影响事件最小 edge 乘数",
+    medium_event_min_edge_multiplier: "中影响事件最小 edge 乘数（兼容旧 event_min_edge_multiplier）",
+    high_event_min_edge_multiplier: "高影响事件最小 edge 乘数",
+    low_event_max_spread_multiplier: "低影响事件最大价差乘数",
+    medium_event_max_spread_multiplier: "中影响事件最大价差乘数（兼容旧 event_max_spread_multiplier）",
+    high_event_max_spread_multiplier: "高影响事件最大价差乘数",
+    low_event_sigma_multiplier: "低影响事件 sigma 乘数",
+    medium_event_sigma_multiplier: "中影响事件 sigma 乘数",
+    high_event_sigma_multiplier: "高影响事件 sigma 乘数",
+    low_event_size_multiplier: "低影响事件仓位乘数",
+    medium_event_size_multiplier: "中影响事件仓位乘数",
+    high_event_size_multiplier: "高影响事件仓位乘数",
+    btc_probability_calibration: "BTC 概率校准收缩系数",
+    eth_probability_calibration: "ETH 概率校准收缩系数",
+    alt_probability_calibration: "其他币种概率校准收缩系数",
+    binary_probability_calibration: "二元市场概率校准收缩系数",
+    range_probability_calibration: "区间市场概率校准收缩系数",
+    calibration_overrides: "表驱动校准覆盖：按 asset+horizon+market_type 精细覆盖默认校准",
+    short_horizon_max_days: "短期期限桶最大天数",
+    medium_horizon_max_days: "中期期限桶最大天数",
+    short_horizon_probability_calibration: "短期期限概率校准收缩系数",
+    medium_horizon_probability_calibration: "中期期限概率校准收缩系数",
+    short_horizon_size_multiplier: "短期期限仓位乘数",
+    medium_horizon_size_multiplier: "中期期限仓位乘数",
+    short_horizon_min_edge_multiplier: "短期期限最小 edge 乘数",
+    medium_horizon_min_edge_multiplier: "中期期限最小 edge 乘数",
+    short_horizon_max_spread_multiplier: "短期期限最大价差乘数",
+    medium_horizon_max_spread_multiplier: "中期期限最大价差乘数",
+    short_horizon_capital_efficiency_threshold: "短期期限资金效率止盈阈值",
+    medium_horizon_capital_efficiency_threshold: "中期期限资金效率止盈阈值",
+    short_horizon_exit_buffer_multiplier: "短期期限模型反转退出缓冲乘数",
+    medium_horizon_exit_buffer_multiplier: "中期期限模型反转退出缓冲乘数",
+    hold_min_edge_bps: "持仓继续保留所需的最小 edge（基点）",
+    short_horizon_hold_edge_multiplier: "短期期限持仓最小 edge 乘数",
+    medium_horizon_hold_edge_multiplier: "中期期限持仓最小 edge 乘数",
+    edge_decay_exit_fraction: "edge 衰减退出的基础减仓比例",
+    edge_decay_exit_fraction_step: "每多一次连续确认时增加的减仓比例",
+    edge_decay_moderate_gap_bps: "进入中度 edge 衰减档位所需的额外薄 edge 基点",
+    edge_decay_severe_gap_bps: "进入重度 edge 衰减档位所需的额外薄 edge 基点",
+    edge_decay_moderate_exit_multiplier: "中度 edge 衰减档位的减仓比例乘数",
+    edge_decay_severe_exit_multiplier: "重度 edge 衰减档位的减仓比例乘数",
+    edge_decay_moderate_cooldown_multiplier: "中度 edge 衰减档位的冷却乘数",
+    edge_decay_severe_cooldown_multiplier: "重度 edge 衰减档位的冷却乘数",
+    short_horizon_edge_decay_exit_multiplier: "短期期限 edge 衰减减仓比例乘数",
+    medium_horizon_edge_decay_exit_multiplier: "中期期限 edge 衰减减仓比例乘数",
+    edge_decay_cooldown_secs: "同一 token 的 edge 衰减退出冷却秒数",
+    edge_decay_confirmation_scans: "edge 衰减退出所需的连续确认次数",
+    short_horizon_edge_decay_confirmation_scans: "短期期限 edge 衰减确认次数",
+    medium_horizon_edge_decay_confirmation_scans: "中期期限 edge 衰减确认次数",
+    edge_decay_moderate_confirmation_scan_multiplier: "中度 edge 衰减档位的确认次数乘数",
+    edge_decay_severe_confirmation_scan_multiplier: "重度 edge 衰减档位的确认次数乘数",
+    edge_decay_confirmation_window_secs: "连续确认之间允许的最大间隔秒数",
+    short_horizon_edge_decay_confirmation_window_multiplier: "短期期限连续确认窗口乘数",
+    medium_horizon_edge_decay_confirmation_window_multiplier: "中期期限连续确认窗口乘数",
+    edge_decay_moderate_confirmation_window_multiplier: "中度 edge 衰减档位的确认窗口乘数",
+    edge_decay_severe_confirmation_window_multiplier: "重度 edge 衰减档位的确认窗口乘数",
+    short_horizon_edge_decay_cooldown_multiplier: "短期期限 edge 衰减冷却乘数",
+    medium_horizon_edge_decay_cooldown_multiplier: "中期期限 edge 衰减冷却乘数",
   },
   event_calendar: {
     enabled: "是否启用事件日历过滤",
@@ -159,6 +222,60 @@ function riskBadgeClass(tier: "low" | "medium" | "high" | undefined) {
   }
 }
 
+type CalibrationOverrideRow = {
+  asset?: string;
+  horizon?: string;
+  market_type?: string;
+  probability_calibration?: number | string | null;
+  sigma_multiplier?: number | string | null;
+  size_multiplier?: number | string | null;
+};
+
+function isCalibrationOverrideRow(value: unknown): value is CalibrationOverrideRow {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function renderCalibrationCell(value: number | string | null | undefined) {
+  if (value === null || value === undefined || value === "") {
+    return "—";
+  }
+  return String(value);
+}
+
+function CalibrationScopeBadge({ value }: { value: string }) {
+  const isWildcard = value === "*" || value === "any";
+  return (
+    <span
+      className={`badge badge-sm ${isWildcard ? "badge-warning badge-outline" : "badge-ghost"}`}
+    >
+      {value}
+    </span>
+  );
+}
+
+function calibrationScopeScore(row: CalibrationOverrideRow) {
+  const asset = row.asset || "*";
+  const horizon = row.horizon || "any";
+  const marketType = row.market_type || "any";
+  const assetScore = asset === "*" ? 0 : 1;
+  const horizonScore = horizon === "any" ? 0 : horizon === "long" ? 1 : 2;
+  const marketTypeScore = marketType === "any" ? 0 : 1;
+  return assetScore * 100 + horizonScore * 10 + marketTypeScore;
+}
+
+function calibrationMarketTypeGroupLabel(value: string) {
+  switch (value) {
+    case "binary":
+      return "Binary";
+    case "range":
+      return "Range";
+    case "any":
+      return "Any";
+    default:
+      return value;
+  }
+}
+
 function FieldDisplay({
   section,
   fieldKey,
@@ -200,6 +317,10 @@ function FieldDisplay({
 
   if (Array.isArray(value)) {
     const isStringArray = value.every((v) => typeof v === "string");
+    const isCalibrationOverrides =
+      section === "crypto_alpha" &&
+      fieldKey === "calibration_overrides" &&
+      value.every((entry) => isCalibrationOverrideRow(entry));
     if (isStringArray && section === "weather" && fieldKey === "target_cities") {
       const selected = value as string[];
       const options = Array.isArray(meta?.target_cities_options)
@@ -320,6 +441,89 @@ function FieldDisplay({
                   );
                 })}
               </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    if (isCalibrationOverrides) {
+      const rows = [...(value as CalibrationOverrideRow[])].sort((a, b) => {
+        const scoreDiff = calibrationScopeScore(b) - calibrationScopeScore(a);
+        if (scoreDiff !== 0) return scoreDiff;
+        return `${a.asset ?? "*"}-${a.horizon ?? "any"}-${a.market_type ?? "any"}`.localeCompare(
+          `${b.asset ?? "*"}-${b.horizon ?? "any"}-${b.market_type ?? "any"}`,
+        );
+      });
+      const groupedRows = rows.reduce(
+        (acc, row) => {
+          const key = row.market_type || "any";
+          if (!acc[key]) {
+            acc[key] = [];
+          }
+          acc[key].push(row);
+          return acc;
+        },
+        {} as Record<string, CalibrationOverrideRow[]>,
+      );
+      const orderedGroupKeys = Object.keys(groupedRows).sort((a, b) => {
+        const aScore = a === "any" ? 0 : 1;
+        const bScore = b === "any" ? 0 : 1;
+        if (aScore !== bScore) {
+          return bScore - aScore;
+        }
+        return calibrationMarketTypeGroupLabel(a).localeCompare(calibrationMarketTypeGroupLabel(b));
+      });
+      return (
+        <div className="rounded-box border border-base-300 bg-base-100 p-3 sm:col-span-2">
+          <div className="text-xs opacity-70">{label}</div>
+          {hint && <div className="mt-1 text-xs opacity-40">{hint}</div>}
+          {rows.length === 0 ? (
+            <div className="mt-2 text-sm opacity-60">未配置覆盖规则</div>
+          ) : (
+            <div className="mt-3 space-y-4">
+              {orderedGroupKeys.map((groupKey) => (
+                <div key={groupKey} className="space-y-2">
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="font-medium opacity-70">market_type</span>
+                    <CalibrationScopeBadge value={calibrationMarketTypeGroupLabel(groupKey)} />
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="table table-xs">
+                      <thead>
+                        <tr>
+                          <th>asset</th>
+                          <th>horizon</th>
+                          <th>market_type</th>
+                          <th>probability</th>
+                          <th>sigma</th>
+                          <th>size</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {groupedRows[groupKey].map((row, index) => (
+                          <tr
+                            key={`${row.asset ?? "*"}-${row.horizon ?? "any"}-${row.market_type ?? "any"}-${index}`}
+                          >
+                            <td className="font-mono">
+                              <CalibrationScopeBadge value={renderCalibrationCell(row.asset || "*")} />
+                            </td>
+                            <td className="font-mono">
+                              <CalibrationScopeBadge value={renderCalibrationCell(row.horizon || "any")} />
+                            </td>
+                            <td className="font-mono">
+                              <CalibrationScopeBadge value={renderCalibrationCell(row.market_type || "any")} />
+                            </td>
+                            <td className="font-mono">{renderCalibrationCell(row.probability_calibration)}</td>
+                            <td className="font-mono">{renderCalibrationCell(row.sigma_multiplier)}</td>
+                            <td className="font-mono">{renderCalibrationCell(row.size_multiplier)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>

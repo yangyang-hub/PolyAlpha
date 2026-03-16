@@ -15,6 +15,21 @@ use pa_market_data::gamma_feed::GammaFeed;
 
 use crate::app::types::AccountContext;
 
+fn infer_crypto_asset(question: &str, event_title: Option<&str>) -> Option<String> {
+    pa_strategy::crypto_alpha::parse_crypto_question(question)
+        .map(|parsed| parsed.asset.name.to_string())
+        .or_else(|| {
+            event_title
+                .and_then(pa_strategy::crypto_alpha::parse_crypto_event_title)
+                .map(|(asset, _)| asset.name.to_string())
+        })
+}
+
+fn infer_crypto_direction(question: &str, outcome: &str) -> Option<String> {
+    pa_strategy::crypto_alpha::infer_crypto_direction_label(question, Some(outcome))
+        .map(str::to_string)
+}
+
 /// Fetch current liquidity rewards from the CLOB API.
 ///
 /// Returns a list of markets with active rewards, including their reward parameters
@@ -74,14 +89,22 @@ pub fn build_position_snapshot(
 ) -> Vec<pa_monitor::api::PositionApiEntry> {
     use std::collections::HashMap;
 
-    let mut token_map: HashMap<U256, (&str, &str, B256)> = HashMap::new();
+    let mut token_map: HashMap<U256, (&str, &str, B256, Option<&str>)> = HashMap::new();
     for m in markets {
         for t in &m.tokens {
             let outcome = match t.outcome {
                 pa_core::types::Outcome::Yes => "YES",
                 pa_core::types::Outcome::No => "NO",
             };
-            token_map.insert(t.token_id, (&m.question, outcome, m.condition_id));
+            token_map.insert(
+                t.token_id,
+                (
+                    &m.question,
+                    outcome,
+                    m.condition_id,
+                    m.event_title.as_deref(),
+                ),
+            );
         }
     }
 
@@ -91,11 +114,16 @@ pub fn build_position_snapshot(
             if pe.size < dec!(0.1) {
                 continue;
             }
-            let (question, outcome, _cid) =
-                token_map
-                    .get(&token_id)
-                    .copied()
-                    .unwrap_or(("", "", B256::ZERO));
+            let (question, outcome, _cid, event_title) = token_map
+                .get(&token_id)
+                .copied()
+                .unwrap_or(("", "", B256::ZERO, None));
+            let asset = infer_crypto_asset(question, event_title);
+            let direction = if outcome.is_empty() {
+                None
+            } else {
+                infer_crypto_direction(question, outcome)
+            };
 
             let current_price = cache
                 .get(&token_id)
@@ -116,6 +144,8 @@ pub fn build_position_snapshot(
                 avg_cost: pe.avg_cost,
                 cost_basis: pe.size * pe.avg_cost,
                 strategy: strategy_name.map(|s| s.to_string()),
+                asset,
+                direction,
                 condition_id: pe.condition_id.map(|c| format!("{:#x}", c)),
                 question: if question.is_empty() {
                     None

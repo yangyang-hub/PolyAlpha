@@ -1,3 +1,4 @@
+use crate::profitability::ProfitCalculator;
 use alloy::primitives::{B256, U256};
 use chrono::{TimeDelta, Utc};
 use pa_core::traits::{Executor, RiskManager, Strategy};
@@ -5,7 +6,6 @@ use pa_core::types::{
     ExecutionPlan, MarketInfo, OrderBook, RiskDecision, StrategyType, TradeSide, TradingOpportunity,
 };
 use pa_market_data::event_calendar::EventCalendarService;
-use crate::profitability::ProfitCalculator;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::HashMap;
@@ -159,7 +159,9 @@ impl StrategyEngine {
             },
         ) = (&original.execution_plan, &adjusted.execution_plan);
 
-        if original_size <= &Decimal::ZERO || adjusted_size <= &Decimal::ZERO || original_side != adjusted_side
+        if original_size <= &Decimal::ZERO
+            || adjusted_size <= &Decimal::ZERO
+            || original_side != adjusted_side
         {
             return false;
         }
@@ -254,7 +256,9 @@ impl StrategyEngine {
                         }
 
                         let walk = match book.walk_book(TradeSide::Buy, *size) {
-                            Some(walk) if walk.filled >= *size && walk.worst_price <= *price => walk,
+                            Some(walk) if walk.filled >= *size && walk.worst_price <= *price => {
+                                walk
+                            }
                             _ => {
                                 tracing::debug!(
                                     id = %opp.id,
@@ -1202,7 +1206,9 @@ mod tests {
     use super::*;
     use alloy::primitives::B256;
     use async_trait::async_trait;
-    use pa_core::types::{ExecutionResult, ExecutionStatus, OrderBook, PriceLevel, TradeRecord, TxType};
+    use pa_core::types::{
+        ExecutionResult, ExecutionStatus, OrderBook, PriceLevel, TradeRecord, TxType,
+    };
     use rust_decimal_macros::dec;
     use std::collections::HashMap;
 
@@ -1227,7 +1233,10 @@ mod tests {
 
     #[async_trait]
     impl Executor for NoopExecutor {
-        async fn execute(&self, _opportunity: &TradingOpportunity) -> pa_core::Result<ExecutionResult> {
+        async fn execute(
+            &self,
+            _opportunity: &TradingOpportunity,
+        ) -> pa_core::Result<ExecutionResult> {
             Ok(ExecutionResult {
                 opportunity_id: Uuid::now_v7(),
                 strategy_type: StrategyType::Weather,
@@ -1296,7 +1305,11 @@ mod tests {
         )
     }
 
-    fn make_book(token_id: U256, bids: &[(Decimal, Decimal)], asks: &[(Decimal, Decimal)]) -> OrderBook {
+    fn make_book(
+        token_id: U256,
+        bids: &[(Decimal, Decimal)],
+        asks: &[(Decimal, Decimal)],
+    ) -> OrderBook {
         OrderBook {
             token_id,
             bids: bids
@@ -1341,7 +1354,11 @@ mod tests {
     fn test_validate_execution_freshness_rejects_buy_if_ask_moved_above_limit() {
         let engine = make_engine(HashMap::from([(
             U256::from(1u64),
-            make_book(U256::from(1u64), &[(dec!(0.09), dec!(10))], &[(dec!(0.12), dec!(10))]),
+            make_book(
+                U256::from(1u64),
+                &[(dec!(0.09), dec!(10))],
+                &[(dec!(0.12), dec!(10))],
+            ),
         )]));
 
         let opp = make_opp(TradeSide::Buy, dec!(0.10), dec!(5));
@@ -1353,14 +1370,20 @@ mod tests {
     fn test_validate_execution_freshness_scales_exit_to_bid_depth() {
         let engine = make_engine(HashMap::from([(
             U256::from(1u64),
-            make_book(U256::from(1u64), &[(dec!(0.40), dec!(3.25))], &[(dec!(0.45), dec!(10))]),
+            make_book(
+                U256::from(1u64),
+                &[(dec!(0.40), dec!(3.25))],
+                &[(dec!(0.45), dec!(10))],
+            ),
         )]));
 
         let opp = make_opp(TradeSide::Sell, dec!(0.40), dec!(5));
         let validated = engine.validate_execution_freshness(&opp, &[]).unwrap();
         assert_eq!(validated.size, dec!(3.25));
         match validated.execution_plan {
-            ExecutionPlan::DirectionalBuy { side, price, size, .. } => {
+            ExecutionPlan::DirectionalBuy {
+                side, price, size, ..
+            } => {
                 assert_eq!(side, TradeSide::Sell);
                 assert_eq!(price, dec!(0.40));
                 assert_eq!(size, dec!(3.25));
@@ -1383,7 +1406,11 @@ mod tests {
     fn test_validate_execution_freshness_rejects_buy_that_would_need_upward_bump() {
         let engine = make_engine(HashMap::from([(
             U256::from(1u64),
-            make_book(U256::from(1u64), &[(dec!(0.05), dec!(100))], &[(dec!(0.054), dec!(100))]),
+            make_book(
+                U256::from(1u64),
+                &[(dec!(0.05), dec!(100))],
+                &[(dec!(0.054), dec!(100))],
+            ),
         )]));
 
         let opp = make_opp(TradeSide::Buy, dec!(0.054), dec!(4.84));

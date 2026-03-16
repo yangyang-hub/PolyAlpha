@@ -23,8 +23,8 @@ use pa_monitor::api::LrRuntimeStatus;
 use pa_risk::manager::RiskManagerImpl;
 use pa_strategy::liquidity_rewards::RewardMarketCandidate;
 
-use crate::app::types::LrOrderMeta;
 use crate::app::helpers::fetch_clob_rewards;
+use crate::app::types::LrOrderMeta;
 
 type LrQuoteResult = (
     Vec<(String, LrOrderMeta)>,
@@ -40,8 +40,7 @@ pub struct LrRuntimePrep {
     pub clob: ClobExecutor,
     pub effective_max_exposure: Decimal,
     pub cached_balance: Decimal,
-    pub outstanding_orders:
-        HashMap<alloy::primitives::B256, HashMap<String, LrOrderMeta>>,
+    pub outstanding_orders: HashMap<alloy::primitives::B256, HashMap<String, LrOrderMeta>>,
     pub last_quoted_mid: HashMap<alloy::primitives::U256, Decimal>,
     pub token_to_condition: HashMap<alloy::primitives::U256, alloy::primitives::B256>,
     pub last_quote_time: HashMap<alloy::primitives::B256, std::time::Instant>,
@@ -103,8 +102,7 @@ pub async fn prepare_liquidity_rewards_runtime(
     let mut last_quoted_mid: HashMap<alloy::primitives::U256, Decimal> = HashMap::new();
     let mut token_to_condition: HashMap<alloy::primitives::U256, alloy::primitives::B256> =
         HashMap::new();
-    let mut last_quote_time: HashMap<alloy::primitives::B256, std::time::Instant> =
-        HashMap::new();
+    let mut last_quote_time: HashMap<alloy::primitives::B256, std::time::Instant> = HashMap::new();
     let cooldown_map: HashMap<(alloy::primitives::U256, bool, Decimal), std::time::Instant> =
         HashMap::new();
 
@@ -338,7 +336,10 @@ pub async fn lr_quote_one_market(
         });
 
         if bid_size >= config.min_order_size && !bid_on_cooldown {
-            match clob.buy_limit_post_only(tid, quote.bid_price, bid_size).await {
+            match clob
+                .buy_limit_post_only(tid, quote.bid_price, bid_size)
+                .await
+            {
                 Ok(r) if !r.order_id.is_empty() => {
                     pa_monitor::metrics::LR_ORDERS_PLACED.inc();
                     exposure_added += bid_size * quote.bid_price;
@@ -369,7 +370,10 @@ pub async fn lr_quote_one_market(
                 )
             });
             if sell_size >= config.min_order_size && !ask_on_cooldown {
-                match clob.sell_limit_post_only(tid, quote.ask_price, sell_size).await {
+                match clob
+                    .sell_limit_post_only(tid, quote.ask_price, sell_size)
+                    .await
+                {
                     Ok(r) if !r.order_id.is_empty() => {
                         pa_monitor::metrics::LR_ORDERS_PLACED.inc();
                         order_metas.push((
@@ -1022,7 +1026,8 @@ pub fn spawn_liquidity_rewards_task(
             signature_type,
             chain_id,
         )
-        .await else {
+        .await
+        else {
             return;
         };
 

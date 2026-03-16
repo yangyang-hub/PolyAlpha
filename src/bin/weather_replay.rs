@@ -7,7 +7,9 @@ use pa_core::config::Settings;
 use pa_core::weather::{WeatherProvider, weather_location};
 use pa_storage::models::WeatherForecastSnapshotRow;
 use pa_storage::repository::Repository;
-use pa_strategy::weather::{KmaClient, MetOfficeClient, NoaaClient, OpenMeteoClient, WeatherMetric};
+use pa_strategy::weather::{
+    KmaClient, MetOfficeClient, NoaaClient, OpenMeteoClient, WeatherMetric,
+};
 
 #[derive(Parser)]
 #[command(
@@ -210,7 +212,14 @@ async fn main() -> Result<()> {
             let client = OpenMeteoClient::new();
             let (lat, lon) = OpenMeteoClient::geocode(location.canonical_name)?;
             let live = client
-                .forecast(lat, lon, location.canonical_name, metric, Some(target_date), "inch")
+                .forecast(
+                    lat,
+                    lon,
+                    location.canonical_name,
+                    metric,
+                    Some(target_date),
+                    "inch",
+                )
                 .await?;
             let archived_forecast = client
                 .fetch_historical_forecast(
@@ -223,8 +232,13 @@ async fn main() -> Result<()> {
                 )
                 .await
                 .ok();
-            let db_archived_target =
-                load_db_archived_target(location.provider, location.canonical_name, metric, target_date).await;
+            let db_archived_target = load_db_archived_target(
+                location.provider,
+                location.canonical_name,
+                metric,
+                target_date,
+            )
+            .await;
             let historical_actual = client
                 .fetch_historical(
                     lat,
@@ -286,8 +300,13 @@ async fn main() -> Result<()> {
                 .fetch_historical_forecast(location.canonical_name, metric, target_date, "inch")
                 .await
                 .ok();
-            let db_archived_target =
-                load_db_archived_target(location.provider, location.canonical_name, metric, target_date).await;
+            let db_archived_target = load_db_archived_target(
+                location.provider,
+                location.canonical_name,
+                metric,
+                target_date,
+            )
+            .await;
             let historical_actual = client
                 .fetch_historical(location.canonical_name, metric, target_date, "inch")
                 .await
@@ -345,8 +364,13 @@ async fn main() -> Result<()> {
                 .fetch_historical_forecast(location.canonical_name, metric, target_date, "inch")
                 .await
                 .ok();
-            let db_archived_target =
-                load_db_archived_target(location.provider, location.canonical_name, metric, target_date).await;
+            let db_archived_target = load_db_archived_target(
+                location.provider,
+                location.canonical_name,
+                metric,
+                target_date,
+            )
+            .await;
             let historical_actual = client
                 .fetch_historical(location.canonical_name, metric, target_date, "inch")
                 .await
@@ -403,7 +427,10 @@ async fn main() -> Result<()> {
     }
     println!("target_date: {}", report.target_date);
     println!();
-    println!("live_forecast_target_value: {:?}", report.live_forecast_target_value);
+    println!(
+        "live_forecast_target_value: {:?}",
+        report.live_forecast_target_value
+    );
     println!(
         "historical_forecast_archive_target_value: {:?}",
         report.historical_forecast_archive_target_value
@@ -411,7 +438,10 @@ async fn main() -> Result<()> {
     println!("historical_actual: {:?}", report.historical_actual);
     println!();
     println!("live_vs_archive_delta: {:?}", report.live_vs_archive_delta);
-    println!("archive_vs_actual_delta: {:?}", report.archive_vs_actual_delta);
+    println!(
+        "archive_vs_actual_delta: {:?}",
+        report.archive_vs_actual_delta
+    );
     println!("live_vs_actual_delta: {:?}", report.live_vs_actual_delta);
 
     Ok(())

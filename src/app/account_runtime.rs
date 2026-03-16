@@ -22,8 +22,13 @@ use crate::app::types::AccountContext;
 
 pub struct AccountRuntimeArtifacts {
     pub engine_handle: Option<tokio::task::JoinHandle<()>>,
-    pub smart_money_token_map:
-        Option<Arc<std::sync::RwLock<std::collections::HashMap<alloy::primitives::U256, alloy::primitives::B256>>>>,
+    pub smart_money_token_map: Option<
+        Arc<
+            std::sync::RwLock<
+                std::collections::HashMap<alloy::primitives::U256, alloy::primitives::B256>,
+            >,
+        >,
+    >,
 }
 
 pub async fn spawn_account_runtime(
@@ -71,6 +76,14 @@ pub async fn spawn_account_runtime(
                 Box::new(move || **bal.load())
             };
 
+        let event_calendar = if settings.event_calendar.enabled {
+            let ec = Arc::new(EventCalendarService::new(settings.event_calendar.clone()));
+            ec.refresh().await;
+            Some(ec)
+        } else {
+            None
+        };
+
         let mut strategies: Vec<Box<dyn pa_core::traits::Strategy>> = Vec::new();
 
         if enabled_strategies.contains(&"weather".to_string()) {
@@ -116,6 +129,7 @@ pub async fn spawn_account_runtime(
                     get_balance: make_balance_fn(Arc::clone(&ctx.usdc_balance)),
                     neg_risk_events: neg_risk_events.to_vec(),
                     binary_event_groups: binary_event_groups.to_vec(),
+                    event_calendar: event_calendar.clone(),
                 },
             );
             strategies.push(Box::new(crypto));
@@ -140,10 +154,7 @@ pub async fn spawn_account_runtime(
 
             let sm_markets: Arc<
                 std::sync::RwLock<
-                    std::collections::HashMap<
-                        alloy::primitives::B256,
-                        pa_core::types::MarketInfo,
-                    >,
+                    std::collections::HashMap<alloy::primitives::B256, pa_core::types::MarketInfo>,
                 >,
             > = Arc::new(std::sync::RwLock::new(
                 sm_markets_snapshot
@@ -186,14 +197,6 @@ pub async fn spawn_account_runtime(
         }
 
         if !strategies.is_empty() {
-            let event_calendar = if settings.event_calendar.enabled {
-                let ec = Arc::new(EventCalendarService::new(settings.event_calendar.clone()));
-                ec.refresh().await;
-                Some(ec)
-            } else {
-                None
-            };
-
             let engine_cache = market_data.cache().clone();
             let engine_rm_all = Arc::clone(&ctx.risk_manager_impl);
             let engine = StrategyEngine::new(

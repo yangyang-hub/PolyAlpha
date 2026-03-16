@@ -31,7 +31,9 @@ use pa_market_data::service::MarketDataService;
 use pa_risk::manager::RiskManagerImpl;
 use pa_storage::models::WeatherForecastSnapshotRow;
 use pa_storage::repository::Repository;
-use pa_strategy::weather::{KmaClient, MetOfficeClient, NoaaClient, OpenMeteoClient, WeatherMetric};
+use pa_strategy::weather::{
+    KmaClient, MetOfficeClient, NoaaClient, OpenMeteoClient, WeatherMetric,
+};
 
 use crate::app::helpers::{build_ws_token_list, infer_strategy_type, seed_market_cache};
 use crate::app::types::AccountContext;
@@ -75,7 +77,10 @@ pub fn spawn_balance_refresh(
     });
 }
 
-pub fn spawn_daily_reset(risk_manager: Arc<dyn pa_core::traits::RiskManager>, cancel: CancellationToken) {
+pub fn spawn_daily_reset(
+    risk_manager: Arc<dyn pa_core::traits::RiskManager>,
+    cancel: CancellationToken,
+) {
     tokio::spawn(async move {
         loop {
             let now = chrono::Utc::now();
@@ -105,6 +110,7 @@ pub fn spawn_positions_snapshot_refresh(
     cache: OrderBookCache,
     shared_positions: Arc<tokio::sync::RwLock<Vec<pa_monitor::api::PositionApiEntry>>>,
     shared_positions_updated_at: Arc<tokio::sync::RwLock<Option<chrono::DateTime<Utc>>>>,
+    wallet_balance: Arc<tokio::sync::RwLock<Decimal>>,
     cancel: CancellationToken,
 ) {
     let risk_managers: Vec<Arc<RiskManagerImpl>> = account_contexts
@@ -131,17 +137,33 @@ pub fn spawn_positions_snapshot_refresh(
                                 if pe.size < dec!(0.1) {
                                     continue;
                                 }
-                                let (question, outcome, _cid) = markets_snapshot.iter()
+                                let (question, outcome, _cid, event_title) = markets_snapshot.iter()
                                     .find_map(|m| {
                                         m.tokens.iter().find(|t| t.token_id == token_id).map(|t| {
                                             let o = match t.outcome {
                                                 pa_core::types::Outcome::Yes => "YES",
                                                 pa_core::types::Outcome::No => "NO",
                                             };
-                                            (m.question.as_str(), o, m.condition_id)
+                                            (m.question.as_str(), o, m.condition_id, m.event_title.as_deref())
                                         })
                                     })
-                                    .unwrap_or(("", "", alloy::primitives::B256::ZERO));
+                                    .unwrap_or(("", "", alloy::primitives::B256::ZERO, None));
+                                let asset = pa_strategy::crypto_alpha::parse_crypto_question(question)
+                                    .map(|parsed| parsed.asset.name.to_string())
+                                    .or_else(|| {
+                                        event_title
+                                            .and_then(pa_strategy::crypto_alpha::parse_crypto_event_title)
+                                            .map(|(asset, _)| asset.name.to_string())
+                                    });
+                                let direction = if outcome.is_empty() {
+                                    None
+                                } else {
+                                    pa_strategy::crypto_alpha::infer_crypto_direction_label(
+                                        question,
+                                        Some(outcome),
+                                    )
+                                    .map(str::to_string)
+                                };
 
                                 let current_price = cache.get(&token_id)
                                     .and_then(|ob| ob.bids.first().map(|b| b.price));
@@ -160,6 +182,8 @@ pub fn spawn_positions_snapshot_refresh(
                                     avg_cost: pe.avg_cost,
                                     cost_basis: pe.size * pe.avg_cost,
                                     strategy: strategy_name.map(|s| s.to_string()),
+                                    asset,
+                                    direction,
                                     condition_id: pe.condition_id.map(|c| format!("{:#x}", c)),
                                     question: if question.is_empty() { None } else { Some(question.to_string()) },
                                     outcome: if outcome.is_empty() { None } else { Some(outcome.to_string()) },
@@ -174,6 +198,7 @@ pub fn spawn_positions_snapshot_refresh(
                     *shared_positions_updated_at.write().await = Some(Utc::now());
 
                     let total_bal: Decimal = balances.iter().map(|b| **b.load()).sum();
+                    *wallet_balance.write().await = total_bal;
                     let total_exp: Decimal = risk_managers.iter().map(|rm| rm.total_exposure()).sum();
                     let market_value: Decimal = {
                         let positions = shared_positions.read().await;
@@ -232,7 +257,10 @@ pub fn spawn_weather_forecast_snapshot_refresh(
 
         loop {
             let mut written = 0u32;
-            for location in WEATHER_LOCATIONS.iter().filter(|entry| !entry.trade_enabled) {
+            for location in WEATHER_LOCATIONS
+                .iter()
+                .filter(|entry| !entry.trade_enabled)
+            {
                 for metric in [
                     WeatherMetric::TemperatureMax,
                     WeatherMetric::TemperatureMin,
@@ -331,7 +359,9 @@ async fn fetch_snapshot_forecast(
         }
         WeatherProvider::OpenMeteo => {
             let (lat, lon) = OpenMeteoClient::geocode(location)?;
-            open_meteo.forecast(lat, lon, location, metric, None, "inch").await
+            open_meteo
+                .forecast(lat, lon, location, metric, None, "inch")
+                .await
         }
         WeatherProvider::Kma => kma.forecast(location, metric, None, "inch").await,
         WeatherProvider::MetOffice => met_office.forecast(location, metric, None, "inch").await,
@@ -543,9 +573,7 @@ pub fn spawn_market_refresh(
     active_enabled_strategies: Vec<String>,
     ws_max_instruments: usize,
     risk_managers: Vec<Arc<RiskManagerImpl>>,
-    smart_money_token_maps: Vec<
-        Arc<std::sync::RwLock<HashMap<U256, B256>>>,
-    >,
+    smart_money_token_maps: Vec<Arc<std::sync::RwLock<HashMap<U256, B256>>>>,
     cancel: CancellationToken,
 ) {
     tokio::spawn(async move {

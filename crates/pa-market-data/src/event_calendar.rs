@@ -133,6 +133,27 @@ impl EventCalendarService {
         min_multiplier
     }
 
+    /// Return the highest-impact active event that matches the market question.
+    pub async fn matching_impact(&self, question: &str, now: DateTime<Utc>) -> Option<EventImpact> {
+        let active = self.get_active_events(now).await;
+        if active.is_empty() {
+            return None;
+        }
+
+        let lower_question = question.to_lowercase();
+        let mut matched_impact = None;
+
+        for event in &active {
+            if event_matches_market(event, &lower_question)
+                && matched_impact.is_none_or(|existing| event.impact > existing)
+            {
+                matched_impact = Some(event.impact);
+            }
+        }
+
+        matched_impact
+    }
+
     /// Number of events currently tracked.
     pub async fn event_count(&self) -> usize {
         self.events.read().await.len()
