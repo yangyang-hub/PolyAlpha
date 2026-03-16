@@ -201,6 +201,12 @@ pub struct WeatherConfig {
     /// Optional KMA API key for Korea Meteorological Administration forecast access.
     #[serde(default)]
     pub kma_api_key: String,
+    /// Optional Met Office Weather DataHub API key for London forecast access.
+    #[serde(default)]
+    pub met_office_api_key: String,
+    /// Optional Met Office Land Observations API key for London actuals access.
+    #[serde(default)]
+    pub met_office_obs_api_key: String,
     /// Target US cities for weather scanning. Only markets in these cities are scanned.
     #[serde(default = "default_target_cities")]
     pub target_cities: Vec<String>,
@@ -256,6 +262,8 @@ impl Default for WeatherConfig {
             max_position_usdc: default_weather_max_position_usdc(),
             noaa_user_agent: default_noaa_user_agent(),
             kma_api_key: String::new(),
+            met_office_api_key: String::new(),
+            met_office_obs_api_key: String::new(),
             target_cities: default_target_cities(),
         }
     }

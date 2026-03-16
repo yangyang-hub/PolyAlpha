@@ -37,6 +37,16 @@ Audit-only international cities:
 - `London`
 - `Seoul`
 
+International audit-path status today:
+- `London`
+  - Forecast source: `Met Office` live forecast
+  - Actual source: `Met Office Land Observations`
+  - Archive source: PostgreSQL forecast snapshots
+- `Seoul`
+  - Forecast source: `KMA` short-range forecast
+  - Actual source: `KMA` monthly daily actuals
+  - Archive source: PostgreSQL forecast snapshots
+
 ## Validation Outcome Definition
 
 A city can move from `DefaultProtected` to `Validated` only when all of the following are true:
@@ -168,6 +178,7 @@ If verification changes strategy behavior, also check:
 - Continue applying the extra settlement edge buffer to those cities.
 - Do not remove the protection buffer before documentation and metadata are updated.
 - If a city shows repeated mismatch risk after review, keep it `DefaultProtected` even if a station is identified.
+- Keep London and Seoul `audit-only` until their official forecast/actual paths have enough replay evidence to justify any trading enablement discussion.
 
 ## Suggested Execution Loop
 

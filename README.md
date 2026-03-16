@@ -386,6 +386,9 @@ forecast_change_threshold = 0.35
 max_entry_price = 0.30
 exit_buffer_bps = 50
 capital_efficiency_threshold = 0.98
+kma_api_key = ""
+met_office_api_key = ""
+met_office_obs_api_key = ""
 target_cities = []
 
 [weather.forecast_error]

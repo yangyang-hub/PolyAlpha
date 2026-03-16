@@ -83,6 +83,46 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-16
+- Area: `crates/pa-core/src/weather.rs`, `crates/pa-strategy/src/weather.rs`
+- Change: Added a shared observation-site hint helper and pinned London's Met Office historical actual path to the fixed audit geohash `gcptq8` instead of scanning the nearest five candidates at runtime.
+- Why: London replay and settlement-audit actuals should stay aligned with one consistent chosen observation site rather than drifting to whichever nearby geohash happens to expose temperature data first.
+
+### 2026-03-16
+- Area: `docs/weather-noaa-settlement-checklist.md`, `docs/weather-settlement-validation-plan.md`, `docs/international-weather-expansion-plan.md`
+- Change: Updated the international weather audit documentation so London now reflects `MetOffice` forecast plus Met Office Land Observations actuals and PostgreSQL snapshot archive, while Seoul now reflects `Kma` forecast plus KMA monthly actuals and PostgreSQL snapshot archive.
+- Why: The docs still described both cities as Open-Meteo audit paths, which no longer matched the live implementation or replay workflow.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/weather.rs`, `crates/pa-core/src/config.rs`, `config/default.toml`, `.env.example`, `crates/pa-strategy/src/weather.rs`, `src/app/tasks.rs`, `src/bin/weather_replay.rs`, `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/components/ConfigSection.tsx`
+- Change: Added a `MetOffice` weather provider plus `met_office_api_key` config, switched London from `OpenMeteo` to `MetOffice`, implemented audit-only Met Office daily temperature live-forecast routing, and wired the provider through replay output, PostgreSQL forecast snapshots, monitor metadata, and frontend config labels.
+- Why: London needs a more trustworthy official UK forecast source before any future trading enablement, and Met Office Weather DataHub is the right upstream provider for that audit path.
+
+### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `.env.example`, `crates/pa-strategy/src/weather.rs`, `src/app/tasks.rs`, `src/bin/weather_replay.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`, `CLAUDE.md`
+- Change: Added a separate `met_office_obs_api_key` config, split Met Office forecast and land-observations credentials, and wired London's Met Office actuals path to use the documented `nearest -> geohash -> observations` flow for temperature replay while keeping forecast snapshots on the site-specific key.
+- Why: Met Office forecast and land observations are separate subscribed products, so London audit replay needs distinct credentials and an explicit observations path instead of assuming one key or one endpoint shape covers both.
+
+### 2026-03-16
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Updated the London Met Office observations path to request up to five nearest land-observation geohashes and automatically use the first candidate that returns real temperature observations for the target day instead of blindly trusting the first geohash.
+- Why: The nearest geohash returned for central London (`gcpvj0`) only exposes timestamp indexes, while nearby candidates like `gcptq8` and `gcpsvg` return actual temperature observations; replay should prefer a usable observation site over a metadata-only neighbor.
+
+### 2026-03-16
+- Area: `src/bin/weather_replay.rs`
+- Change: Added a `--seed-archive-if-missing` replay flag that writes the current live forecast curve into PostgreSQL weather snapshot storage when no archived forecast is available for the requested provider/location/metric/date.
+- Why: Audit-only cities such as London and Seoul may not have archived forecast rows yet right after a deploy or key migration, so replay needs a manual one-shot way to backfill snapshot archive data without waiting for the periodic runtime task.
+
+### 2026-03-16
+- Area: `src/bin/weather_replay.rs`
+- Change: Made manual replay seeding immediately reuse the just-written target-date value as the archive result if the follow-up database read still misses the fresh row.
+- Why: Operators need London/Seoul archive-vs-actual comparisons to be usable in the same replay invocation that seeds a missing snapshot, without being blocked by read-after-write timing quirks.
+
+### 2026-03-16
+- Area: `src/bin/weather_replay.rs`
+- Change: Changed replay archive loading/seeding to prefer `PA_DATABASE__URL` / `DATABASE_URL` directly before falling back to `Settings::load()`.
+- Why: Manual replay runs often source `.env` directly, so archive read/write helpers should not depend solely on the higher-level settings loader when a valid database URL is already present in the process environment.
+
+### 2026-03-16
 - Area: `crates/pa-market-data/src/ws_feed.rs`
 - Change: Stopped the WebSocket feed from flipping out of the "awaiting first message" state after only a 15-second no-data warning, so the 60-second stale watchdog now starts only after a real order-book message is received.
 - Why: Quiet subscriptions or slow first packets were being misclassified as stale disconnected sockets, causing reconnect loops even when the underlying stream had not emitted an actual error.

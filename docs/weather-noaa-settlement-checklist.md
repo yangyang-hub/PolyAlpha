@@ -55,13 +55,13 @@ Suggested review steps for each city:
 
 ## International Audit-Only Samples
 
-These cities are currently in the provider-aware registry as `Open-Meteo` audit-only
+These cities are currently in the provider-aware registry as audit-only
 locations. They are not trade-enabled yet.
 
 | City | Sample market title | Metric | Polymarket settlement rule | Expected settlement source | Current strategy input | Main mismatch risk | Risk | Status | Notes |
 |---|---|---|---|---|---|---|---|---|---|
-| London | Highest temperature in London on March 12? | Highest temperature (C) | Highest temperature recorded at the London City Airport Station for the full local day; Wunderground final daily history; whole-degree C resolution | Wunderground daily history for London City Airport Station (`EGLC`) | Open-Meteo daily forecast for London | Airport-station settlement vs model grid/city forecast; local-day window mismatch | High | Verified | Source: https://polymarket.com/event/highest-temperature-in-london-on-march-12-2026 |
-| Seoul | Highest temperature in Seoul on March 11? | Highest temperature (C) | Highest temperature recorded at the Incheon Intl Airport Station for the full local day; Wunderground final daily history; whole-degree C resolution | Wunderground daily history for Incheon Intl Airport Station (`RKSI`) | Open-Meteo daily forecast for Seoul | Airport-station settlement vs model grid/city forecast; airport-to-city spatial mismatch | High | Verified | Source: https://polymarket.com/zh/event/highest-temperature-in-seoul-on-march-11-2026 |
+| London | Highest temperature in London on March 12? | Highest temperature (C) | Highest temperature recorded at the London City Airport Station for the full local day; Wunderground final daily history; whole-degree C resolution | Wunderground daily history for London City Airport Station (`EGLC`) | Met Office daily forecast + Met Office Land Observations actual + PostgreSQL forecast snapshot archive | Airport-station settlement vs city forecast; observation-site selection can differ from the nearest geohash metadata node | High | Verified | Source: https://polymarket.com/event/highest-temperature-in-london-on-march-12-2026 |
+| Seoul | Highest temperature in Seoul on March 11? | Highest temperature (C) | Highest temperature recorded at the Incheon Intl Airport Station for the full local day; Wunderground final daily history; whole-degree C resolution | Wunderground daily history for Incheon Intl Airport Station (`RKSI`) | KMA short-range forecast + KMA monthly daily actual + PostgreSQL forecast snapshot archive | Airport-station settlement vs city forecast; airport-to-city spatial mismatch; no official historical forecast archive confirmed yet | High | Verified | Source: https://polymarket.com/zh/event/highest-temperature-in-seoul-on-march-11-2026 |
 
 ## Quick Summary Template
 

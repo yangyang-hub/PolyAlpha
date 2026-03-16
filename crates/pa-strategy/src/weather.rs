@@ -21,7 +21,7 @@ use pa_core::weather::{
     NOAA_SUPPORTED_LOCATIONS, WeatherProvider, normalize_noaa_location_name,
     settlement_extra_edge_bps_for_location, settlement_risk_tier,
     settlement_sigma_multiplier_for_location, weather_kma_grid, weather_kma_station_id,
-    weather_location, weather_timezone,
+    weather_location, weather_observation_site_hint, weather_timezone,
 };
 
 use crate::profitability::ProfitCalculator;
@@ -870,6 +870,39 @@ struct OpenMeteoDaily {
 }
 
 #[derive(Debug, Deserialize)]
+struct MetOfficeForecastResponse {
+    features: Vec<MetOfficeFeature>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetOfficeFeature {
+    properties: MetOfficeFeatureProperties,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MetOfficeFeatureProperties {
+    time_series: Vec<MetOfficeDailyPoint>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MetOfficeDailyPoint {
+    time: String,
+    #[serde(default)]
+    day_max_screen_temperature: Option<f64>,
+    #[serde(default)]
+    night_min_screen_temperature: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetOfficeObservationPoint {
+    datetime: String,
+    #[serde(default)]
+    temperature: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct KmaForecastResponse {
     response: KmaResponseBody,
@@ -1234,6 +1267,258 @@ impl OpenMeteoClient {
 pub struct KmaClient {
     http: reqwest::Client,
     api_key: String,
+}
+
+/// Fetch weather forecasts from Met Office Weather DataHub.
+pub struct MetOfficeClient {
+    http: reqwest::Client,
+    api_key: String,
+    obs_api_key: String,
+}
+
+impl MetOfficeClient {
+    pub fn new(api_key: &str, obs_api_key: &str) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self {
+            http,
+            api_key: api_key.to_string(),
+            obs_api_key: obs_api_key.to_string(),
+        }
+    }
+
+    fn ensure_key(&self) -> anyhow::Result<&str> {
+        if self.api_key.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "Met Office API key not configured; set PA_WEATHER__MET_OFFICE_API_KEY"
+            ));
+        }
+        Ok(self.api_key.as_str())
+    }
+
+    fn ensure_obs_key(&self) -> anyhow::Result<&str> {
+        if self.obs_api_key.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "Met Office observations API key not configured; set PA_WEATHER__MET_OFFICE_OBS_API_KEY"
+            ));
+        }
+        Ok(self.obs_api_key.as_str())
+    }
+
+    pub fn supports_location(location: &str) -> bool {
+        matches!(
+            weather_location(location).map(|entry| entry.provider),
+            Some(WeatherProvider::MetOffice)
+        )
+    }
+
+    pub async fn forecast(
+        &self,
+        location: &str,
+        metric: WeatherMetric,
+        target_date: Option<NaiveDate>,
+        _precipitation_unit: &str,
+    ) -> anyhow::Result<ForecastData> {
+        let api_key = self.ensure_key()?.to_string();
+        let entry = weather_location(location)
+            .ok_or_else(|| anyhow::anyhow!("Unknown Met Office weather location: {}", location))?;
+        if entry.provider != WeatherProvider::MetOffice {
+            return Err(anyhow::anyhow!(
+                "Location not routed to Met Office: {}",
+                location
+            ));
+        }
+
+        let resp: MetOfficeForecastResponse = with_retry(2, || {
+            let http = self.http.clone();
+            let api_key = api_key.clone();
+            async move {
+                let response = http
+                    .get("https://data.hub.api.metoffice.gov.uk/sitespecific/v0/point/daily")
+                    .header("apikey", api_key)
+                    .query(&[
+                        ("latitude", entry.lat.to_string()),
+                        ("longitude", entry.lon.to_string()),
+                        ("excludeParameterMetadata", "true".to_string()),
+                        ("includeLocationName", "true".to_string()),
+                    ])
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<MetOfficeForecastResponse>()
+                    .await?;
+                Ok(response)
+            }
+        })
+        .await?;
+
+        let daily = resp
+            .features
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No Met Office forecast feature returned"))?
+            .properties
+            .time_series;
+        if daily.is_empty() {
+            return Err(anyhow::anyhow!("No daily Met Office forecast data returned"));
+        }
+
+        let mut dates = Vec::new();
+        let mut values = Vec::new();
+        for point in daily {
+            let date = point
+                .time
+                .split('T')
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("Invalid Met Office forecast time"))?
+                .to_string();
+            let value = match metric {
+                WeatherMetric::TemperatureMax => point.day_max_screen_temperature,
+                WeatherMetric::TemperatureMin => point.night_min_screen_temperature,
+                WeatherMetric::TemperatureAvg => match (
+                    point.day_max_screen_temperature,
+                    point.night_min_screen_temperature,
+                ) {
+                    (Some(max), Some(min)) => Some((max + min) / 2.0),
+                    _ => None,
+                },
+                WeatherMetric::Rainfall | WeatherMetric::Snowfall | WeatherMetric::WindSpeed => {
+                    return Err(anyhow::anyhow!(
+                        "Met Office routing currently supports temperature metrics only"
+                    ));
+                }
+            };
+            let Some(value) = value else {
+                continue;
+            };
+            dates.push(date);
+            values.push(value);
+        }
+
+        if values.is_empty() || values.len() != dates.len() {
+            return Err(anyhow::anyhow!(
+                "Met Office response missing expected daily temperature values"
+            ));
+        }
+
+        let target_value = target_date.and_then(|td| {
+            let date_str = td.format("%Y-%m-%d").to_string();
+            dates.iter()
+                .position(|date| date == &date_str)
+                .map(|idx| values[idx])
+        });
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
+        let std_dev = variance.sqrt();
+
+        Ok(ForecastData {
+            values,
+            dates,
+            mean,
+            std_dev,
+            target_value,
+            model_spread: 0.0,
+        })
+    }
+
+    pub async fn fetch_historical(
+        &self,
+        location: &str,
+        metric: WeatherMetric,
+        target_date: NaiveDate,
+        _precipitation_unit: &str,
+    ) -> anyhow::Result<f64> {
+        let obs_api_key = self.ensure_obs_key()?.to_string();
+        let entry = weather_location(location)
+            .ok_or_else(|| anyhow::anyhow!("Unknown Met Office weather location: {}", location))?;
+        if entry.provider != WeatherProvider::MetOffice {
+            return Err(anyhow::anyhow!(
+                "Location not routed to Met Office: {}",
+                location
+            ));
+        }
+
+        let tz: Tz = weather_timezone(location).parse().unwrap_or(chrono_tz::Europe::London);
+        let geohash = weather_observation_site_hint(location).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Met Office observation site hint missing for location {}",
+                location
+            )
+        })?;
+        let observations: Vec<MetOfficeObservationPoint> = with_retry(2, || {
+            let http = self.http.clone();
+            let obs_api_key = obs_api_key.clone();
+            let geohash = geohash.to_string();
+            async move {
+                let response = http
+                    .get(format!(
+                        "https://data.hub.api.metoffice.gov.uk/observation-land/1/{geohash}"
+                    ))
+                    .header("apikey", obs_api_key)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<Vec<MetOfficeObservationPoint>>()
+                    .await?;
+                Ok(response)
+            }
+        })
+        .await?;
+
+        let mut best_daily_values = Vec::new();
+        for point in observations {
+            let Some(temp) = point.temperature else {
+                continue;
+            };
+            let dt = chrono::DateTime::parse_from_rfc3339(&point.datetime)
+                .map_err(|_| anyhow::anyhow!("Invalid Met Office observation datetime"))?;
+            let local_date = dt.with_timezone(&tz).date_naive();
+            if local_date == target_date {
+                best_daily_values.push(temp);
+            }
+        }
+
+        if best_daily_values.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Met Office observations missing target-date temperatures for {}",
+                target_date
+            ));
+        }
+
+        match metric {
+            WeatherMetric::TemperatureMax => Ok(best_daily_values
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max)),
+            WeatherMetric::TemperatureMin => Ok(best_daily_values
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, f64::min)),
+            WeatherMetric::TemperatureAvg => {
+                Ok(best_daily_values.iter().sum::<f64>() / best_daily_values.len() as f64)
+            }
+            WeatherMetric::Rainfall | WeatherMetric::Snowfall | WeatherMetric::WindSpeed => Err(
+                anyhow::anyhow!(
+                    "Met Office historical actual currently supports temperature metrics only"
+                ),
+            ),
+        }
+    }
+
+    pub async fn fetch_historical_forecast(
+        &self,
+        _location: &str,
+        _metric: WeatherMetric,
+        _target_date: NaiveDate,
+        _precipitation_unit: &str,
+    ) -> anyhow::Result<ForecastData> {
+        let _ = self.ensure_key()?;
+        Err(anyhow::anyhow!(
+            "Met Office historical forecast archive is not wired yet; keep London audit-only"
+        ))
+    }
 }
 
 impl KmaClient {
@@ -2101,6 +2386,7 @@ pub struct WeatherAlphaStrategy {
     noaa: NoaaClient,
     open_meteo: OpenMeteoClient,
     kma: KmaClient,
+    met_office: MetOfficeClient,
     profit_calc: ProfitCalculator,
     get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
     /// Returns available capital (balance - exposure) for position sizing.
@@ -2147,6 +2433,7 @@ impl WeatherAlphaStrategy {
             Some(WeatherProvider::Noaa) => "noaa",
             Some(WeatherProvider::OpenMeteo) => "open_meteo",
             Some(WeatherProvider::Kma) => "kma",
+            Some(WeatherProvider::MetOffice) => "met_office",
             None => "unknown",
         }
     }
@@ -2186,11 +2473,14 @@ impl WeatherAlphaStrategy {
         let noaa = NoaaClient::new(&config.noaa_user_agent);
         let open_meteo = OpenMeteoClient::new();
         let kma = KmaClient::new(&config.kma_api_key);
+        let met_office =
+            MetOfficeClient::new(&config.met_office_api_key, &config.met_office_obs_api_key);
         Self {
             config,
             noaa,
             open_meteo,
             kma,
+            met_office,
             profit_calc: ProfitCalculator::new(gas_cost_usd),
             get_orderbook,
             get_available_capital,
@@ -2288,6 +2578,11 @@ impl WeatherAlphaStrategy {
                     .forecast(location, metric, target_date, precipitation_unit)
                     .await
             }
+            Some(WeatherProvider::MetOffice) => {
+                self.met_office
+                    .forecast(location, metric, target_date, precipitation_unit)
+                    .await
+            }
             None => Err(anyhow::anyhow!("Unsupported weather location: {}", location)),
         }
     }
@@ -2321,6 +2616,11 @@ impl WeatherAlphaStrategy {
             }
             Some(WeatherProvider::Kma) => {
                 self.kma
+                    .fetch_historical(location, metric, target_date, precipitation_unit)
+                    .await
+            }
+            Some(WeatherProvider::MetOffice) => {
+                self.met_office
                     .fetch_historical(location, metric, target_date, precipitation_unit)
                     .await
             }
@@ -4059,6 +4359,8 @@ mod tests {
             max_position_usdc: dec!(2),
             noaa_user_agent: "test".to_string(),
             kma_api_key: String::new(),
+            met_office_api_key: String::new(),
+            met_office_obs_api_key: String::new(),
             target_cities: vec![],
         };
 
@@ -5218,6 +5520,8 @@ mod tests {
             max_position_usdc: dec!(100), // Large cap for test helper
             noaa_user_agent: "test".to_string(),
             kma_api_key: String::new(),
+            met_office_api_key: String::new(),
+            met_office_obs_api_key: String::new(),
             target_cities: vec![],
         };
         let books = Arc::new(books);
@@ -5256,6 +5560,8 @@ mod tests {
             max_position_usdc: dec!(100),
             noaa_user_agent: "test".to_string(),
             kma_api_key: String::new(),
+            met_office_api_key: String::new(),
+            met_office_obs_api_key: String::new(),
             target_cities: vec![],
         };
         let books = Arc::new(books);
@@ -5474,6 +5780,8 @@ mod tests {
             max_position_usdc: dec!(2),
             noaa_user_agent: "test".to_string(),
             kma_api_key: String::new(),
+            met_office_api_key: String::new(),
+            met_office_obs_api_key: String::new(),
             target_cities: vec![],
         };
         let held = vec![(token_id, dec!(50), dec!(0.30))];
@@ -5858,23 +6166,23 @@ mod tests {
     }
 
     #[test]
-    fn test_open_meteo_geocode_known_city() {
-        let (lat, lon) = OpenMeteoClient::geocode("London").unwrap();
-        assert!((lat - 51.5072).abs() < 0.01);
-        assert!((lon - (-0.1276)).abs() < 0.01);
-        assert!(OpenMeteoClient::supports_location("London"));
-    }
-
-    #[test]
     fn test_open_meteo_geocode_rejects_noaa_city() {
         assert!(OpenMeteoClient::geocode("New York").is_err());
         assert!(OpenMeteoClient::geocode("Seoul").is_err());
+        assert!(OpenMeteoClient::geocode("London").is_err());
         assert!(OpenMeteoClient::geocode("Unknown City").is_err());
     }
 
     #[test]
     fn test_open_meteo_uses_local_timezone_for_supported_cities() {
         assert_eq!(OpenMeteoClient::timezone_for_location("London"), "Europe/London");
+    }
+
+    #[test]
+    fn test_met_office_supports_london_only() {
+        assert!(MetOfficeClient::supports_location("London"));
+        assert!(!MetOfficeClient::supports_location("Seoul"));
+        assert!(!MetOfficeClient::supports_location("New York"));
     }
 
     #[test]
@@ -5979,6 +6287,8 @@ mod tests {
             max_position_usdc: dec!(2),
             noaa_user_agent: "test".to_string(),
             kma_api_key: String::new(),
+            met_office_api_key: String::new(),
+            met_office_obs_api_key: String::new(),
             target_cities: vec![],
         };
         let strategy = WeatherAlphaStrategy::new(
@@ -6056,6 +6366,8 @@ mod tests {
             max_position_usdc: dec!(100),
             noaa_user_agent: "test".to_string(),
             kma_api_key: String::new(),
+            met_office_api_key: String::new(),
+            met_office_obs_api_key: String::new(),
             target_cities: vec![],
         };
         let strategy = WeatherAlphaStrategy::new(
@@ -6138,7 +6450,9 @@ mod tests {
                 relative_stop_loss_ratio: dec!(0.75),
                 max_position_usdc: dec!(10),
                 noaa_user_agent: "test".to_string(),
-            kma_api_key: String::new(),
+                kma_api_key: String::new(),
+                met_office_api_key: String::new(),
+                met_office_obs_api_key: String::new(),
                 target_cities: vec![],
             },
             Decimal::ZERO,

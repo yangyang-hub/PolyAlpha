@@ -5,8 +5,9 @@ use serde::Serialize;
 
 use pa_core::config::Settings;
 use pa_core::weather::{WeatherProvider, weather_location};
+use pa_storage::models::WeatherForecastSnapshotRow;
 use pa_storage::repository::Repository;
-use pa_strategy::weather::{KmaClient, NoaaClient, OpenMeteoClient, WeatherMetric};
+use pa_strategy::weather::{KmaClient, MetOfficeClient, NoaaClient, OpenMeteoClient, WeatherMetric};
 
 #[derive(Parser)]
 #[command(
@@ -25,6 +26,9 @@ struct Args {
 
     #[arg(long, default_value = "text", value_parser = ["text", "json"])]
     output: String,
+
+    #[arg(long, default_value_t = false)]
+    seed_archive_if_missing: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,16 +65,23 @@ async fn load_db_archived_target(
     metric: WeatherMetric,
     target_date: NaiveDate,
 ) -> Option<f64> {
-    let settings = Settings::load().ok()?;
-    if settings.database.url.trim().is_empty() {
-        return None;
-    }
-    let repo = Repository::connect(&settings.database.url, 2).await.ok()?;
+    let database_url = std::env::var("PA_DATABASE__URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            Settings::load()
+                .ok()
+                .map(|settings| settings.database.url)
+                .filter(|value| !value.trim().is_empty())
+        })?;
+    let repo = Repository::connect(&database_url, 2).await.ok()?;
     let _ = repo.migrate().await;
     let provider = match provider {
         WeatherProvider::Noaa => "noaa",
         WeatherProvider::OpenMeteo => "open_meteo",
         WeatherProvider::Kma => "kma",
+        WeatherProvider::MetOffice => "met_office",
     };
     let metric = match metric {
         WeatherMetric::TemperatureMax => "temp_max",
@@ -85,6 +96,76 @@ async fn load_db_archived_target(
         .ok()
         .flatten()
         .and_then(|row| row.target_value)
+}
+
+fn provider_name(provider: WeatherProvider) -> &'static str {
+    match provider {
+        WeatherProvider::Noaa => "noaa",
+        WeatherProvider::OpenMeteo => "open_meteo",
+        WeatherProvider::Kma => "kma",
+        WeatherProvider::MetOffice => "met_office",
+    }
+}
+
+fn metric_name(metric: WeatherMetric) -> &'static str {
+    match metric {
+        WeatherMetric::TemperatureMax => "temp_max",
+        WeatherMetric::TemperatureMin => "temp_min",
+        WeatherMetric::TemperatureAvg => "temp_avg",
+        WeatherMetric::Rainfall => "rainfall",
+        WeatherMetric::Snowfall => "snowfall",
+        WeatherMetric::WindSpeed => "wind_speed",
+    }
+}
+
+async fn seed_db_archive_from_forecast(
+    provider: WeatherProvider,
+    location: &str,
+    metric: WeatherMetric,
+    target_date: NaiveDate,
+    forecast: &pa_strategy::weather::ForecastData,
+) -> Option<f64> {
+    let database_url = std::env::var("PA_DATABASE__URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            Settings::load()
+                .ok()
+                .map(|settings| settings.database.url)
+                .filter(|value| !value.trim().is_empty())
+        })?;
+    let repo = Repository::connect(&database_url, 2).await.ok()?;
+    let _ = repo.migrate().await;
+    let provider_name = provider_name(provider).to_string();
+    let location = location.to_string();
+    let metric_name = metric_name(metric).to_string();
+    let recorded_at = chrono::Utc::now();
+    let values_json = serde_json::to_value(&forecast.values).ok()?;
+    let dates_json = serde_json::to_value(&forecast.dates).ok()?;
+    let mut seeded_target = None;
+    for (date, value) in forecast.dates.iter().zip(forecast.values.iter()) {
+        let row_target_date = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+        if row_target_date == target_date {
+            seeded_target = Some(*value);
+        }
+        let row = WeatherForecastSnapshotRow {
+            id: 0,
+            provider: provider_name.clone(),
+            location: location.clone(),
+            metric: metric_name.clone(),
+            target_date: row_target_date,
+            recorded_at,
+            target_value: Some(*value),
+            mean: forecast.mean,
+            std_dev: forecast.std_dev,
+            model_spread: forecast.model_spread,
+            values: values_json.clone(),
+            dates: dates_json.clone(),
+        };
+        repo.insert_weather_forecast_snapshot(&row).await.ok()?;
+    }
+    seeded_target
 }
 
 #[tokio::main]
@@ -155,10 +236,28 @@ async fn main() -> Result<()> {
                 )
                 .await
                 .ok();
-            let archived_target = archived_forecast
+            let mut archived_target = archived_forecast
                 .as_ref()
                 .and_then(|f| f.target_value)
                 .or(db_archived_target);
+            if archived_target.is_none() && args.seed_archive_if_missing {
+                let seeded_target = seed_db_archive_from_forecast(
+                    location.provider,
+                    location.canonical_name,
+                    metric,
+                    target_date,
+                    &live,
+                )
+                .await;
+                archived_target = load_db_archived_target(
+                    location.provider,
+                    location.canonical_name,
+                    metric,
+                    target_date,
+                )
+                .await
+                .or(seeded_target);
+            }
 
             ReplayReport {
                 location: location.canonical_name.to_string(),
@@ -193,10 +292,87 @@ async fn main() -> Result<()> {
                 .fetch_historical(location.canonical_name, metric, target_date, "inch")
                 .await
                 .ok();
-            let archived_target = archived_forecast
+            let mut archived_target = archived_forecast
                 .as_ref()
                 .and_then(|f| f.target_value)
                 .or(db_archived_target);
+            if archived_target.is_none() && args.seed_archive_if_missing {
+                let seeded_target = seed_db_archive_from_forecast(
+                    location.provider,
+                    location.canonical_name,
+                    metric,
+                    target_date,
+                    &live,
+                )
+                .await;
+                archived_target = load_db_archived_target(
+                    location.provider,
+                    location.canonical_name,
+                    metric,
+                    target_date,
+                )
+                .await
+                .or(seeded_target);
+            }
+
+            ReplayReport {
+                location: location.canonical_name.to_string(),
+                provider: format!("{:?}", location.provider),
+                trade_enabled: location.trade_enabled,
+                settlement_note: location.settlement_note.map(ToOwned::to_owned),
+                target_date: target_date.to_string(),
+                live_forecast_target_value: live.target_value,
+                historical_forecast_archive_target_value: archived_target,
+                historical_actual,
+                live_vs_archive_delta: delta(live.target_value, archived_target),
+                archive_vs_actual_delta: delta(archived_target, historical_actual),
+                live_vs_actual_delta: delta(live.target_value, historical_actual),
+            }
+        }
+        WeatherProvider::MetOffice => {
+            let client = MetOfficeClient::new(
+                &std::env::var("PA_WEATHER__MET_OFFICE_API_KEY")
+                    .or_else(|_| std::env::var("MET_OFFICE_API_KEY"))
+                    .unwrap_or_default(),
+                &std::env::var("PA_WEATHER__MET_OFFICE_OBS_API_KEY")
+                    .or_else(|_| std::env::var("MET_OFFICE_OBS_API_KEY"))
+                    .unwrap_or_default(),
+            );
+            let live = client
+                .forecast(location.canonical_name, metric, Some(target_date), "inch")
+                .await?;
+            let archived_forecast = client
+                .fetch_historical_forecast(location.canonical_name, metric, target_date, "inch")
+                .await
+                .ok();
+            let db_archived_target =
+                load_db_archived_target(location.provider, location.canonical_name, metric, target_date).await;
+            let historical_actual = client
+                .fetch_historical(location.canonical_name, metric, target_date, "inch")
+                .await
+                .ok();
+            let mut archived_target = archived_forecast
+                .as_ref()
+                .and_then(|f| f.target_value)
+                .or(db_archived_target);
+            if archived_target.is_none() && args.seed_archive_if_missing {
+                let seeded_target = seed_db_archive_from_forecast(
+                    location.provider,
+                    location.canonical_name,
+                    metric,
+                    target_date,
+                    &live,
+                )
+                .await;
+                archived_target = load_db_archived_target(
+                    location.provider,
+                    location.canonical_name,
+                    metric,
+                    target_date,
+                )
+                .await
+                .or(seeded_target);
+            }
 
             ReplayReport {
                 location: location.canonical_name.to_string(),

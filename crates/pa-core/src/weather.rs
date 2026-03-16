@@ -3,6 +3,7 @@ pub enum WeatherProvider {
     Noaa,
     OpenMeteo,
     Kma,
+    MetOffice,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,7 +277,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
     },
     WeatherLocation {
         canonical_name: "London",
-        provider: WeatherProvider::OpenMeteo,
+        provider: WeatherProvider::MetOffice,
         lat: 51.5072,
         lon: -0.1276,
         timezone: "Europe/London",
@@ -459,6 +460,17 @@ pub fn weather_timezone(location: &str) -> &'static str {
         .unwrap_or("UTC")
 }
 
+pub fn weather_observation_site_hint(location: &str) -> Option<&'static str> {
+    let canonical = weather_location(location)?.canonical_name;
+    match canonical {
+        // London Met Office Land Observations audit path is intentionally pinned
+        // to a fixed usable observation site near the settlement venue instead of
+        // dynamically drifting across nearby geohashes.
+        "London" => Some("gcptq8"),
+        _ => None,
+    }
+}
+
 pub fn weather_kma_grid(location: &str) -> Option<(u32, u32)> {
     let canonical = weather_location(location)?.canonical_name;
     match canonical {
@@ -548,7 +560,7 @@ mod tests {
     #[test]
     fn test_weather_location_metadata_exposes_provider_and_trade_flag() {
         let london = weather_location("London").unwrap();
-        assert_eq!(london.provider, WeatherProvider::OpenMeteo);
+        assert_eq!(london.provider, WeatherProvider::MetOffice);
         assert!(!london.trade_enabled);
 
         let seoul = weather_location("Seoul").unwrap();

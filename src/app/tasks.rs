@@ -31,7 +31,7 @@ use pa_market_data::service::MarketDataService;
 use pa_risk::manager::RiskManagerImpl;
 use pa_storage::models::WeatherForecastSnapshotRow;
 use pa_storage::repository::Repository;
-use pa_strategy::weather::{KmaClient, NoaaClient, OpenMeteoClient, WeatherMetric};
+use pa_strategy::weather::{KmaClient, MetOfficeClient, NoaaClient, OpenMeteoClient, WeatherMetric};
 
 use crate::app::helpers::{build_ws_token_list, infer_strategy_type, seed_market_cache};
 use crate::app::types::AccountContext;
@@ -224,6 +224,10 @@ pub fn spawn_weather_forecast_snapshot_refresh(
         let noaa = NoaaClient::new(&weather_config.noaa_user_agent);
         let open_meteo = OpenMeteoClient::new();
         let kma = KmaClient::new(&weather_config.kma_api_key);
+        let met_office = MetOfficeClient::new(
+            &weather_config.met_office_api_key,
+            &weather_config.met_office_obs_api_key,
+        );
         let mut interval = tokio::time::interval(Duration::from_secs(1800));
 
         loop {
@@ -238,6 +242,7 @@ pub fn spawn_weather_forecast_snapshot_refresh(
                         &noaa,
                         &open_meteo,
                         &kma,
+                        &met_office,
                         location.canonical_name,
                         metric,
                     )
@@ -304,6 +309,7 @@ fn weather_provider_name(provider: WeatherProvider) -> &'static str {
         WeatherProvider::Noaa => "noaa",
         WeatherProvider::OpenMeteo => "open_meteo",
         WeatherProvider::Kma => "kma",
+        WeatherProvider::MetOffice => "met_office",
     }
 }
 
@@ -311,6 +317,7 @@ async fn fetch_snapshot_forecast(
     noaa: &NoaaClient,
     open_meteo: &OpenMeteoClient,
     kma: &KmaClient,
+    met_office: &MetOfficeClient,
     location: &str,
     metric: WeatherMetric,
 ) -> anyhow::Result<pa_strategy::weather::ForecastData> {
@@ -327,6 +334,7 @@ async fn fetch_snapshot_forecast(
             open_meteo.forecast(lat, lon, location, metric, None, "inch").await
         }
         WeatherProvider::Kma => kma.forecast(location, metric, None, "inch").await,
+        WeatherProvider::MetOffice => met_office.forecast(location, metric, None, "inch").await,
     }
 }
 
