@@ -83,6 +83,16 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-16
+- Area: `crates/pa-core/src/config.rs`, `src/app/bootstrap.rs`
+- Change: Moved the database configuration log to after environment override reapplication and added a direct `PA_DATABASE__URL` backfill onto `settings.database.url`.
+- Why: Local and container runs were logging `No database URL configured` even when `PA_DATABASE__URL` was present, so startup should apply env overrides before logging and should not rely only on nested `config` env deserialization for the database URL.
+
+### 2026-03-16
+- Area: `docs/weather-settlement-validation-plan.md`, `docs/weather-noaa-settlement-checklist.md`
+- Change: Added an explicit priority order and a fast follow-up checklist for the remaining Batch 1 default-protected cities: Philadelphia, San Francisco, Las Vegas, Austin, and Minneapolis.
+- Why: Those cities are still blocked mainly by primary-source rules-page availability, so the validation workflow should have a fixed execution order and a minimal repeatable checklist ready for when any of them reappears in active markets.
+
+### 2026-03-16
 - Area: `crates/pa-core/src/weather.rs`, `crates/pa-strategy/src/weather.rs`
 - Change: Added a shared observation-site hint helper and pinned London's Met Office historical actual path to the fixed audit geohash `gcptq8` instead of scanning the nearest five candidates at runtime.
 - Why: London replay and settlement-audit actuals should stay aligned with one consistent chosen observation site rather than drifting to whichever nearby geohash happens to expose temperature data first.

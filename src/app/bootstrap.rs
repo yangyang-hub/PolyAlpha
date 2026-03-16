@@ -37,14 +37,14 @@ pub fn init_tracing() {
 
 pub async fn load_runtime_settings() -> Result<BootstrapArtifacts> {
     let mut settings = Settings::load().context("Failed to load configuration")?;
+    if let Err(e) = settings.reapply_env_overrides() {
+        tracing::warn!(error = %e, "Failed to re-apply environment config overrides");
+    }
+
     if settings.database.url.is_empty() {
         tracing::info!("No database URL configured — config store disabled");
     } else {
-        tracing::info!("Config store persistence disabled — database config overrides ignored");
-    }
-
-    if let Err(e) = settings.reapply_env_overrides() {
-        tracing::warn!(error = %e, "Failed to re-apply environment config overrides");
+        tracing::info!("Database URL configured");
     }
 
     let resolved_accounts = settings.resolved_accounts();

@@ -109,6 +109,32 @@ Batch 1 current investigation targets:
 - `Austin` -> candidate station `KAUS`
 - `Minneapolis` -> candidate station `KMSP`
 
+Current recommended execution order inside the remaining Batch 1 set:
+1. `Philadelphia`
+2. `San Francisco`
+3. `Las Vegas`
+4. `Austin`
+5. `Minneapolis`
+
+Why this order:
+- `Philadelphia` is the cleanest remaining large East Coast city and should be easier to verify than the more microclimate-sensitive western cities.
+- `San Francisco` is strategically important because downtown-vs-airport mismatch risk is high and needs explicit confirmation before relaxing protection.
+- `Las Vegas` is attractive but still needs direct confirmation that the expected settlement station is really `KLAS`.
+- `Austin` matters, but the city-vs-airport and heat-island mismatch is less urgent than San Francisco's coastal/airport split.
+- `Minneapolis` remains worth validating, but it is currently the lowest urgency of the five.
+
+Fast follow-up checklist when any of these cities reappears in active markets:
+1. Capture the direct Polymarket event URL from `weather_audit`.
+2. Copy the exact settlement wording from the rules page.
+3. Confirm whether the wording explicitly points to the current candidate station.
+4. If confirmed:
+   - update `docs/weather-noaa-settlement-checklist.md`
+   - update `crates/pa-core/src/weather.rs`
+   - promote the city from `DefaultProtected` to `Validated`
+5. If not confirmed:
+   - keep the city `DefaultProtected`
+   - record the mismatch or ambiguity in the checklist notes
+
 Batch 1 verified progress:
 - `Phoenix` -> verified against direct Polymarket rules page; settlement station `KPHX`
 

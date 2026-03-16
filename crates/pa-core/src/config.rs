@@ -849,7 +849,20 @@ impl Settings {
         merge_json_value(&mut base_value, env_value);
         *self = serde_json::from_value(base_value)
             .map_err(|e| config::ConfigError::Message(format!("deserialize settings: {e}")))?;
+        self.apply_direct_env_backfills();
         Ok(())
+    }
+
+    /// Backfill selected settings directly from environment variables.
+    ///
+    /// Some high-value fields are cheap to read explicitly and should not depend
+    /// solely on `config`'s nested env deserialization behavior.
+    pub fn apply_direct_env_backfills(&mut self) {
+        if let Ok(url) = std::env::var("PA_DATABASE__URL")
+            && !url.trim().is_empty()
+        {
+            self.database.url = url;
+        }
     }
 
     /// Merge strategies referenced by configured accounts into the global enabled list.
