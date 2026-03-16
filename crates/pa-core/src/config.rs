@@ -189,15 +189,18 @@ pub struct WeatherConfig {
     /// Maximum entry price — only buy tokens priced below this (low-price strategy).
     #[serde(default = "default_max_entry_price")]
     pub max_entry_price: Decimal,
-    /// Profit-take threshold — sell when best_bid rises above this price.
-    #[serde(default = "default_profit_take_threshold")]
-    pub profit_take_threshold: Decimal,
+    /// Relative stop-loss ratio — exit when best_bid falls below avg_cost * ratio.
+    #[serde(default = "default_relative_stop_loss_ratio")]
+    pub relative_stop_loss_ratio: Decimal,
     /// Maximum position size in USDC per trade.
     #[serde(default = "default_weather_max_position_usdc")]
     pub max_position_usdc: Decimal,
     /// NOAA API requires a User-Agent header identifying the application.
     #[serde(default = "default_noaa_user_agent")]
     pub noaa_user_agent: String,
+    /// Optional KMA API key for Korea Meteorological Administration forecast access.
+    #[serde(default)]
+    pub kma_api_key: String,
     /// Target US cities for weather scanning. Only markets in these cities are scanned.
     #[serde(default = "default_target_cities")]
     pub target_cities: Vec<String>,
@@ -221,12 +224,12 @@ fn default_forecast_change_threshold() -> f64 {
 fn default_max_entry_price() -> Decimal {
     Decimal::new(35, 2)
 } // 0.35
-fn default_profit_take_threshold() -> Decimal {
-    Decimal::new(34, 2)
-} // 0.34
+fn default_relative_stop_loss_ratio() -> Decimal {
+    Decimal::new(80, 2)
+} // 0.80
 fn default_weather_max_position_usdc() -> Decimal {
-    Decimal::new(5, 0)
-} // $5
+    Decimal::new(4, 0)
+} // $4
 fn default_noaa_user_agent() -> String {
     "PolyAlpha/1.0".to_string()
 }
@@ -249,9 +252,10 @@ impl Default for WeatherConfig {
             forecast_change_detection: false,
             forecast_change_threshold: default_forecast_change_threshold(),
             max_entry_price: default_max_entry_price(),
-            profit_take_threshold: default_profit_take_threshold(),
+            relative_stop_loss_ratio: default_relative_stop_loss_ratio(),
             max_position_usdc: default_weather_max_position_usdc(),
             noaa_user_agent: default_noaa_user_agent(),
+            kma_api_key: String::new(),
             target_cities: default_target_cities(),
         }
     }

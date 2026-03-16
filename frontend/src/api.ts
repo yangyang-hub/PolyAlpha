@@ -57,7 +57,7 @@ export interface SectionMeta {
   supported_cities_options?: string[];
   target_cities_empty_means_all?: boolean;
   target_cities_risk_tiers?: Record<string, "low" | "medium" | "high">;
-  target_cities_providers?: Record<string, "noaa" | "open_meteo">;
+  target_cities_providers?: Record<string, "noaa" | "open_meteo" | "kma">;
   target_cities_trade_enabled?: Record<string, boolean>;
   target_cities_settlement_notes?: Record<string, string>;
   target_cities_validation_status?: Record<string, "validated" | "default_protected">;

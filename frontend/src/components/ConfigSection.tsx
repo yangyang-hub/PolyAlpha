@@ -50,8 +50,9 @@ const FIELD_HINTS: Record<string, Record<string, string>> = {
     forecast_change_detection: "预报变化检测：仅在预报显著变化时交易",
     forecast_change_threshold: "变化阈值：预报变化需超过此倍数的 σ",
     max_entry_price: "最大入场价：只买低于此价的 token（高赔率策略）",
-    profit_take_threshold: "止盈价：价格涨到此值自动卖出",
+    relative_stop_loss_ratio: "相对止损比率：买入后若 bid 跌破持仓成本 × 此比率则卖出",
     noaa_user_agent: "NOAA API 的 User-Agent 头",
+    kma_api_key: "KMA API Hub Key（首尔/KMA 审计与回放）",
     target_cities: "目标城市列表，只扫描这些城市的天气市场",
   },
   crypto_alpha: {
@@ -260,7 +261,7 @@ function FieldDisplay({
                   </div>
                   <div className="mt-1 flex flex-wrap gap-1 text-[11px] opacity-70">
                     <span className="badge badge-ghost badge-xs">
-                      {provider === "open_meteo" ? "Open-Meteo" : "NOAA"}
+                      {provider === "open_meteo" ? "Open-Meteo" : provider === "kma" ? "KMA" : "NOAA"}
                     </span>
                     <span className="badge badge-success badge-outline badge-xs">可交易</span>
                     <span className={`badge badge-xs ${validation === "validated" ? "badge-info badge-outline" : "badge-warning badge-outline"}`}>
@@ -298,7 +299,7 @@ function FieldDisplay({
                       </div>
                       <div className="mt-1 flex flex-wrap gap-1 text-[11px] opacity-70">
                         <span className="badge badge-ghost badge-xs">
-                          {provider === "open_meteo" ? "Open-Meteo" : "NOAA"}
+                          {provider === "open_meteo" ? "Open-Meteo" : provider === "kma" ? "KMA" : "NOAA"}
                         </span>
                         <span className="badge badge-warning badge-outline badge-xs">audit-only</span>
                         <span className={`badge badge-xs ${validation === "validated" ? "badge-info badge-outline" : "badge-warning badge-outline"}`}>

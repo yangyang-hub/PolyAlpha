@@ -140,6 +140,7 @@ impl WebSocketFeed {
                 };
                 let mut stream = Box::pin(stream);
                 let mut awaiting_first = true;
+                let mut first_message_warned = false;
                 let mut last_message = Instant::now();
                 let staleness_timeout = Duration::from_secs(60);
 
@@ -150,12 +151,12 @@ impl WebSocketFeed {
                             ws_connected.store(false, Ordering::Relaxed);
                             return;
                         }
-                        _ = tokio::time::sleep(Duration::from_secs(15)), if awaiting_first => {
+                        _ = tokio::time::sleep(Duration::from_secs(15)), if awaiting_first && !first_message_warned => {
                             tracing::warn!(
                                 "WebSocket: no data received after 15s — SDK may be failing to \
                                  connect to the server. Check network/DNS and SDK debug logs."
                             );
-                            awaiting_first = false;
+                            first_message_warned = true;
                         }
                         // Staleness watchdog: force reconnect if no data for 60s
                         _ = tokio::time::sleep_until(last_message + staleness_timeout), if !awaiting_first => {
@@ -168,9 +169,9 @@ impl WebSocketFeed {
                             break;
                         }
                         item = stream.next() => {
-                            awaiting_first = false;
                             match item {
                                 Some(Ok(book_update)) => {
+                                    awaiting_first = false;
                                     last_message = Instant::now();
                                     total_messages += 1;
                                     if total_messages == 1 {

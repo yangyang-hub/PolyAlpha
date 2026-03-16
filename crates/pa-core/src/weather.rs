@@ -2,6 +2,7 @@
 pub enum WeatherProvider {
     Noaa,
     OpenMeteo,
+    Kma,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,7 +287,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
     },
     WeatherLocation {
         canonical_name: "Seoul",
-        provider: WeatherProvider::OpenMeteo,
+        provider: WeatherProvider::Kma,
         lat: 37.5665,
         lon: 126.9780,
         timezone: "Asia/Seoul",
@@ -458,6 +459,24 @@ pub fn weather_timezone(location: &str) -> &'static str {
         .unwrap_or("UTC")
 }
 
+pub fn weather_kma_grid(location: &str) -> Option<(u32, u32)> {
+    let canonical = weather_location(location)?.canonical_name;
+    match canonical {
+        "Seoul" => Some((60, 127)),
+        _ => None,
+    }
+}
+
+pub fn weather_kma_station_id(location: &str) -> Option<u32> {
+    let canonical = weather_location(location)?.canonical_name;
+    match canonical {
+        // Current Seoul settlement audit path uses Incheon as the closest KMA daily station
+        // to the Polymarket settlement venue (Incheon Intl / RKSI).
+        "Seoul" => Some(112),
+        _ => None,
+    }
+}
+
 pub fn normalize_noaa_location_name(location: &str) -> Option<&'static str> {
     let normalized = normalize_weather_location_name(location)?;
     weather_location(normalized)
@@ -532,9 +551,20 @@ mod tests {
         assert_eq!(london.provider, WeatherProvider::OpenMeteo);
         assert!(!london.trade_enabled);
 
+        let seoul = weather_location("Seoul").unwrap();
+        assert_eq!(seoul.provider, WeatherProvider::Kma);
+        assert!(!seoul.trade_enabled);
+
         let seattle = weather_location("Seattle").unwrap();
         assert_eq!(seattle.provider, WeatherProvider::Noaa);
         assert!(seattle.trade_enabled);
+    }
+
+    #[test]
+    fn test_weather_kma_metadata_helpers() {
+        assert_eq!(weather_kma_grid("Seoul"), Some((60, 127)));
+        assert_eq!(weather_kma_station_id("Seoul"), Some(112));
+        assert_eq!(weather_kma_grid("London"), None);
     }
 
     #[test]

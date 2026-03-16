@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use alloy::primitives::U256;
 use async_trait::async_trait;
-use chrono::{Datelike, Local, NaiveDate, Utc};
+use chrono::{Datelike, Local, NaiveDate, Timelike, Utc};
 use chrono_tz::Tz;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
@@ -20,8 +20,8 @@ use pa_core::types::{
 use pa_core::weather::{
     NOAA_SUPPORTED_LOCATIONS, WeatherProvider, normalize_noaa_location_name,
     settlement_extra_edge_bps_for_location, settlement_risk_tier,
-    settlement_sigma_multiplier_for_location, weather_location,
-    weather_timezone,
+    settlement_sigma_multiplier_for_location, weather_kma_grid, weather_kma_station_id,
+    weather_location, weather_timezone,
 };
 
 use crate::profitability::ProfitCalculator;
@@ -869,6 +869,91 @@ struct OpenMeteoDaily {
     temperature_2m_min: Vec<f64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KmaForecastResponse {
+    response: KmaResponseBody,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KmaResponseBody {
+    body: KmaForecastBody,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KmaForecastBody {
+    items: KmaForecastItems,
+}
+
+#[derive(Debug, Deserialize)]
+struct KmaForecastItems {
+    item: Vec<KmaForecastItem>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct KmaForecastItem {
+    category: String,
+    fcst_date: String,
+    fcst_value: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KmaDailyWeatherResponse {
+    response: KmaDailyOuter,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KmaDailyOuter {
+    header: KmaDailyHeader,
+    #[serde(default)]
+    body: Option<KmaDailyBody>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KmaDailyHeader {
+    result_code: String,
+    result_msg: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KmaDailyBody {
+    items: KmaDailyItems,
+}
+
+#[derive(Debug, Deserialize)]
+struct KmaDailyItems {
+    item: Vec<KmaDailyItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KmaDailyItem {
+    stndays: KmaStationDays,
+}
+
+#[derive(Debug, Deserialize)]
+struct KmaStationDays {
+    info: Vec<KmaDailyInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KmaDailyInfo {
+    #[serde(rename = "tm")]
+    day_of_month: String,
+    #[serde(rename = "ta_max")]
+    ta_max: Option<String>,
+    #[serde(rename = "ta_min")]
+    ta_min: Option<String>,
+    #[serde(rename = "ta_avg")]
+    ta_avg: Option<String>,
+}
+
 /// Fetch weather forecasts from Open-Meteo (global, no API key for the basic tier).
 pub struct OpenMeteoClient {
     http: reqwest::Client,
@@ -901,11 +986,7 @@ impl OpenMeteoClient {
     }
 
     fn timezone_for_location(location: &str) -> &'static str {
-        match weather_location(location).map(|entry| entry.canonical_name) {
-            Some("London") => "Europe/London",
-            Some("Seoul") => "Asia/Seoul",
-            _ => "GMT",
-        }
+        weather_timezone(location)
     }
 
     pub async fn forecast(
@@ -1146,6 +1227,336 @@ impl OpenMeteoClient {
             target_value,
             model_spread: 0.0,
         })
+    }
+}
+
+/// Fetch weather forecasts from KMA API Hub (Korea Meteorological Administration).
+pub struct KmaClient {
+    http: reqwest::Client,
+    api_key: String,
+}
+
+impl KmaClient {
+    pub fn new(api_key: &str) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self {
+            http,
+            api_key: api_key.to_string(),
+        }
+    }
+
+    pub fn supports_location(location: &str) -> bool {
+        matches!(weather_location(location).map(|entry| entry.provider), Some(WeatherProvider::Kma))
+    }
+
+    fn ensure_key(&self) -> anyhow::Result<&str> {
+        if self.api_key.trim().is_empty() {
+            return Err(anyhow::anyhow!(
+                "KMA API key not configured; set PA_WEATHER__KMA_API_KEY"
+            ));
+        }
+        Ok(self.api_key.as_str())
+    }
+
+    fn latest_base_datetime(now_kst: chrono::DateTime<Tz>) -> (String, String) {
+        let base_hours = [2_u32, 5, 8, 11, 14, 17, 20, 23];
+        let mut base_date = now_kst.date_naive();
+        let current_hhmm = now_kst.hour() * 100 + now_kst.minute();
+        let selected_hour = base_hours
+            .iter()
+            .rev()
+            .find(|&&hour| current_hhmm >= hour * 100 + 10)
+            .copied()
+            .unwrap_or_else(|| {
+                base_date = base_date.pred_opt().unwrap_or(base_date);
+                23
+            });
+        (
+            base_date.format("%Y%m%d").to_string(),
+            format!("{selected_hour:02}00"),
+        )
+    }
+
+    fn parse_target_date(value: &str) -> Option<NaiveDate> {
+        NaiveDate::parse_from_str(value, "%Y%m%d").ok()
+    }
+
+    fn collect_daily_series(items: &[KmaForecastItem], category: &str) -> Vec<(NaiveDate, f64)> {
+        let mut out = Vec::new();
+        for item in items.iter().filter(|item| item.category == category) {
+            let Some(date) = Self::parse_target_date(&item.fcst_date) else {
+                continue;
+            };
+            let Ok(value) = item.fcst_value.parse::<f64>() else {
+                continue;
+            };
+            out.push((date, value));
+        }
+        out.sort_by_key(|(date, _)| *date);
+        out
+    }
+
+    fn collect_daily_tmp_average(items: &[KmaForecastItem]) -> Vec<(NaiveDate, f64)> {
+        let mut by_day: HashMap<NaiveDate, Vec<f64>> = HashMap::new();
+        for item in items.iter().filter(|item| item.category == "TMP") {
+            let Some(date) = Self::parse_target_date(&item.fcst_date) else {
+                continue;
+            };
+            let Ok(value) = item.fcst_value.parse::<f64>() else {
+                continue;
+            };
+            by_day.entry(date).or_default().push(value);
+        }
+        let mut out: Vec<(NaiveDate, f64)> = by_day
+            .into_iter()
+            .filter_map(|(date, values)| {
+                if values.is_empty() {
+                    None
+                } else {
+                    Some((date, values.iter().sum::<f64>() / values.len() as f64))
+                }
+            })
+            .collect();
+        out.sort_by_key(|(date, _)| *date);
+        out
+    }
+
+    fn collect_daily_tmp_extrema(
+        items: &[KmaForecastItem],
+        select: impl Fn(&[f64]) -> f64,
+    ) -> Vec<(NaiveDate, f64)> {
+        let mut by_day: HashMap<NaiveDate, Vec<f64>> = HashMap::new();
+        for item in items.iter().filter(|item| item.category == "TMP") {
+            let Some(date) = Self::parse_target_date(&item.fcst_date) else {
+                continue;
+            };
+            let Ok(value) = item.fcst_value.parse::<f64>() else {
+                continue;
+            };
+            by_day.entry(date).or_default().push(value);
+        }
+        let mut out: Vec<(NaiveDate, f64)> = by_day
+            .into_iter()
+            .filter_map(|(date, values)| {
+                if values.is_empty() {
+                    None
+                } else {
+                    Some((date, select(&values)))
+                }
+            })
+            .collect();
+        out.sort_by_key(|(date, _)| *date);
+        out
+    }
+
+    pub async fn forecast(
+        &self,
+        location: &str,
+        metric: WeatherMetric,
+        target_date: Option<NaiveDate>,
+        _precipitation_unit: &str,
+    ) -> anyhow::Result<ForecastData> {
+        let api_key = self.ensure_key()?.to_string();
+        let (nx, ny) = weather_kma_grid(location)
+            .ok_or_else(|| anyhow::anyhow!("Missing KMA grid metadata for {}", location))?;
+        let tz: Tz = weather_timezone(location).parse().unwrap_or(chrono_tz::Asia::Seoul);
+        let (base_date, base_time) = Self::latest_base_datetime(Utc::now().with_timezone(&tz));
+        let resp: KmaForecastResponse = with_retry(2, || {
+            let http = self.http.clone();
+            let api_key = api_key.clone();
+            let base_date = base_date.clone();
+            let base_time = base_time.clone();
+            async move {
+                let response = http
+                    .get("https://apihub.kma.go.kr/api/typ02/openApi/VilageFcstInfoService_2.0/getVilageFcst")
+                    .query(&[
+                        ("authKey", api_key.as_str()),
+                        ("pageNo", "1"),
+                        ("numOfRows", "1000"),
+                        ("dataType", "JSON"),
+                        ("base_date", base_date.as_str()),
+                        ("base_time", base_time.as_str()),
+                        ("nx", &nx.to_string()),
+                        ("ny", &ny.to_string()),
+                    ])
+                    .send()
+                    .await?
+                    .json::<KmaForecastResponse>()
+                    .await?;
+                Ok(response)
+            }
+        })
+        .await?;
+
+        let items = resp.response.body.items.item;
+        if items.is_empty() {
+            return Err(anyhow::anyhow!("No forecast data from KMA"));
+        }
+
+        let daily: Vec<(NaiveDate, f64)> = match metric {
+            WeatherMetric::TemperatureMax => {
+                let tmx = Self::collect_daily_series(&items, "TMX");
+                if tmx.is_empty() {
+                    Self::collect_daily_tmp_extrema(&items, |values| {
+                        values
+                            .iter()
+                            .copied()
+                            .fold(f64::NEG_INFINITY, f64::max)
+                    })
+                } else {
+                    tmx
+                }
+            }
+            WeatherMetric::TemperatureMin => {
+                let tmn = Self::collect_daily_series(&items, "TMN");
+                if tmn.is_empty() {
+                    Self::collect_daily_tmp_extrema(&items, |values| {
+                        values
+                            .iter()
+                            .copied()
+                            .fold(f64::INFINITY, f64::min)
+                    })
+                } else {
+                    tmn
+                }
+            }
+            WeatherMetric::TemperatureAvg => {
+                let tmp = Self::collect_daily_tmp_average(&items);
+                if tmp.is_empty() {
+                    let max = Self::collect_daily_series(&items, "TMX");
+                    let min = Self::collect_daily_series(&items, "TMN");
+                    max.into_iter()
+                        .zip(min.into_iter())
+                        .map(|((date, max), (_, min))| (date, (max + min) / 2.0))
+                        .collect()
+                } else {
+                    tmp
+                }
+            }
+            WeatherMetric::Rainfall | WeatherMetric::Snowfall | WeatherMetric::WindSpeed => {
+                return Err(anyhow::anyhow!(
+                    "KMA routing currently supports temperature metrics only"
+                ));
+            }
+        };
+
+        if daily.is_empty() {
+            return Err(anyhow::anyhow!("KMA response missing expected daily values"));
+        }
+
+        let dates: Vec<String> = daily.iter().map(|(date, _)| date.to_string()).collect();
+        let values: Vec<f64> = daily.iter().map(|(_, value)| *value).collect();
+        let target_value = target_date.and_then(|td| {
+            daily.iter()
+                .find(|(date, _)| *date == td)
+                .map(|(_, value)| *value)
+        });
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
+        let std_dev = variance.sqrt();
+
+        Ok(ForecastData {
+            values,
+            dates,
+            mean,
+            std_dev,
+            target_value,
+            model_spread: 0.0,
+        })
+    }
+
+    pub async fn fetch_historical(
+        &self,
+        location: &str,
+        metric: WeatherMetric,
+        target_date: NaiveDate,
+        _precipitation_unit: &str,
+    ) -> anyhow::Result<f64> {
+        let api_key = self.ensure_key()?.to_string();
+        let station = weather_kma_station_id(location)
+            .ok_or_else(|| anyhow::anyhow!("Missing KMA station metadata for {}", location))?;
+        let year = target_date.format("%Y").to_string();
+        let month = target_date.format("%m").to_string();
+        let resp: KmaDailyWeatherResponse = with_retry(2, || {
+            let http = self.http.clone();
+            let api_key = api_key.clone();
+            let year = year.clone();
+            let month = month.clone();
+            async move {
+                let response = http
+                    .get("https://apihub.kma.go.kr/api/typ02/openApi/SfcMtlyInfoService/getDailyWthrData")
+                    .query(&[
+                        ("authKey", api_key.as_str()),
+                        ("pageNo", "1"),
+                        ("numOfRows", "40"),
+                        ("dataType", "JSON"),
+                        ("year", year.as_str()),
+                        ("month", month.as_str()),
+                        ("station", &station.to_string()),
+                    ])
+                    .send()
+                    .await?
+                    .json::<KmaDailyWeatherResponse>()
+                    .await?;
+                Ok(response)
+            }
+        })
+        .await?;
+
+        if resp.response.header.result_code != "00" {
+            return Err(anyhow::anyhow!(
+                "KMA historical actual unavailable: {} ({})",
+                resp.response.header.result_msg,
+                resp.response.header.result_code
+            ));
+        }
+
+        let body = resp
+            .response
+            .body
+            .ok_or_else(|| anyhow::anyhow!("KMA historical actual missing response body"))?;
+        let target_day = target_date.day().to_string();
+        let info = body
+            .items
+            .item
+            .into_iter()
+            .flat_map(|item| item.stndays.info.into_iter())
+            .find(|row| row.day_of_month.trim_start_matches('0') == target_day)
+            .ok_or_else(|| anyhow::anyhow!("KMA historical actual missing target date {}", target_date))?;
+
+        let parse_value = |value: Option<String>, label: &str| -> anyhow::Result<f64> {
+            let raw =
+                value.ok_or_else(|| anyhow::anyhow!("Missing {} for {}", label, target_date))?;
+            raw.parse::<f64>()
+                .map_err(|_| anyhow::anyhow!("Invalid {} for {}: {}", label, target_date, raw))
+        };
+
+        match metric {
+            WeatherMetric::TemperatureMax => parse_value(info.ta_max, "ta_max"),
+            WeatherMetric::TemperatureMin => parse_value(info.ta_min, "ta_min"),
+            WeatherMetric::TemperatureAvg => parse_value(info.ta_avg, "ta_avg"),
+            WeatherMetric::Rainfall | WeatherMetric::Snowfall | WeatherMetric::WindSpeed => Err(
+                anyhow::anyhow!(
+                    "KMA historical actual currently supports temperature metrics only"
+                ),
+            ),
+        }
+    }
+
+    pub async fn fetch_historical_forecast(
+        &self,
+        _location: &str,
+        _metric: WeatherMetric,
+        _target_date: NaiveDate,
+        _precipitation_unit: &str,
+    ) -> anyhow::Result<ForecastData> {
+        let _ = self.ensure_key()?;
+        Err(anyhow::anyhow!(
+            "KMA historical forecast archive is not wired yet; keep Seoul audit-only"
+        ))
     }
 }
 
@@ -1689,6 +2100,7 @@ pub struct WeatherAlphaStrategy {
     config: WeatherConfig,
     noaa: NoaaClient,
     open_meteo: OpenMeteoClient,
+    kma: KmaClient,
     profit_calc: ProfitCalculator,
     get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
     /// Returns available capital (balance - exposure) for position sizing.
@@ -1734,6 +2146,7 @@ impl WeatherAlphaStrategy {
         match weather_location(location).map(|entry| entry.provider) {
             Some(WeatherProvider::Noaa) => "noaa",
             Some(WeatherProvider::OpenMeteo) => "open_meteo",
+            Some(WeatherProvider::Kma) => "kma",
             None => "unknown",
         }
     }
@@ -1772,10 +2185,12 @@ impl WeatherAlphaStrategy {
 
         let noaa = NoaaClient::new(&config.noaa_user_agent);
         let open_meteo = OpenMeteoClient::new();
+        let kma = KmaClient::new(&config.kma_api_key);
         Self {
             config,
             noaa,
             open_meteo,
+            kma,
             profit_calc: ProfitCalculator::new(gas_cost_usd),
             get_orderbook,
             get_available_capital,
@@ -1868,6 +2283,11 @@ impl WeatherAlphaStrategy {
                     )
                     .await
             }
+            Some(WeatherProvider::Kma) => {
+                self.kma
+                    .forecast(location, metric, target_date, precipitation_unit)
+                    .await
+            }
             None => Err(anyhow::anyhow!("Unsupported weather location: {}", location)),
         }
     }
@@ -1897,6 +2317,11 @@ impl WeatherAlphaStrategy {
                         target_date,
                         precipitation_unit,
                     )
+                    .await
+            }
+            Some(WeatherProvider::Kma) => {
+                self.kma
+                    .fetch_historical(location, metric, target_date, precipitation_unit)
                     .await
             }
             None => Err(anyhow::anyhow!("Unsupported weather location: {}", location)),
@@ -2980,7 +3405,7 @@ impl WeatherAlphaStrategy {
         })
     }
 
-    /// Scan held positions for exit conditions (model reversal or capital efficiency).
+    /// Scan held positions for exit conditions (capital efficiency, relative stop-loss, or model reversal).
     async fn scan_exits(&self, markets: &[MarketInfo]) -> Vec<TradingOpportunity> {
         let held = (self.get_held_positions)();
         if held.is_empty() {
@@ -3032,30 +3457,12 @@ impl WeatherAlphaStrategy {
                 continue;
             }
 
-            // Profit-take exit: sell when price rises above profit_take_threshold
-            if best_bid >= self.config.profit_take_threshold {
-                tracing::debug!(
-                    token_id = %token_id,
-                    best_bid = %best_bid,
-                    threshold = %self.config.profit_take_threshold,
-                    "[EXIT] Profit take — weather"
-                );
-                exits.push(self.build_exit_opportunity(
-                    *token_id,
-                    *size,
-                    *avg_cost,
-                    best_bid,
-                    &token_to_market,
-                ));
-                continue;
-            }
-
-            // Deep loss exit: cut losses regardless of model when position has lost >= 50%.
+            // Relative stop-loss exit: cut losses when bid falls below avg_cost * configured ratio.
             // The model reversal check below only triggers when model_prob < best_bid,
             // which is nearly impossible at low prices (e.g., model_prob would need to be
             // below 4.5% when best_bid is 0.05). This check provides a model-independent
             // exit when the loss is severe.
-            if *avg_cost > Decimal::ZERO && best_bid < *avg_cost * dec!(0.50) {
+            if *avg_cost > Decimal::ZERO && best_bid < *avg_cost * self.config.relative_stop_loss_ratio {
                 if let Some(ask) = best_ask {
                     if ask >= *avg_cost && best_bid >= ask * dec!(0.10) {
                         tracing::debug!(
@@ -3075,7 +3482,8 @@ impl WeatherAlphaStrategy {
                     best_bid = %best_bid,
                     avg_cost = %avg_cost,
                     loss_pct = %loss_pct,
-                    "[EXIT] Deep loss detected — weather position lost >= 50%"
+                    stop_loss_ratio = %self.config.relative_stop_loss_ratio,
+                    "[EXIT] Relative stop-loss detected — weather"
                 );
                 exits.push(self.build_exit_opportunity(
                     *token_id,
@@ -3647,9 +4055,10 @@ mod tests {
             forecast_change_detection: false,
             forecast_change_threshold: 0.5,
             max_entry_price: dec!(0.15),
-            profit_take_threshold: dec!(0.45),
+            relative_stop_loss_ratio: dec!(0.75),
             max_position_usdc: dec!(2),
             noaa_user_agent: "test".to_string(),
+            kma_api_key: String::new(),
             target_cities: vec![],
         };
 
@@ -4805,9 +5214,10 @@ mod tests {
             forecast_change_detection: false,
             forecast_change_threshold: 0.5,
             max_entry_price: Decimal::ONE, // No price ceiling in test helper
-            profit_take_threshold: dec!(0.45),
+            relative_stop_loss_ratio: dec!(0.75),
             max_position_usdc: dec!(100), // Large cap for test helper
             noaa_user_agent: "test".to_string(),
+            kma_api_key: String::new(),
             target_cities: vec![],
         };
         let books = Arc::new(books);
@@ -4842,9 +5252,10 @@ mod tests {
             forecast_change_detection: false,
             forecast_change_threshold: 0.5,
             max_entry_price: Decimal::ONE,
-            profit_take_threshold: dec!(0.45),
+            relative_stop_loss_ratio: dec!(0.75),
             max_position_usdc: dec!(100),
             noaa_user_agent: "test".to_string(),
+            kma_api_key: String::new(),
             target_cities: vec![],
         };
         let books = Arc::new(books);
@@ -5059,9 +5470,10 @@ mod tests {
             forecast_change_detection: true, // ENABLED
             forecast_change_threshold: 0.5,
             max_entry_price: dec!(0.15),
-            profit_take_threshold: dec!(0.45),
+            relative_stop_loss_ratio: dec!(0.75),
             max_position_usdc: dec!(2),
             noaa_user_agent: "test".to_string(),
+            kma_api_key: String::new(),
             target_cities: vec![],
         };
         let held = vec![(token_id, dec!(50), dec!(0.30))];
@@ -5108,94 +5520,6 @@ mod tests {
             exits.len(),
             1,
             "Model reversal exit must fire even when is_fresh_signal=false"
-        );
-        assert!(exits[0].question.starts_with("[EXIT]"));
-    }
-
-    #[tokio::test]
-    async fn test_exit_neg_risk_uses_range_probability() {
-        // NegRisk outcome "between 84-85°F" should use model_range_probability,
-        // not model_probability. With forecast 70°F, P(84 <= X <= 85) ≈ tiny,
-        // so buying YES at 0.50 is a losing trade → exit should fire.
-        let token_id = U256::from(1u64);
-        let question = "Will the highest temperature in Miami be between 84-85°F on February 22?";
-        let market = MarketInfo {
-            condition_id: B256::ZERO,
-            question_id: B256::ZERO,
-            question: question.to_string(),
-            neg_risk: true, // NegRisk market!
-            neg_risk_market_id: None,
-            tokens: vec![
-                TokenInfo {
-                    token_id: U256::from(1u64),
-                    outcome: Outcome::Yes,
-                    complement_id: U256::from(2u64),
-                },
-                TokenInfo {
-                    token_id: U256::from(2u64),
-                    outcome: Outcome::No,
-                    complement_id: U256::from(1u64),
-                },
-            ],
-            tick_size: dec!(0.01),
-            fee_rate_bps: 200,
-            active: true,
-            liquidity: dec!(1000),
-            event_title: Some("Highest temperature in Miami on February 22".to_string()),
-            end_date: None,
-            category: None,
-            outcome_prices: None,
-            gamma_best_bid: None,
-            gamma_best_ask: None,
-            rewards_min_size: None,
-            rewards_max_spread: None,
-            rewards_daily_rate: None,
-            holding_rewards_enabled: false,
-            fees_enabled: false,
-        };
-
-        let mut books = HashMap::new();
-        books.insert(token_id, make_weather_book(token_id, dec!(0.50)));
-        books.insert(
-            U256::from(2u64),
-            make_weather_book(U256::from(2u64), dec!(0.50)),
-        );
-
-        let held = vec![(token_id, dec!(10), dec!(0.50))]; // bought YES at 0.50
-        let strategy = make_weather_strategy(books, held);
-
-        // Pre-populate cache: forecast 70°F (far from 84-85 range)
-        // Use location-based cache key (same as get_forecast_by_location)
-        let cache_key =
-            WeatherAlphaStrategy::location_hash("Miami", WeatherMetric::TemperatureMax, None);
-        {
-            let mut cache = strategy.forecast_cache.lock().unwrap();
-            cache.insert(
-                cache_key,
-                CachedForecast {
-                    forecast: ForecastData {
-                        values: vec![70.0],
-                        dates: vec!["2026-02-22".into()],
-                        mean: 70.0,
-                        std_dev: 3.0,
-                        target_value: Some(70.0),
-                        model_spread: 0.0,
-                    },
-                    fetched_at: Instant::now(),
-                    previous_mean: None,
-                    is_fresh_signal: true,
-                },
-            );
-        }
-
-        let exits = strategy.scan_exits(&[market]).await;
-        // P(84 ≤ X ≤ 85 | mean=70, sigma=3) is tiny (~0.00003)
-        // effective_prob ≈ 0.00003, best_bid = 0.50
-        // 0.00003 < 0.50 - 0.005 → EXIT must fire
-        assert_eq!(
-            exits.len(),
-            1,
-            "NegRisk range exit should fire when forecast is far from range"
         );
         assert!(exits[0].question.starts_with("[EXIT]"));
     }
@@ -5501,96 +5825,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_exit_celsius_neg_risk_converts_threshold() {
-        // NegRisk outcome in °C: "23°C or higher" with forecast 71.5°F (=21.9°C)
-        // Without conversion: P(X >= 23) ≈ 1.0 → no exit (wrong!)
-        // With conversion: P(X >= 73.4) ≈ 0.26 → exit fires (correct!)
-        let token_id = U256::from(1u64);
-        let question =
-            "Will the highest temperature in Wellington be 23°C or higher on February 22?";
-        let market = MarketInfo {
-            condition_id: B256::ZERO,
-            question_id: B256::ZERO,
-            question: question.to_string(),
-            neg_risk: true,
-            neg_risk_market_id: None,
-            tokens: vec![
-                TokenInfo {
-                    token_id: U256::from(1u64),
-                    outcome: Outcome::Yes,
-                    complement_id: U256::from(2u64),
-                },
-                TokenInfo {
-                    token_id: U256::from(2u64),
-                    outcome: Outcome::No,
-                    complement_id: U256::from(1u64),
-                },
-            ],
-            tick_size: dec!(0.01),
-            fee_rate_bps: 200,
-            active: true,
-            liquidity: dec!(1000),
-            event_title: Some("Highest temperature in Wellington on February 22".to_string()),
-            end_date: None,
-            category: None,
-            outcome_prices: None,
-            gamma_best_bid: None,
-            gamma_best_ask: None,
-            rewards_min_size: None,
-            rewards_max_spread: None,
-            rewards_daily_rate: None,
-            holding_rewards_enabled: false,
-            fees_enabled: false,
-        };
-
-        let mut books = HashMap::new();
-        books.insert(token_id, make_weather_book(token_id, dec!(0.52)));
-        books.insert(
-            U256::from(2u64),
-            make_weather_book(U256::from(2u64), dec!(0.48)),
-        );
-
-        let held = vec![(token_id, dec!(12.50), dec!(0.52))]; // bought YES at 0.52
-        let strategy = make_weather_strategy(books, held);
-
-        // Pre-populate cache: forecast 71.5°F (=21.9°C, below 23°C threshold)
-        // Use location-based cache key
-        let cache_key =
-            WeatherAlphaStrategy::location_hash("Wellington", WeatherMetric::TemperatureMax, None);
-        {
-            let mut cache = strategy.forecast_cache.lock().unwrap();
-            cache.insert(
-                cache_key,
-                CachedForecast {
-                    forecast: ForecastData {
-                        values: vec![71.5],
-                        dates: vec!["2026-02-22".into()],
-                        mean: 71.5,
-                        std_dev: 3.0,
-                        target_value: Some(71.5),
-                        model_spread: 0.0,
-                    },
-                    fetched_at: Instant::now(),
-                    previous_mean: None,
-                    is_fresh_signal: true,
-                },
-            );
-        }
-
-        let exits = strategy.scan_exits(&[market]).await;
-        // With °C conversion: 23°C = 73.4°F, P(X >= 73.4 | mean=71.5, sigma=3) ≈ 0.26
-        // NegRisk uses parse_outcome_range: "23°C or higher" → lower=Some(23) → converted to 73.4
-        // effective_prob ≈ 0.26, best_bid = 0.52
-        // 0.26 < 0.52 - 0.005 = 0.515 → EXIT must fire
-        assert_eq!(
-            exits.len(),
-            1,
-            "Celsius NegRisk exit should fire with correct conversion"
-        );
-        assert!(exits[0].question.starts_with("[EXIT]"));
-    }
-
     // ──── NOAA Client Tests ────
 
     #[test]
@@ -5628,19 +5862,59 @@ mod tests {
         let (lat, lon) = OpenMeteoClient::geocode("London").unwrap();
         assert!((lat - 51.5072).abs() < 0.01);
         assert!((lon - (-0.1276)).abs() < 0.01);
-        assert!(OpenMeteoClient::supports_location("Seoul"));
+        assert!(OpenMeteoClient::supports_location("London"));
     }
 
     #[test]
     fn test_open_meteo_geocode_rejects_noaa_city() {
         assert!(OpenMeteoClient::geocode("New York").is_err());
+        assert!(OpenMeteoClient::geocode("Seoul").is_err());
         assert!(OpenMeteoClient::geocode("Unknown City").is_err());
     }
 
     #[test]
     fn test_open_meteo_uses_local_timezone_for_supported_cities() {
         assert_eq!(OpenMeteoClient::timezone_for_location("London"), "Europe/London");
-        assert_eq!(OpenMeteoClient::timezone_for_location("Seoul"), "Asia/Seoul");
+    }
+
+    #[test]
+    fn test_kma_supports_seoul_only() {
+        assert!(KmaClient::supports_location("Seoul"));
+        assert!(!KmaClient::supports_location("London"));
+        assert!(!KmaClient::supports_location("New York"));
+    }
+
+    #[test]
+    fn test_kma_tmp_extrema_fallback_produces_daily_max_and_min() {
+        let items = vec![
+            KmaForecastItem {
+                category: "TMP".to_string(),
+                fcst_date: "20260315".to_string(),
+                fcst_value: "7".to_string(),
+            },
+            KmaForecastItem {
+                category: "TMP".to_string(),
+                fcst_date: "20260315".to_string(),
+                fcst_value: "12".to_string(),
+            },
+            KmaForecastItem {
+                category: "TMP".to_string(),
+                fcst_date: "20260315".to_string(),
+                fcst_value: "3".to_string(),
+            },
+        ];
+
+        let max_daily = KmaClient::collect_daily_tmp_extrema(&items, |values| {
+            values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+        });
+        let min_daily = KmaClient::collect_daily_tmp_extrema(&items, |values| {
+            values.iter().copied().fold(f64::INFINITY, f64::min)
+        });
+
+        assert_eq!(max_daily.len(), 1);
+        assert_eq!(min_daily.len(), 1);
+        assert_eq!(max_daily[0].1, 12.0);
+        assert_eq!(min_daily[0].1, 3.0);
     }
 
     #[test]
@@ -5701,9 +5975,10 @@ mod tests {
             forecast_change_detection: false,
             forecast_change_threshold: 0.5,
             max_entry_price: dec!(0.15), // Only buy below 15 cents
-            profit_take_threshold: dec!(0.45),
+            relative_stop_loss_ratio: dec!(0.75),
             max_position_usdc: dec!(2),
             noaa_user_agent: "test".to_string(),
+            kma_api_key: String::new(),
             target_cities: vec![],
         };
         let strategy = WeatherAlphaStrategy::new(
@@ -5777,9 +6052,10 @@ mod tests {
             forecast_change_detection: false,
             forecast_change_threshold: 0.5,
             max_entry_price: dec!(0.15), // Only buy below 15 cents
-            profit_take_threshold: dec!(0.45),
+            relative_stop_loss_ratio: dec!(0.75),
             max_position_usdc: dec!(100),
             noaa_user_agent: "test".to_string(),
+            kma_api_key: String::new(),
             target_cities: vec![],
         };
         let strategy = WeatherAlphaStrategy::new(
@@ -5859,9 +6135,10 @@ mod tests {
                 forecast_change_detection: false,
                 forecast_change_threshold: 0.5,
                 max_entry_price: dec!(0.30),
-                profit_take_threshold: dec!(0.45),
+                relative_stop_loss_ratio: dec!(0.75),
                 max_position_usdc: dec!(10),
                 noaa_user_agent: "test".to_string(),
+            kma_api_key: String::new(),
                 target_cities: vec![],
             },
             Decimal::ZERO,
@@ -5982,48 +6259,43 @@ mod tests {
         );
     }
 
-    // ──── Profit-Take Exit Tests ────
+    // ──── Relative Stop-Loss Exit Tests ────
 
     #[tokio::test]
-    async fn test_profit_take_exit() {
-        // Bought YES at 0.10, best_bid rises to 0.50 (> profit_take_threshold=0.45)
+    async fn test_relative_stop_loss_exit() {
+        // Bought YES at 0.40, best_bid drops to 0.20 (< avg_cost * 0.75)
         let token_id = U256::from(1u64);
         let mut books = HashMap::new();
-        let mut book = make_weather_book(token_id, dec!(0.50));
+        let mut book = make_weather_book(token_id, dec!(0.20));
         book.bids.clear();
         book.bids.push(PriceLevel {
-            price: dec!(0.50),
+            price: dec!(0.20),
             size: dec!(100),
         });
         books.insert(token_id, book);
         books.insert(
             U256::from(2u64),
-            make_weather_book(U256::from(2u64), dec!(0.50)),
+            make_weather_book(U256::from(2u64), dec!(0.80)),
         );
 
-        let held = vec![(token_id, dec!(20), dec!(0.10))]; // bought at 0.10
+        let held = vec![(token_id, dec!(20), dec!(0.40))]; // bought at 0.40
         let strategy = make_weather_strategy(books, held);
 
         let market = make_weather_market("Will the temperature in NYC exceed 100F this summer?");
         let exits = strategy.scan_exits(&[market]).await;
-        // best_bid 0.50 >= profit_take_threshold 0.45 → should trigger
-        assert_eq!(
-            exits.len(),
-            1,
-            "Profit-take exit should fire when best_bid >= 0.45"
-        );
+        assert_eq!(exits.len(), 1, "Relative stop-loss should trigger below 75% of cost");
         assert!(exits[0].question.contains("[EXIT]"));
     }
 
     #[tokio::test]
-    async fn test_profit_take_below_threshold() {
-        // Bought YES at 0.10, best_bid at 0.40 (< profit_take_threshold=0.45)
+    async fn test_relative_stop_loss_does_not_exit_above_threshold() {
+        // Bought YES at 0.40, best_bid at 0.32 (> avg_cost * 0.75 = 0.30)
         let token_id = U256::from(1u64);
         let mut books = HashMap::new();
         let mut book = make_weather_book(token_id, dec!(0.50));
         book.bids.clear();
         book.bids.push(PriceLevel {
-            price: dec!(0.40),
+            price: dec!(0.32),
             size: dec!(100),
         });
         books.insert(token_id, book);
@@ -6032,7 +6304,7 @@ mod tests {
             make_weather_book(U256::from(2u64), dec!(0.60)),
         );
 
-        let held = vec![(token_id, dec!(20), dec!(0.10))]; // bought at 0.10
+        let held = vec![(token_id, dec!(20), dec!(0.40))]; // bought at 0.40
         let strategy = make_weather_strategy(books, held);
 
         // Pre-populate cache so model reversal doesn't fire
@@ -6060,14 +6332,9 @@ mod tests {
 
         let market = make_weather_market(question);
         let exits = strategy.scan_exits(&[market]).await;
-        // best_bid 0.40 < profit_take_threshold 0.45 → should NOT trigger profit-take
-        // model_prob ≈ 1.0 (forecast 110 >> threshold 100), best_bid 0.40 → no model reversal
-        // avg_cost 0.10, best_bid 0.40 → not a deep loss
-        assert_eq!(
-            exits.len(),
-            0,
-            "Should not exit when best_bid < profit_take_threshold"
-        );
+        // model_prob ≈ 1.0 (forecast 110 >> threshold 100), best_bid 0.32 → no model reversal
+        // avg_cost 0.40, best_bid 0.32 → above relative stop-loss
+        assert_eq!(exits.len(), 0, "Should not exit while bid stays above relative stop-loss");
     }
 
     // ──── Target City Filter Tests ────

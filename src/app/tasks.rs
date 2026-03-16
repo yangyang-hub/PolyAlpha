@@ -13,20 +13,25 @@ use alloy::providers::ProviderBuilder;
 use alloy::signers::Signer as _;
 use alloy::signers::local::PrivateKeySigner;
 use arc_swap::ArcSwap;
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use tokio_util::sync::CancellationToken;
 
+use pa_core::config::{DatabaseConfig, WeatherConfig};
 use pa_core::traits::{Executor, MarketDataFeed, RiskManager as _};
 use pa_core::types::{MarketInfo, NegRiskEvent};
+use pa_core::weather::{WEATHER_LOCATIONS, WeatherProvider};
 use pa_execution::ctf_executor::CtfExecutor;
 use pa_execution::safe_redeemer::SafeRedeemer;
 use pa_market_data::cache::OrderBookCache;
 use pa_market_data::data_api::PositionLoader;
 use pa_market_data::service::MarketDataService;
 use pa_risk::manager::RiskManagerImpl;
+use pa_storage::models::WeatherForecastSnapshotRow;
+use pa_storage::repository::Repository;
+use pa_strategy::weather::{KmaClient, NoaaClient, OpenMeteoClient, WeatherMetric};
 
 use crate::app::helpers::{build_ws_token_list, infer_strategy_type, seed_market_cache};
 use crate::app::types::AccountContext;
@@ -183,6 +188,183 @@ pub fn spawn_positions_snapshot_refresh(
             }
         }
     });
+}
+
+pub fn spawn_weather_forecast_snapshot_refresh(
+    weather_config: WeatherConfig,
+    database_config: DatabaseConfig,
+    cancel: CancellationToken,
+) {
+    if database_config.url.trim().is_empty() {
+        tracing::info!("Weather forecast snapshot archive disabled — no database URL configured");
+        return;
+    }
+
+    tokio::spawn(async move {
+        let repo = match Repository::connect(&database_config.url, database_config.max_connections)
+            .await
+        {
+            Ok(repo) => repo,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Weather forecast snapshot archive disabled — failed to connect database"
+                );
+                return;
+            }
+        };
+        if let Err(e) = repo.migrate().await {
+            tracing::warn!(
+                error = %e,
+                "Weather forecast snapshot archive disabled — failed to apply migrations"
+            );
+            return;
+        }
+
+        let noaa = NoaaClient::new(&weather_config.noaa_user_agent);
+        let open_meteo = OpenMeteoClient::new();
+        let kma = KmaClient::new(&weather_config.kma_api_key);
+        let mut interval = tokio::time::interval(Duration::from_secs(1800));
+
+        loop {
+            let mut written = 0u32;
+            for location in WEATHER_LOCATIONS.iter().filter(|entry| !entry.trade_enabled) {
+                for metric in [
+                    WeatherMetric::TemperatureMax,
+                    WeatherMetric::TemperatureMin,
+                    WeatherMetric::TemperatureAvg,
+                ] {
+                    match fetch_snapshot_forecast(
+                        &noaa,
+                        &open_meteo,
+                        &kma,
+                        location.canonical_name,
+                        metric,
+                    )
+                    .await
+                    {
+                        Ok(snapshot) => {
+                            for row in snapshot_rows(
+                                location.provider,
+                                location.canonical_name,
+                                metric,
+                                &snapshot,
+                            ) {
+                                match repo.insert_weather_forecast_snapshot(&row).await {
+                                    Ok(()) => written += 1,
+                                    Err(e) => {
+                                        tracing::debug!(
+                                            location = location.canonical_name,
+                                            metric = weather_metric_name(metric),
+                                            error = %e,
+                                            "Failed to persist weather forecast snapshot"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                location = location.canonical_name,
+                                provider = weather_provider_name(location.provider),
+                                metric = weather_metric_name(metric),
+                                error = %e,
+                                "Weather snapshot refresh skipped"
+                            );
+                        }
+                    }
+                }
+            }
+
+            if written > 0 {
+                tracing::info!(rows = written, "Weather forecast snapshots archived");
+            }
+
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = interval.tick() => {}
+            }
+        }
+    });
+}
+
+fn weather_metric_name(metric: WeatherMetric) -> &'static str {
+    match metric {
+        WeatherMetric::TemperatureMax => "temp_max",
+        WeatherMetric::TemperatureMin => "temp_min",
+        WeatherMetric::TemperatureAvg => "temp_avg",
+        WeatherMetric::Rainfall => "rainfall",
+        WeatherMetric::Snowfall => "snowfall",
+        WeatherMetric::WindSpeed => "wind_speed",
+    }
+}
+
+fn weather_provider_name(provider: WeatherProvider) -> &'static str {
+    match provider {
+        WeatherProvider::Noaa => "noaa",
+        WeatherProvider::OpenMeteo => "open_meteo",
+        WeatherProvider::Kma => "kma",
+    }
+}
+
+async fn fetch_snapshot_forecast(
+    noaa: &NoaaClient,
+    open_meteo: &OpenMeteoClient,
+    kma: &KmaClient,
+    location: &str,
+    metric: WeatherMetric,
+) -> anyhow::Result<pa_strategy::weather::ForecastData> {
+    match pa_core::weather::weather_location(location)
+        .map(|entry| entry.provider)
+        .ok_or_else(|| anyhow::anyhow!("Unsupported weather snapshot location: {}", location))?
+    {
+        WeatherProvider::Noaa => {
+            let (lat, lon) = NoaaClient::geocode(location)?;
+            noaa.forecast(lat, lon, metric, None, "inch").await
+        }
+        WeatherProvider::OpenMeteo => {
+            let (lat, lon) = OpenMeteoClient::geocode(location)?;
+            open_meteo.forecast(lat, lon, location, metric, None, "inch").await
+        }
+        WeatherProvider::Kma => kma.forecast(location, metric, None, "inch").await,
+    }
+}
+
+fn snapshot_rows(
+    provider: WeatherProvider,
+    location: &str,
+    metric: WeatherMetric,
+    snapshot: &pa_strategy::weather::ForecastData,
+) -> Vec<WeatherForecastSnapshotRow> {
+    let recorded_at = Utc::now();
+    let provider = weather_provider_name(provider).to_string();
+    let location = location.to_string();
+    let metric_name = weather_metric_name(metric).to_string();
+    let values_json = serde_json::to_value(&snapshot.values).unwrap_or(serde_json::Value::Null);
+    let dates_json = serde_json::to_value(&snapshot.dates).unwrap_or(serde_json::Value::Null);
+
+    snapshot
+        .dates
+        .iter()
+        .zip(snapshot.values.iter())
+        .filter_map(|(date, value)| {
+            let target_date = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+            Some(WeatherForecastSnapshotRow {
+                id: 0,
+                provider: provider.clone(),
+                location: location.clone(),
+                metric: metric_name.clone(),
+                target_date,
+                recorded_at,
+                target_value: Some(*value),
+                mean: snapshot.mean,
+                std_dev: snapshot.std_dev,
+                model_spread: snapshot.model_spread,
+                values: values_json.clone(),
+                dates: dates_json.clone(),
+            })
+        })
+        .collect()
 }
 
 pub fn spawn_position_sync(

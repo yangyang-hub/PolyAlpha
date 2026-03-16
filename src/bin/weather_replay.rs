@@ -3,8 +3,10 @@ use chrono::NaiveDate;
 use clap::Parser;
 use serde::Serialize;
 
+use pa_core::config::Settings;
 use pa_core::weather::{WeatherProvider, weather_location};
-use pa_strategy::weather::{NoaaClient, OpenMeteoClient, WeatherMetric};
+use pa_storage::repository::Repository;
+use pa_strategy::weather::{KmaClient, NoaaClient, OpenMeteoClient, WeatherMetric};
 
 #[derive(Parser)]
 #[command(
@@ -53,8 +55,42 @@ fn delta(lhs: Option<f64>, rhs: Option<f64>) -> Option<f64> {
     Some(lhs? - rhs?)
 }
 
+async fn load_db_archived_target(
+    provider: WeatherProvider,
+    location: &str,
+    metric: WeatherMetric,
+    target_date: NaiveDate,
+) -> Option<f64> {
+    let settings = Settings::load().ok()?;
+    if settings.database.url.trim().is_empty() {
+        return None;
+    }
+    let repo = Repository::connect(&settings.database.url, 2).await.ok()?;
+    let _ = repo.migrate().await;
+    let provider = match provider {
+        WeatherProvider::Noaa => "noaa",
+        WeatherProvider::OpenMeteo => "open_meteo",
+        WeatherProvider::Kma => "kma",
+    };
+    let metric = match metric {
+        WeatherMetric::TemperatureMax => "temp_max",
+        WeatherMetric::TemperatureMin => "temp_min",
+        WeatherMetric::TemperatureAvg => "temp_avg",
+        WeatherMetric::Rainfall => "rainfall",
+        WeatherMetric::Snowfall => "snowfall",
+        WeatherMetric::WindSpeed => "wind_speed",
+    };
+    repo.load_latest_weather_forecast_snapshot(provider, location, metric, target_date)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|row| row.target_value)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
+
     let args = Args::parse();
     let target_date = NaiveDate::parse_from_str(&args.date, "%Y-%m-%d")
         .with_context(|| format!("invalid date: {}", args.date))?;
@@ -106,6 +142,8 @@ async fn main() -> Result<()> {
                 )
                 .await
                 .ok();
+            let db_archived_target =
+                load_db_archived_target(location.provider, location.canonical_name, metric, target_date).await;
             let historical_actual = client
                 .fetch_historical(
                     lat,
@@ -117,7 +155,48 @@ async fn main() -> Result<()> {
                 )
                 .await
                 .ok();
-            let archived_target = archived_forecast.as_ref().and_then(|f| f.target_value);
+            let archived_target = archived_forecast
+                .as_ref()
+                .and_then(|f| f.target_value)
+                .or(db_archived_target);
+
+            ReplayReport {
+                location: location.canonical_name.to_string(),
+                provider: format!("{:?}", location.provider),
+                trade_enabled: location.trade_enabled,
+                settlement_note: location.settlement_note.map(ToOwned::to_owned),
+                target_date: target_date.to_string(),
+                live_forecast_target_value: live.target_value,
+                historical_forecast_archive_target_value: archived_target,
+                historical_actual,
+                live_vs_archive_delta: delta(live.target_value, archived_target),
+                archive_vs_actual_delta: delta(archived_target, historical_actual),
+                live_vs_actual_delta: delta(live.target_value, historical_actual),
+            }
+        }
+        WeatherProvider::Kma => {
+            let client = KmaClient::new(
+                &std::env::var("PA_WEATHER__KMA_API_KEY")
+                    .or_else(|_| std::env::var("KMA_API_KEY"))
+                    .unwrap_or_default(),
+            );
+            let live = client
+                .forecast(location.canonical_name, metric, Some(target_date), "inch")
+                .await?;
+            let archived_forecast = client
+                .fetch_historical_forecast(location.canonical_name, metric, target_date, "inch")
+                .await
+                .ok();
+            let db_archived_target =
+                load_db_archived_target(location.provider, location.canonical_name, metric, target_date).await;
+            let historical_actual = client
+                .fetch_historical(location.canonical_name, metric, target_date, "inch")
+                .await
+                .ok();
+            let archived_target = archived_forecast
+                .as_ref()
+                .and_then(|f| f.target_value)
+                .or(db_archived_target);
 
             ReplayReport {
                 location: location.canonical_name.to_string(),

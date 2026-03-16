@@ -5,6 +5,7 @@ use rust_decimal::Decimal;
 
 use crate::models::{
     MarketRow, OpportunityRow, OrderBookSnapshotRow, PositionRow, TokenRow, TradeRow,
+    WeatherForecastSnapshotRow,
 };
 
 /// Repository for database operations.
@@ -245,5 +246,56 @@ impl Repository {
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected())
+    }
+
+    /// Insert a weather forecast snapshot row for later audit/replay.
+    pub async fn insert_weather_forecast_snapshot(
+        &self,
+        row: &WeatherForecastSnapshotRow,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"INSERT INTO weather_forecast_snapshots
+            (provider, location, metric, target_date, recorded_at, target_value, mean, std_dev, model_spread, values, dates)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+        )
+        .bind(&row.provider)
+        .bind(&row.location)
+        .bind(&row.metric)
+        .bind(row.target_date)
+        .bind(row.recorded_at)
+        .bind(row.target_value)
+        .bind(row.mean)
+        .bind(row.std_dev)
+        .bind(row.model_spread)
+        .bind(&row.values)
+        .bind(&row.dates)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Load the latest archived forecast snapshot for a provider/location/metric/date tuple.
+    pub async fn load_latest_weather_forecast_snapshot(
+        &self,
+        provider: &str,
+        location: &str,
+        metric: &str,
+        target_date: chrono::NaiveDate,
+    ) -> anyhow::Result<Option<WeatherForecastSnapshotRow>> {
+        let row = sqlx::query_as::<_, WeatherForecastSnapshotRow>(
+            r#"SELECT id, provider, location, metric, target_date, recorded_at, target_value,
+                      mean, std_dev, model_spread, values, dates
+            FROM weather_forecast_snapshots
+            WHERE provider = $1 AND location = $2 AND metric = $3 AND target_date = $4
+            ORDER BY recorded_at DESC
+            LIMIT 1"#,
+        )
+        .bind(provider)
+        .bind(location)
+        .bind(metric)
+        .bind(target_date)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
     }
 }

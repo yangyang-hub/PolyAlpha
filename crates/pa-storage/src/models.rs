@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -93,4 +94,21 @@ pub struct PnlLogRow {
     pub unrealized_pnl: Decimal,
     pub total_exposure: Decimal,
     pub usdc_balance: Decimal,
+}
+
+/// Database model for the `weather_forecast_snapshots` table.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct WeatherForecastSnapshotRow {
+    pub id: i64,
+    pub provider: String,
+    pub location: String,
+    pub metric: String,
+    pub target_date: NaiveDate,
+    pub recorded_at: DateTime<Utc>,
+    pub target_value: Option<f64>,
+    pub mean: f64,
+    pub std_dev: f64,
+    pub model_spread: f64,
+    pub values: serde_json::Value,
+    pub dates: serde_json::Value,
 }

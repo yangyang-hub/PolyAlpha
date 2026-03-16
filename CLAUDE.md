@@ -102,7 +102,7 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 
 `MarketFilterConfig` fields: `ws_max_instruments(500)`, `market_refresh_interval_secs(1800)`
 
-`WeatherConfig` fields: `min_edge_bps`, `max_spread_bps`, `max_position_pct`, `max_position_usdc(5.0)`, `kelly_fraction`, `forecast_error: ForecastErrorConfig`, `refresh_interval_secs(120)`, `dynamic_sigma(true)`, `forecast_change_detection(false)`, `forecast_change_threshold(0.35)`, `exit_buffer_bps(50)`, `capital_efficiency_threshold(0.98)`, `max_entry_price(0.30)`, `profit_take_threshold(0.38)`, `noaa_user_agent("PolyAlpha/1.0")`, `target_cities([])`
+`WeatherConfig` fields: `min_edge_bps`, `max_spread_bps`, `max_position_pct`, `max_position_usdc(4.0)`, `kelly_fraction`, `forecast_error: ForecastErrorConfig`, `refresh_interval_secs(120)`, `dynamic_sigma(true)`, `forecast_change_detection(false)`, `forecast_change_threshold(0.35)`, `exit_buffer_bps(50)`, `capital_efficiency_threshold(0.98)`, `max_entry_price(0.35)`, `relative_stop_loss_ratio(0.80)`, `noaa_user_agent("PolyAlpha/1.0")`, `kma_api_key("")`, `target_cities([])`
 
 `ForecastErrorConfig` — 每指标预报误差σ: `temperature_sigma_f(3.0°F)`, `precipitation_sigma_in(0.3in)`, `snowfall_sigma_in(2.0in)`, `wind_sigma_mph(5.0mph)`
 
@@ -164,7 +164,7 @@ pa-core + pa-market-data + pa-strategy + pa-risk + pa-storage ← pa-backtest
 **共通逻辑**：
 - 仓位控制: 固定上限 `max_position_usdc`（默认 $5）+ position-aware sizing（减去已有仓位成本）
 - 入场过滤: `max_entry_price`（默认 0.30）— 允许中低价 token，而不只限极端长赔率
-- 止盈退出: `profit_take_threshold`（默认 0.38）— 价格涨到阈值以上自动卖出
+- 相对止损退出: `relative_stop_loss_ratio`（默认 0.80）— `best_bid < avg_cost × ratio` 时自动卖出
 - 目标城市: `target_cities` 过滤，仅扫描配置的美国城市（支持别名: NYC→New York, LA→Los Angeles）
 - 执行: CLOB FOK 单边买入（`DirectionalBuy`），无链上操作
 - API: NOAA 两步查询 — `/points/{lat},{lon}` 获取网格点 → `/gridpoints/{office}/{x},{y}` 获取预报
@@ -355,7 +355,7 @@ Polymarket CLOB 要求 maker_amount (USDC cost) 最多 2dp 精度，且最低可
 ### 万能止损安全网
 
 - 在策略扫描之后运行，检查**所有**持仓（无论 strategy_type）
-- 触发条件: best_bid < avg_cost × 50%（亏损 >= 50%）
+- 触发条件: best_bid < avg_cost × relative_stop_loss_ratio
 - 安全检查 (防误杀):
   1. best_ask >= avg_cost → 市场仍看好此 token，不卖
   2. 过期市场 → 跳过（让自动赎回处理）

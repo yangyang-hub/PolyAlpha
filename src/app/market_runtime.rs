@@ -175,6 +175,12 @@ pub fn spawn_shared_runtime_tasks(
         cancel.clone(),
     );
 
+    crate::app::tasks::spawn_weather_forecast_snapshot_refresh(
+        settings.weather.clone(),
+        settings.database.clone(),
+        cancel.clone(),
+    );
+
     let refresh_interval = settings.market_filter.market_refresh_interval_secs;
     if refresh_interval > 0 {
         let refresh_risk_managers = account_contexts

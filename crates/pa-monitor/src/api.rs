@@ -218,6 +218,7 @@ async fn get_section_meta(Path(section): Path<String>) -> (axum::http::StatusCod
                     let provider = match location.provider {
                         pa_core::weather::WeatherProvider::Noaa => "noaa",
                         pa_core::weather::WeatherProvider::OpenMeteo => "open_meteo",
+                        pa_core::weather::WeatherProvider::Kma => "kma",
                     };
                     Some((*city, provider))
                 })

@@ -82,6 +82,46 @@ This file records repository-specific working agreements, high-level project con
 
 ## Change Log
 
+### 2026-03-16
+- Area: `crates/pa-market-data/src/ws_feed.rs`
+- Change: Stopped the WebSocket feed from flipping out of the "awaiting first message" state after only a 15-second no-data warning, so the 60-second stale watchdog now starts only after a real order-book message is received.
+- Why: Quiet subscriptions or slow first packets were being misclassified as stale disconnected sockets, causing reconnect loops even when the underlying stream had not emitted an actual error.
+
+### 2026-03-15
+- Area: `src/app/tasks.rs`
+- Change: Changed the weather forecast snapshot archiver to run one snapshot pass immediately at startup before entering the 30-minute interval loop.
+- Why: Seoul/London audit replay should have archived forecast data available right after a restart instead of waiting for the first periodic tick.
+
+### 2026-03-15
+- Area: `migrations/009_create_weather_forecast_snapshots.sql`, `crates/pa-storage/src/models.rs`, `crates/pa-storage/src/repository.rs`, `src/app/tasks.rs`, `src/app/market_runtime.rs`, `src/bin/weather_replay.rs`
+- Change: Added a PostgreSQL-backed `weather_forecast_snapshots` archive table plus repository read/write methods, started a shared runtime task that periodically snapshots forecast curves for audit-only weather cities into the database, and taught `weather_replay` to read the latest archived forecast target from PostgreSQL for replay output.
+- Why: KMA does not currently expose a clear historical forecast archive API, so Seoul and other audit-only cities need a locally persisted forecast snapshot path to support later archive-vs-actual replay and settlement-audit workflows.
+
+### 2026-03-15
+- Area: `crates/pa-core/src/weather.rs`, `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/weather.rs`, `src/bin/weather_replay.rs`, `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/components/ConfigSection.tsx`, `.env.example`, `README.md`, `CLAUDE.md`
+- Change: Switched Seoul from `OpenMeteo` to a new `Kma` provider, added shared KMA grid/station metadata plus `kma_api_key` config, implemented KMA short-range forecast routing for Seoul, surfaced KMA in replay/API/frontend metadata, and documented the new audit-only Seoul key path.
+- Why: Seoul needs a more trustworthy official forecast source before any future trading enablement, and KMA is the right upstream source for that audit path.
+
+### 2026-03-15
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Added a KMA TMP-series fallback for Seoul so daily max/min forecast values are synthesized from intraday temperature points when `TMX/TMN` are missing for the current day, with focused unit coverage.
+- Why: KMA short-range forecast responses can omit same-day daily extrema even when intraday temperature points are available, and replay/audit output should still return a useful Seoul target value in that case.
+
+### 2026-03-15
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Wired Seoul/KMA historical actuals through `SfcMtlyInfoService/getDailyWthrData`, parsing published monthly daily station records for temperature max/min/avg while keeping unpublished months as explicit no-data errors.
+- Why: Seoul replay and audit flows need a real historical actual path once the KMA monthly daily-weather API has been authorized, otherwise past-date verification stays stuck at `None`.
+
+### 2026-03-15
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `crates/pa-strategy/src/weather.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`, `CLAUDE.md`
+- Change: Removed the fixed absolute weather profit-take threshold, added a configurable `relative_stop_loss_ratio`, switched weather exits to use capital-efficiency + relative stop-loss + model-reversal only, and updated regression tests plus operator-facing labels/docs.
+- Why: Recent weather trades were churning around the absolute `profit_take_threshold`, so exits needed to depend on position-relative downside protection instead of a hardcoded price take-profit rule.
+
+### 2026-03-15
+- Area: `config/default.toml`, `crates/pa-core/src/config.rs`, `README.md`, `CLAUDE.md`
+- Change: Tightened the default weather risk profile by raising `relative_stop_loss_ratio` to `0.80` and lowering `max_position_usdc` to `4.0`.
+- Why: Recent weather trades showed repeated churn and avoidable drawdowns in narrow temperature bins, so the default profile should cut losing positions sooner and size them more conservatively.
+
 ### 2026-03-13
 - Area: `docs/weather-settlement-validation-plan.md`
 - Change: Added a phased implementation plan for promoting remaining trade-enabled weather cities from `DefaultProtected` to `Validated`, including verification criteria, rollout batches, and required metadata/documentation updates.

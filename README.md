@@ -76,7 +76,7 @@ Polymarket 量化方向性 Alpha 交易机器人，基于 Rust 构建。
 6. **深度验证** — 按比例缩小或拒绝深度不足的机会
 7. **执行** — CLOB API FOK/GTC 订单
 8. **模型退出** — 方向性策略检测模型反转或资金效率信号时自动卖出
-9. **止损安全网** — 扫描所有持仓，亏损 >= 50% 时强制退出
+9. **止损安全网** — 扫描所有持仓，跌破相对止损阈值时强制退出
 10. **自动赎回** — 已解决市场的 winning tokens 通过 GnosisSafe 自动赎回
 11. **仓位同步** — 每 5 分钟与 Data API 对账，处理外部变化
 12. **监控** — 22 个 Prometheus 指标 + Grafana 18 面板仪表盘
@@ -91,11 +91,14 @@ Polymarket 采用封顶手续费模型：`fee = min(fee_rate × price, price × 
 
 ### 1. Weather Alpha（天气 Alpha）
 
-利用 Open-Meteo 免费天气预报 API 为 Polymarket 上的天气相关市场定价。
+利用 provider-aware 天气数据源为 Polymarket 上的天气相关市场定价：
+- 美国可交易城市走 NOAA
+- 伦敦审计路径走 Open-Meteo
+- 首尔审计路径已升级为 KMA
 
 **二元市场模式** — 单一阈值问题（如 "温度会超过 100°F 吗？"）：
 - 关键词匹配识别天气市场（temperature, rainfall, snowfall, wind）
-- 解析目标日期 → 获取 Open-Meteo 预报 → 分布 CDF 概率模型
+- 解析目标日期 → 获取城市对应天气源预报 → 分布 CDF 概率模型
 - 温度用正态分布，降水用对数正态分布，风速用 Weibull 分布
 - 包含预报误差模型（`ForecastErrorConfig` 每指标独立 sigma）
 
@@ -178,7 +181,7 @@ Polymarket 采用封顶手续费模型：`fee = min(fee_rate × price, price × 
 
 在策略扫描之后运行，检查**所有**持仓：
 
-1. **触发条件**: best_bid < avg_cost × 50%
+1. **触发条件**: best_bid < avg_cost × relative_stop_loss_ratio
 2. **安全检查**:
    - best_ask >= avg_cost 且价差合理 → 不卖（市场仍看好）
    - 过期市场 bid >= $0.10 → 跳过（让自动赎回处理）
@@ -375,7 +378,7 @@ market_refresh_interval_secs = 1800
 [weather]
 min_edge_bps = 600
 max_spread_bps = 1500
-max_position_usdc = 5.0
+max_position_usdc = 4.0
 kelly_fraction = 0.25
 dynamic_sigma = true
 forecast_change_detection = false
