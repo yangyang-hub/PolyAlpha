@@ -21,6 +21,7 @@ export interface StatusResponse {
   accounts_configured: number;
   accounts_ready: number;
   trading_ready: boolean;
+  weather_entry_window_open: boolean;
   wallet_balance: string;
   positions_snapshot_updated_at: string | null;
   accounts: AccountStatusEntry[];

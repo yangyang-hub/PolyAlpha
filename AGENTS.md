@@ -82,6 +82,26 @@ This file records repository-specific working agreements, high-level project con
 
 ## Change Log
 
+### 2026-03-17
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Restricted new weather buy scanning to the `UTC+8 00:00-08:00` window by gating binary, NegRisk, stale-liquidity, and surround entry generation behind a shared time-window check while leaving exit scanning active at all times, and added focused regression coverage for the UTC-to-UTC+8 hour mapping.
+- Why: Recent live observations showed the highest weather-market win rate during the UTC+8 midnight-to-morning session, so new weather entries should be concentrated into that operator-selected time window without delaying risk-reducing exits.
+
+### 2026-03-17
+- Area: `frontend/src/pages/WeatherStrategy.tsx`, `frontend/src/components/ConfigSection.tsx`
+- Change: Added explicit frontend copy showing that new weather buys are only generated during the `UTC+8 00:00-08:00` window, both on the weather strategy page and in the read-only weather config hints.
+- Why: Once the entry window became strategy behavior rather than just an implementation detail, operators need the UI to explain why new weather opportunities disappear outside that session instead of inferring it from logs.
+
+### 2026-03-17
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/WeatherStrategy.tsx`
+- Change: Added a runtime `weather_entry_window_open` field to `/api/status` and surfaced it in the weather page's run-context card so operators can see whether the current moment is inside the `UTC+8 00:00-08:00` weather entry window.
+- Why: Static UI copy explains the configured trading window, but operators also need live status to distinguish “no opportunities” from “entry window currently closed”.
+
+### 2026-03-17
+- Area: `crates/pa-core/src/weather.rs`, `crates/pa-strategy/src/weather.rs`, `crates/pa-monitor/src/api.rs`
+- Change: Moved the `UTC+8 00:00-08:00` weather entry-window rule into shared weather metadata helpers and switched both the strategy layer and `/api/status` to reuse that single implementation, with the canonical regression test living in `pa-core`.
+- Why: The strategy and monitoring API had drift-prone duplicate copies of the same time-window rule, so the weather entry session should be defined once and consumed everywhere.
+
 ### 2026-03-16
 - Area: `yangyang_resume.md`
 - Change: Replaced the resume's `StoryChain` project section with a `PolyAlpha` project entry focused on Rust-based quantitative trading, strategy/risk infrastructure, Polymarket integration, and monitoring/observability.

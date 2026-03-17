@@ -1,3 +1,5 @@
+use chrono::{DateTime, FixedOffset, Timelike, Utc};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeatherProvider {
     Noaa,
@@ -489,6 +491,16 @@ pub fn weather_kma_station_id(location: &str) -> Option<u32> {
     }
 }
 
+pub fn weather_entry_window_open_at(now_utc: DateTime<Utc>) -> bool {
+    let utc_plus_8 = FixedOffset::east_opt(8 * 3600).expect("valid UTC+8 offset");
+    let local_hour = now_utc.with_timezone(&utc_plus_8).hour();
+    local_hour < 8
+}
+
+pub fn weather_entry_window_open_now() -> bool {
+    weather_entry_window_open_at(Utc::now())
+}
+
 pub fn normalize_noaa_location_name(location: &str) -> Option<&'static str> {
     let normalized = normalize_weather_location_name(location)?;
     weather_location(normalized)
@@ -634,5 +646,22 @@ mod tests {
     fn test_settlement_extra_edge_bps_for_location_uses_aliases() {
         assert_eq!(settlement_extra_edge_bps_for_location("NYC"), 0);
         assert_eq!(settlement_extra_edge_bps_for_location("SF"), 150);
+    }
+
+    #[test]
+    fn test_weather_entry_window_uses_utc_plus_8_hours() {
+        let inside = DateTime::parse_from_rfc3339("2026-03-16T16:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let outside = DateTime::parse_from_rfc3339("2026-03-16T00:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let boundary = DateTime::parse_from_rfc3339("2026-03-17T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert!(weather_entry_window_open_at(inside));
+        assert!(!weather_entry_window_open_at(outside));
+        assert!(!weather_entry_window_open_at(boundary));
     }
 }

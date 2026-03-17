@@ -99,6 +99,20 @@ export default function WeatherStrategy() {
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">天气策略</h1>
 
+      <div className="card bg-base-200 shadow-sm">
+        <div className="card-body p-4">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="card-title text-base">交易窗口</h2>
+            <span className="badge badge-outline">UTC+8</span>
+          </div>
+          <div className="text-sm leading-6 opacity-80">
+            新的天气买入机会当前只会在 <span className="font-semibold">UTC+8 00:00-08:00</span> 生成。
+            这条限制覆盖 binary、NegRisk、stale-liquidity 和 surround 的新买入扫描；
+            已有持仓的退出检查仍然全天运行。
+          </div>
+        </div>
+      </div>
+
       {/* Account-level overview */}
       {metrics && (() => {
         const cash = metrics.get("usdc_balance") ?? 0;
@@ -147,10 +161,16 @@ export default function WeatherStrategy() {
               <h2 className="card-title text-base">运行上下文</h2>
               <span className="text-xs opacity-60">用于解释钱包口径和持仓快照来源</span>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-sm">
               <div>
                 <div className="opacity-60 text-xs">持仓快照更新时间</div>
                 <div>{status.positions_snapshot_updated_at ? new Date(status.positions_snapshot_updated_at).toLocaleString("zh-CN") : "-"}</div>
+              </div>
+              <div>
+                <div className="opacity-60 text-xs">当前开仓窗口</div>
+                <div className={status.weather_entry_window_open ? "text-success" : "text-warning"}>
+                  {status.weather_entry_window_open ? "开放（UTC+8 00:00-08:00）" : "关闭"}
+                </div>
               </div>
               <div>
                 <div className="opacity-60 text-xs">账户</div>

@@ -21,8 +21,8 @@ use pa_core::weather::{
     NOAA_SUPPORTED_LOCATIONS, SettlementValidationStatus, WeatherProvider,
     normalize_noaa_location_name, settlement_extra_edge_bps_for_location,
     settlement_risk_tier, settlement_validation_status,
-    settlement_sigma_multiplier_for_location, weather_kma_grid, weather_kma_station_id,
-    weather_location, weather_observation_site_hint, weather_timezone,
+    settlement_sigma_multiplier_for_location, weather_entry_window_open_now, weather_kma_grid,
+    weather_kma_station_id, weather_location, weather_observation_site_hint, weather_timezone,
 };
 
 use crate::profitability::ProfitCalculator;
@@ -4185,60 +4185,43 @@ impl Strategy for WeatherAlphaStrategy {
             .scan_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let log_diag = count.is_multiple_of(600);
+        let entry_window_open = weather_entry_window_open_now();
 
         let mut binary_weather = 0u32;
         let mut neg_risk_weather = 0u32;
         let mut best_by_event: HashMap<String, TradingOpportunity> = HashMap::new();
 
-        // 1. Collect binary weather markets, filtered by target cities
-        let mut binary_candidates: Vec<(&MarketInfo, WeatherQuestion)> = Vec::new();
-        for market in markets {
-            if !market.active || market.neg_risk {
-                continue;
-            }
-
-            let parsed = match parse_weather_question(&market.question) {
-                Some(p) => p,
-                None => continue, // Not a weather market
-            };
-
-            // Filter by target cities
-            if !self.is_target_city(&parsed.location) {
-                continue;
-            }
-
-            binary_weather += 1;
-            binary_candidates.push((market, parsed));
-        }
-
-        // Scan binary weather markets
-        for (market, parsed) in binary_candidates {
-            if let Some(opp) = self.detect_weather_opportunity(market, &parsed).await {
-                let target_date = parse_target_date_with_today(
-                    &market.question,
-                    market_local_today(&parsed.location),
-                );
-                let event_key =
-                    Self::weather_event_key(&parsed.location, parsed.metric, target_date);
-                match best_by_event.get(&event_key) {
-                    Some(existing) if existing.estimated_profit >= opp.estimated_profit => {}
-                    _ => {
-                        best_by_event.insert(event_key, opp);
-                    }
-                }
-            }
-        }
-
-        // 2. Scan NegRisk weather events (filtered by target cities)
-        for event in &self.neg_risk_events {
-            if let Some((metric, location)) = parse_weather_event_title(&event.title) {
-                if !self.is_target_city(&location) {
+        if entry_window_open {
+            // 1. Collect binary weather markets, filtered by target cities
+            let mut binary_candidates: Vec<(&MarketInfo, WeatherQuestion)> = Vec::new();
+            for market in markets {
+                if !market.active || market.neg_risk {
                     continue;
                 }
-                neg_risk_weather += 1;
-                let target_date = parse_target_date_with_today(&event.title, market_local_today(&location));
-                let event_key = Self::weather_event_key(&location, metric, target_date);
-                if let Some(opp) = self.detect_neg_risk_weather(event, metric, &location).await {
+
+                let parsed = match parse_weather_question(&market.question) {
+                    Some(p) => p,
+                    None => continue, // Not a weather market
+                };
+
+                // Filter by target cities
+                if !self.is_target_city(&parsed.location) {
+                    continue;
+                }
+
+                binary_weather += 1;
+                binary_candidates.push((market, parsed));
+            }
+
+            // Scan binary weather markets
+            for (market, parsed) in binary_candidates {
+                if let Some(opp) = self.detect_weather_opportunity(market, &parsed).await {
+                    let target_date = parse_target_date_with_today(
+                        &market.question,
+                        market_local_today(&parsed.location),
+                    );
+                    let event_key =
+                        Self::weather_event_key(&parsed.location, parsed.metric, target_date);
                     match best_by_event.get(&event_key) {
                         Some(existing) if existing.estimated_profit >= opp.estimated_profit => {}
                         _ => {
@@ -4247,48 +4230,74 @@ impl Strategy for WeatherAlphaStrategy {
                     }
                 }
             }
-        }
 
-        opportunities.extend(best_by_event.into_values());
+            // 2. Scan NegRisk weather events (filtered by target cities)
+            for event in &self.neg_risk_events {
+                if let Some((metric, location)) = parse_weather_event_title(&event.title) {
+                    if !self.is_target_city(&location) {
+                        continue;
+                    }
+                    neg_risk_weather += 1;
+                    let target_date =
+                        parse_target_date_with_today(&event.title, market_local_today(&location));
+                    let event_key = Self::weather_event_key(&location, metric, target_date);
+                    if let Some(opp) = self.detect_neg_risk_weather(event, metric, &location).await
+                    {
+                        match best_by_event.get(&event_key) {
+                            Some(existing) if existing.estimated_profit >= opp.estimated_profit => {
+                            }
+                            _ => {
+                                best_by_event.insert(event_key, opp);
+                            }
+                        }
+                    }
+                }
+            }
+
+            opportunities.extend(best_by_event.into_values());
+        }
 
         if log_diag {
             tracing::debug!(
                 total_events = self.neg_risk_events.len(),
                 binary_weather,
                 neg_risk_weather,
+                entry_window_open,
                 opportunities = opportunities.len(),
                 "[Weather] scan diagnostics"
             );
         }
 
-        // 3. Stale liquidity detection: scan past-date markets with confirmed outcomes
-        let stale_opps = self.scan_stale_liquidity(markets).await;
-        if !stale_opps.is_empty() {
-            tracing::info!(
-                count = stale_opps.len(),
-                "[Weather] Stale liquidity opportunities detected"
-            );
-        }
-        opportunities.extend(stale_opps);
+        if entry_window_open {
+            // 3. Stale liquidity detection: scan past-date markets with confirmed outcomes
+            let stale_opps = self.scan_stale_liquidity(markets).await;
+            if !stale_opps.is_empty() {
+                tracing::info!(
+                    count = stale_opps.len(),
+                    "[Weather] Stale liquidity opportunities detected"
+                );
+            }
+            opportunities.extend(stale_opps);
 
-        // 4. NegRisk surround strategy: buy peak + adjacent bins in early game
-        let mut surround_count = 0u32;
-        for event in &self.neg_risk_events {
-            if let Some((metric, location)) = parse_weather_event_title(&event.title) {
-                if !self.is_target_city(&location) {
-                    continue;
-                }
-                let opps = self
-                    .detect_neg_risk_surround(event, metric, &location)
-                    .await;
-                if !opps.is_empty() {
-                    surround_count += opps.len() as u32;
-                    opportunities.extend(opps);
+            // 4. NegRisk surround strategy: buy peak + adjacent bins in early game
+            let mut surround_count = 0u32;
+            for event in &self.neg_risk_events {
+                if let Some((metric, location)) = parse_weather_event_title(&event.title) {
+                    if !self.is_target_city(&location) {
+                        continue;
+                    }
+                    let opps = self
+                        .detect_neg_risk_surround(event, metric, &location)
+                        .await;
+                    if !opps.is_empty() {
+                        surround_count += opps.len() as u32;
+                        opportunities.extend(opps);
+                    }
                 }
             }
-        }
-        if log_diag && surround_count > 0 {
-            tracing::debug!(surround_count, "[Weather] NegRisk surround opportunities");
+            if log_diag && surround_count > 0 {
+                tracing::debug!(surround_count, "[Weather] NegRisk surround opportunities");
+            }
         }
 
         // Exit scanning: check held positions for model reversal / capital efficiency
