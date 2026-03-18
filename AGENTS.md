@@ -82,6 +82,11 @@ This file records repository-specific working agreements, high-level project con
 
 ## Change Log
 
+### 2026-03-18
+- Area: `crates/pa-strategy/src/engine.rs`, `crates/pa-strategy/src/weather.rs`
+- Change: Added a shared weather-event-key helper for opportunity questions and taught the strategy engine to process weather entry candidates per event in profit order, falling back to the next candidate when the current best candidate fails pre-execution validation (depth/freshness/budget) instead of dropping the whole event for that scan; added focused engine regression coverage for the fallback path.
+- Why: Same-event weather dedupe was correctly avoiding duplicate entries, but a single thin-book or stale best bin could still suppress a tradable second-choice bin in the same scan, which was wasting valid weather opportunities.
+
 ### 2026-03-17
 - Area: `crates/pa-strategy/src/weather.rs`
 - Change: Restricted new weather buy scanning to the `UTC+8 00:00-08:00` window by gating binary, NegRisk, stale-liquidity, and surround entry generation behind a shared time-window check while leaving exit scanning active at all times, and added focused regression coverage for the UTC-to-UTC+8 hour mapping.

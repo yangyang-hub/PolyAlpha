@@ -1,4 +1,5 @@
 use crate::profitability::ProfitCalculator;
+use crate::weather::weather_event_key_for_opportunity_question;
 use alloy::primitives::{B256, U256};
 use chrono::{TimeDelta, Utc};
 use pa_core::traits::{Executor, RiskManager, Strategy};
@@ -542,6 +543,12 @@ impl StrategyEngine {
                             "Strategy scan found opportunities"
                         );
                     }
+                    if strategy.strategy_type() == StrategyType::Weather {
+                        self.process_weather_opportunities(opportunities, markets, &mut budget_remaining)
+                            .await;
+                        continue;
+                    }
+
                     for opp in opportunities {
                         // Check execution pause inside opportunity loop too —
                         // a balance/allowance failure on opp N should stop opp N+1
@@ -557,65 +564,7 @@ impl StrategyEngine {
                             continue;
                         }
 
-                        // Apply event calendar position filter
-                        let opp = if let Some(ref ec) = self.event_calendar {
-                            let multiplier =
-                                ec.position_multiplier(&opp.question, Utc::now()).await;
-                            if multiplier < Decimal::ONE {
-                                tracing::debug!(
-                                    id = %opp.id, multiplier = %multiplier,
-                                    "Event calendar reducing position"
-                                );
-                                let mut scaled = opp;
-                                scaled.size = (scaled.size * multiplier).round_dp(2);
-                                scaled.estimated_profit =
-                                    (scaled.estimated_profit * multiplier).round_dp(4);
-                                scale_execution_plan_size(&mut scaled.execution_plan, multiplier);
-                                pa_monitor::metrics::EVENT_FILTER_APPLIED.inc();
-                                scaled
-                            } else {
-                                opp
-                            }
-                        } else {
-                            opp
-                        };
-
-                        // Validate order book depth (may scale or reject)
-                        let opp = match self.validate_depth(&opp) {
-                            Some(validated) => validated,
-                            None => {
-                                self.set_cooldown(opp.condition_id, opp.strategy_type, 60);
-                                continue;
-                            }
-                        };
-
-                        let opp = match self.validate_execution_freshness(&opp, markets) {
-                            Some(validated) => validated,
-                            None => {
-                                self.set_cooldown(opp.condition_id, opp.strategy_type, 30);
-                                continue;
-                            }
-                        };
-
-                        // Budget guard: skip if estimated cost exceeds remaining budget.
-                        // Exit orders bypass this — selling held positions doesn't cost USDC.
-                        let cost = opp.execution_plan.estimated_cost();
-                        if !opp.execution_plan.is_exit() && cost > Decimal::ZERO {
-                            if cost > budget_remaining {
-                                tracing::debug!(
-                                    id = %opp.id,
-                                    cost = %cost,
-                                    budget_remaining = %budget_remaining,
-                                    "Skipping — budget exhausted for this cycle"
-                                );
-                                self.set_cooldown(opp.condition_id, opp.strategy_type, 120);
-                                continue;
-                            }
-                            // Deduct budget before execution (conservative: assume it will fill).
-                            budget_remaining -= cost;
-                        }
-
-                        self.process_opportunity(&opp).await;
+                        self.handle_opportunity(opp, markets, &mut budget_remaining).await;
                     }
                 }
                 Err(e) => {
@@ -635,6 +584,131 @@ impl StrategyEngine {
         self.scan_stop_loss(markets).await;
 
         timer.observe_duration();
+    }
+
+    async fn process_weather_opportunities(
+        &self,
+        opportunities: Vec<TradingOpportunity>,
+        markets: &[MarketInfo],
+        budget_remaining: &mut Decimal,
+    ) {
+        let mut passthrough = Vec::new();
+        let mut by_event: HashMap<String, Vec<TradingOpportunity>> = HashMap::new();
+
+        for opp in opportunities {
+            if opp.execution_plan.is_exit() {
+                passthrough.push(opp);
+                continue;
+            }
+
+            match weather_event_key_for_opportunity_question(&opp.question) {
+                Some(event_key) => by_event.entry(event_key).or_default().push(opp),
+                None => passthrough.push(opp),
+            }
+        }
+
+        for opp in passthrough {
+            if Instant::now() < *self.execution_paused_until.lock().unwrap() {
+                break;
+            }
+            self.handle_opportunity(opp, markets, budget_remaining).await;
+        }
+
+        let mut groups: Vec<Vec<TradingOpportunity>> = by_event
+            .into_values()
+            .map(|mut candidates| {
+                candidates.sort_by(|a, b| b.estimated_profit.cmp(&a.estimated_profit));
+                candidates
+            })
+            .collect();
+        groups.sort_by(|a, b| {
+            let a_profit = a.first().map(|opp| opp.estimated_profit).unwrap_or(Decimal::ZERO);
+            let b_profit = b.first().map(|opp| opp.estimated_profit).unwrap_or(Decimal::ZERO);
+            b_profit.cmp(&a_profit)
+        });
+
+        for candidates in groups {
+            if Instant::now() < *self.execution_paused_until.lock().unwrap() {
+                break;
+            }
+
+            for opp in candidates {
+                if self.handle_opportunity(opp, markets, budget_remaining).await {
+                    break;
+                }
+            }
+        }
+    }
+
+    async fn handle_opportunity(
+        &self,
+        opp: TradingOpportunity,
+        markets: &[MarketInfo],
+        budget_remaining: &mut Decimal,
+    ) -> bool {
+        // Skip cooled-down opportunities (prevents retry flooding)
+        if self.is_cooled_down(opp.condition_id, opp.strategy_type) {
+            return false;
+        }
+
+        // Apply event calendar position filter
+        let opp = if let Some(ref ec) = self.event_calendar {
+            let multiplier = ec.position_multiplier(&opp.question, Utc::now()).await;
+            if multiplier < Decimal::ONE {
+                tracing::debug!(
+                    id = %opp.id, multiplier = %multiplier,
+                    "Event calendar reducing position"
+                );
+                let mut scaled = opp;
+                scaled.size = (scaled.size * multiplier).round_dp(2);
+                scaled.estimated_profit = (scaled.estimated_profit * multiplier).round_dp(4);
+                scale_execution_plan_size(&mut scaled.execution_plan, multiplier);
+                pa_monitor::metrics::EVENT_FILTER_APPLIED.inc();
+                scaled
+            } else {
+                opp
+            }
+        } else {
+            opp
+        };
+
+        // Validate order book depth (may scale or reject)
+        let opp = match self.validate_depth(&opp) {
+            Some(validated) => validated,
+            None => {
+                self.set_cooldown(opp.condition_id, opp.strategy_type, 60);
+                return false;
+            }
+        };
+
+        let opp = match self.validate_execution_freshness(&opp, markets) {
+            Some(validated) => validated,
+            None => {
+                self.set_cooldown(opp.condition_id, opp.strategy_type, 30);
+                return false;
+            }
+        };
+
+        // Budget guard: skip if estimated cost exceeds remaining budget.
+        // Exit orders bypass this — selling held positions doesn't cost USDC.
+        let cost = opp.execution_plan.estimated_cost();
+        if !opp.execution_plan.is_exit() && cost > Decimal::ZERO {
+            if cost > *budget_remaining {
+                tracing::debug!(
+                    id = %opp.id,
+                    cost = %cost,
+                    budget_remaining = %budget_remaining,
+                    "Skipping — budget exhausted for this cycle"
+                );
+                self.set_cooldown(opp.condition_id, opp.strategy_type, 120);
+                return false;
+            }
+            // Deduct budget before execution (conservative: assume it will fill).
+            *budget_remaining -= cost;
+        }
+
+        self.process_opportunity(&opp).await;
+        true
     }
 
     async fn process_opportunity(&self, opp: &TradingOpportunity) {
@@ -1206,6 +1280,7 @@ mod tests {
     use super::*;
     use alloy::primitives::B256;
     use async_trait::async_trait;
+    use std::sync::Mutex as StdMutex;
     use pa_core::types::{
         ExecutionResult, ExecutionStatus, OrderBook, PriceLevel, TradeRecord, TxType,
     };
@@ -1253,6 +1328,53 @@ mod tests {
                     tx_type: TxType::ClobOrder,
                     tx_hash: None,
                 }],
+                realized_profit: Decimal::ZERO,
+                total_fees: Decimal::ZERO,
+                total_gas: Decimal::ZERO,
+                executed_at: Utc::now(),
+            })
+        }
+
+        async fn cancel_all(&self) -> pa_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FixedStrategy {
+        opps: Vec<TradingOpportunity>,
+    }
+
+    #[async_trait]
+    impl Strategy for FixedStrategy {
+        fn name(&self) -> &str {
+            "fixed"
+        }
+
+        fn strategy_type(&self) -> StrategyType {
+            StrategyType::Weather
+        }
+
+        async fn scan(&self, _markets: &[MarketInfo]) -> pa_core::Result<Vec<TradingOpportunity>> {
+            Ok(self.opps.clone())
+        }
+    }
+
+    struct RecordingExecutor {
+        executed_questions: Arc<StdMutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Executor for RecordingExecutor {
+        async fn execute(&self, opportunity: &TradingOpportunity) -> pa_core::Result<ExecutionResult> {
+            self.executed_questions
+                .lock()
+                .unwrap()
+                .push(opportunity.question.clone());
+            Ok(ExecutionResult {
+                opportunity_id: opportunity.id,
+                strategy_type: opportunity.strategy_type,
+                status: ExecutionStatus::Success,
+                trades: vec![],
                 realized_profit: Decimal::ZERO,
                 total_fees: Decimal::ZERO,
                 total_gas: Decimal::ZERO,
@@ -1350,6 +1472,32 @@ mod tests {
         }
     }
 
+    fn make_weather_entry_opp(
+        question: &str,
+        token_id: u64,
+        price: Decimal,
+        size: Decimal,
+        estimated_profit: Decimal,
+    ) -> TradingOpportunity {
+        TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::Weather,
+            condition_id: B256::from([token_id as u8; 32]),
+            question: question.into(),
+            spread: dec!(0.10),
+            estimated_profit,
+            size,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(token_id),
+                side: TradeSide::Buy,
+                price,
+                size,
+                condition_id: B256::from([token_id as u8; 32]),
+            },
+        }
+    }
+
     #[test]
     fn test_validate_execution_freshness_rejects_buy_if_ask_moved_above_limit() {
         let engine = make_engine(HashMap::from([(
@@ -1426,5 +1574,69 @@ mod tests {
 
         let opp = make_opp(TradeSide::Sell, dec!(0.999), dec!(0.00966));
         assert!(engine.validate_execution_freshness(&opp, &[]).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_weather_event_falls_back_to_second_candidate_when_best_freshness_fails() {
+        let executed = Arc::new(StdMutex::new(Vec::new()));
+        let best = make_weather_entry_opp(
+            "Will the highest temperature in Chicago be between 30-31°F on March 16?",
+            1,
+            dec!(0.20),
+            dec!(5.00),
+            dec!(2.00),
+        );
+        let fallback = make_weather_entry_opp(
+            "Will the highest temperature in Chicago be between 32-33°F on March 16?",
+            2,
+            dec!(0.20),
+            dec!(5.00),
+            dec!(1.50),
+        );
+
+        let books = Arc::new(HashMap::from([
+            (
+                U256::from(1u64),
+                make_book(
+                    U256::from(1u64),
+                    &[(dec!(0.10), dec!(10))],
+                    &[(dec!(0.25), dec!(10))],
+                ),
+            ),
+            (
+                U256::from(2u64),
+                make_book(
+                    U256::from(2u64),
+                    &[(dec!(0.10), dec!(10))],
+                    &[(dec!(0.20), dec!(10))],
+                ),
+            ),
+        ]));
+
+        let engine = StrategyEngine::new(
+            vec![Box::new(FixedStrategy {
+                opps: vec![best.clone(), fallback.clone()],
+            })],
+            Arc::new(RecordingExecutor {
+                executed_questions: executed.clone(),
+            }),
+            Arc::new(NoopRiskManager),
+            StrategyEngineDeps {
+                get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
+                get_available_capital: Box::new(|| dec!(1000)),
+                get_all_positions: Box::new(Vec::new),
+            },
+            StrategyEngineOptions {
+                scan_interval_ms: 1000,
+                event_calendar: None,
+                min_order_usdc: dec!(1),
+                max_market_end_days: None,
+            },
+        );
+
+        engine.scan_and_execute(&[]).await;
+
+        let executed_questions = executed.lock().unwrap().clone();
+        assert_eq!(executed_questions, vec![fallback.question]);
     }
 }

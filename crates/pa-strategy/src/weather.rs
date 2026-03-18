@@ -1857,7 +1857,7 @@ impl KmaClient {
     }
 }
 
-fn market_local_today(location: &str) -> NaiveDate {
+pub fn market_local_today(location: &str) -> NaiveDate {
     let tz_name = weather_timezone(location);
     let tz: Tz = tz_name.parse().unwrap_or(chrono_tz::UTC);
     Utc::now().with_timezone(&tz).date_naive()
@@ -4167,6 +4167,28 @@ impl WeatherAlphaStrategy {
             },
         }
     }
+}
+
+pub fn weather_event_key_for_opportunity_question(question: &str) -> Option<String> {
+    if let Some((event_title, _outcome_question)) = question.split_once(" → ")
+        && let Some((metric, location)) = parse_weather_event_title(event_title)
+    {
+        let target_date = parse_target_date_with_today(event_title, market_local_today(&location));
+        return Some(WeatherAlphaStrategy::weather_event_key(
+            &location,
+            metric,
+            target_date,
+        ));
+    }
+
+    let stripped = question.strip_prefix("[EXIT] ").unwrap_or(question);
+    let parsed = parse_weather_question(stripped)?;
+    let target_date = parse_target_date_with_today(stripped, market_local_today(&parsed.location));
+    Some(WeatherAlphaStrategy::weather_event_key(
+        &parsed.location,
+        parsed.metric,
+        target_date,
+    ))
 }
 
 #[async_trait]
