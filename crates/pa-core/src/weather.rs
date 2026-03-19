@@ -285,7 +285,7 @@ pub const WEATHER_LOCATIONS: &[WeatherLocation] = &[
         timezone: "Europe/London",
         settlement_risk_tier: SettlementRiskTier::High,
         settlement_validation_status: SettlementValidationStatus::Validated,
-        trade_enabled: false,
+        trade_enabled: true,
         settlement_note: Some("London City Airport / EGLC"),
     },
     WeatherLocation {
@@ -418,6 +418,7 @@ pub fn trade_enabled_weather_location_names() -> &'static [&'static str] {
         "Tampa",
         "New Orleans",
         "Cleveland",
+        "London",
     ]
 }
 
@@ -507,7 +508,30 @@ pub fn normalize_noaa_location_name(location: &str) -> Option<&'static str> {
 }
 
 pub fn noaa_supported_location_names() -> &'static [&'static str] {
-    trade_enabled_weather_location_names()
+    &[
+        "New York",
+        "Chicago",
+        "Los Angeles",
+        "Houston",
+        "Phoenix",
+        "Miami",
+        "Philadelphia",
+        "San Antonio",
+        "San Diego",
+        "Dallas",
+        "Austin",
+        "San Francisco",
+        "Seattle",
+        "Denver",
+        "Nashville",
+        "Portland",
+        "Las Vegas",
+        "Atlanta",
+        "Minneapolis",
+        "Tampa",
+        "New Orleans",
+        "Cleveland",
+    ]
 }
 
 pub fn noaa_settlement_risk_tier(location: &str) -> SettlementRiskTier {
@@ -549,7 +573,7 @@ mod tests {
     fn test_trade_enabled_weather_location_names_exclude_audit_only_cities() {
         let names = trade_enabled_weather_location_names();
         assert!(names.contains(&"New York"));
-        assert!(!names.contains(&"London"));
+        assert!(names.contains(&"London"));
         assert!(!names.contains(&"Seoul"));
     }
 
@@ -571,7 +595,7 @@ mod tests {
     fn test_weather_location_metadata_exposes_provider_and_trade_flag() {
         let london = weather_location("London").unwrap();
         assert_eq!(london.provider, WeatherProvider::MetOffice);
-        assert!(!london.trade_enabled);
+        assert!(london.trade_enabled);
 
         let seoul = weather_location("Seoul").unwrap();
         assert_eq!(seoul.provider, WeatherProvider::Kma);

@@ -259,7 +259,7 @@ pub fn spawn_weather_forecast_snapshot_refresh(
             let mut written = 0u32;
             for location in WEATHER_LOCATIONS
                 .iter()
-                .filter(|entry| !entry.trade_enabled)
+                .filter(|entry| entry.provider != WeatherProvider::Noaa)
             {
                 for metric in [
                     WeatherMetric::TemperatureMax,

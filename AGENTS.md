@@ -83,6 +83,16 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-19
+- Area: `src/app/tasks.rs`
+- Change: Changed the weather forecast snapshot archiver to archive all non-NOAA cities by provider instead of filtering on `!trade_enabled`, so London continues to persist PostgreSQL weather snapshots after being enabled for conservative live trading while Seoul remains archived as before.
+- Why: The previous archive filter silently stopped snapshotting London as soon as it became trade-enabled, which broke the intended London/Seoul international weather replay path even though both cities still need persisted forecast archives.
+
+### 2026-03-19
+- Area: `crates/pa-core/src/weather.rs`, `crates/pa-strategy/src/weather.rs`, `crates/pa-monitor/src/api.rs`
+- Change: Enabled London as a trade-enabled weather city, kept Seoul audit-only, expanded the conservative city overlay to include London so its live entry thresholds and sizing stay tighter than the standard validated NOAA cities, and aligned shared trade-enabled city metadata plus tests/UI config metadata with the new London status.
+- Why: London now has a higher-confidence Met Office audit stack than before, so it can be opened as a small-step gray rollout, but it still needs more conservative live trading behavior than the long-running U.S. weather cities.
+
+### 2026-03-19
 - Area: `crates/pa-strategy/src/weather.rs`, `src/app/helpers.rs`
 - Change: Removed the now-dead weather entry-window gating branches from `WeatherAlphaStrategy::scan()` after reverting to all-day weather entries, and changed WS token dedupe inside `build_ws_token_list()` from repeated `Vec::contains` scans to a `HashSet` while preserving the same ordering semantics.
 - Why: Once the weather entry window was removed, the scan path no longer needed to pretend there was a runtime gate, and the tightened WS ranking logic should use stable O(1) dedupe instead of repeated linear membership checks as weather market counts keep growing.

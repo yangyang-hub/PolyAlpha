@@ -204,7 +204,7 @@ async fn get_section(
 async fn get_section_meta(Path(section): Path<String>) -> (axum::http::StatusCode, Json<Value>) {
     match section.as_str() {
         "weather" => {
-            let target_cities = pa_core::weather::noaa_supported_location_names();
+            let target_cities = pa_core::weather::trade_enabled_weather_location_names();
             let all_weather_cities = pa_core::weather::weather_supported_location_names();
             let city_risk_tiers: std::collections::HashMap<&str, &str> = all_weather_cities
                 .iter()

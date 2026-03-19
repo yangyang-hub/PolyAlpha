@@ -2436,6 +2436,7 @@ pub struct WeatherAlphaDeps {
 impl WeatherAlphaStrategy {
     fn uses_conservative_city_overlay(location: &str) -> bool {
         location.eq_ignore_ascii_case("Chicago")
+            || location.eq_ignore_ascii_case("London")
             || matches!(
                 settlement_validation_status(location),
                 SettlementValidationStatus::DefaultProtected
@@ -6931,7 +6932,8 @@ mod tests {
 
         assert!(strategy.is_target_city("New York"));
         assert!(strategy.is_target_city("Seattle"));
-        assert!(!strategy.is_target_city("London"));
+        assert!(strategy.is_target_city("London"));
+        assert!(!strategy.is_target_city("Seoul"));
         assert!(!strategy.is_target_city("Anywhere"));
     }
 
