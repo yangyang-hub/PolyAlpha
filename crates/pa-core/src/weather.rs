@@ -1,4 +1,4 @@
-use chrono::{DateTime, FixedOffset, Timelike, Utc};
+use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeatherProvider {
@@ -491,10 +491,8 @@ pub fn weather_kma_station_id(location: &str) -> Option<u32> {
     }
 }
 
-pub fn weather_entry_window_open_at(now_utc: DateTime<Utc>) -> bool {
-    let utc_plus_8 = FixedOffset::east_opt(8 * 3600).expect("valid UTC+8 offset");
-    let local_hour = now_utc.with_timezone(&utc_plus_8).hour();
-    local_hour < 8
+pub fn weather_entry_window_open_at(_now_utc: DateTime<Utc>) -> bool {
+    true
 }
 
 pub fn weather_entry_window_open_now() -> bool {
@@ -649,19 +647,19 @@ mod tests {
     }
 
     #[test]
-    fn test_weather_entry_window_uses_utc_plus_8_hours() {
-        let inside = DateTime::parse_from_rfc3339("2026-03-16T16:30:00Z")
+    fn test_weather_entry_window_is_always_open() {
+        let early = DateTime::parse_from_rfc3339("2026-03-16T00:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let outside = DateTime::parse_from_rfc3339("2026-03-16T00:30:00Z")
+        let late = DateTime::parse_from_rfc3339("2026-03-16T16:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
         let boundary = DateTime::parse_from_rfc3339("2026-03-17T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
 
-        assert!(weather_entry_window_open_at(inside));
-        assert!(!weather_entry_window_open_at(outside));
-        assert!(!weather_entry_window_open_at(boundary));
+        assert!(weather_entry_window_open_at(early));
+        assert!(weather_entry_window_open_at(late));
+        assert!(weather_entry_window_open_at(boundary));
     }
 }

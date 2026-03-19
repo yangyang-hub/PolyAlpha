@@ -82,6 +82,31 @@ This file records repository-specific working agreements, high-level project con
 
 ## Change Log
 
+### 2026-03-19
+- Area: `crates/pa-strategy/src/weather.rs`, `src/app/helpers.rs`
+- Change: Removed the now-dead weather entry-window gating branches from `WeatherAlphaStrategy::scan()` after reverting to all-day weather entries, and changed WS token dedupe inside `build_ws_token_list()` from repeated `Vec::contains` scans to a `HashSet` while preserving the same ordering semantics.
+- Why: Once the weather entry window was removed, the scan path no longer needed to pretend there was a runtime gate, and the tightened WS ranking logic should use stable O(1) dedupe instead of repeated linear membership checks as weather market counts keep growing.
+
+### 2026-03-19
+- Area: `crates/pa-core/src/weather.rs`, `crates/pa-monitor/src/api.rs`, `frontend/src/pages/WeatherStrategy.tsx`, `frontend/src/components/ConfigSection.tsx`, `frontend/src/api.ts`
+- Change: Removed the UTC+8 weather-entry session restriction by making the shared `weather_entry_window_open_*` helpers unconditional, deleting the weather-entry-window runtime status field from `/api/status`, and removing the related frontend trading-window messaging and run-context display.
+- Why: The user decided to stop constraining new weather entries to the previous midnight-to-morning UTC+8 session, so the strategy, API, and UI all need to return to an always-open weather entry model instead of continuing to expose stale window semantics.
+
+### 2026-03-19
+- Area: `src/app/helpers.rs`
+- Change: Split NegRisk weather tokens into a separate WS subscription budget instead of letting them continue to spill into the main weather subscription pool, capping NegRisk additions to the smaller of `80` tokens or `25%` of `ws_max_instruments`, with focused regression coverage for the cap.
+- Why: Even after ranking lower-quality markets down, NegRisk tokens were still being re-added wholesale at the end of the WS list, which let them crowd out higher-value standard weather binaries and kept unnecessary pressure on the Polymarket WebSocket connection.
+
+### 2026-03-19
+- Area: `config/default.toml`, `README.md`, `CLAUDE.md`, `frontend/src/components/ConfigSection.tsx`
+- Change: Lowered the default `market_filter.ws_max_instruments` setting from `500` to `350` and updated operator-facing docs/UI hints to match the new recommended WebSocket subscription ceiling.
+- Why: After prioritizing higher-quality weather markets in the WS token list, the next practical step to reduce Polymarket WebSocket reset pressure is to stop filling the connection all the way to 500 instruments by default.
+
+### 2026-03-19
+- Area: `src/app/helpers.rs`
+- Change: Reworked weather WS token ordering so subscriptions still prioritize held tokens first, but discovered weather markets are now ranked by settlement-validation status, Chicago/default-protected conservatism, non-NegRisk preference, mid-range price quality, and higher liquidity before truncating to `ws_max_instruments`; added focused regression coverage showing validated weather cities outrank default-protected ones.
+- Why: The old WS builder mostly filled the 500-token cap by midpoint distance, which over-subscribed lower-quality weather markets and made the WebSocket feed carry more low-value load than necessary during weather-only trading.
+
 ### 2026-03-18
 - Area: `crates/pa-strategy/src/engine.rs`, `crates/pa-strategy/src/weather.rs`
 - Change: Added a shared weather-event-key helper for opportunity questions and taught the strategy engine to process weather entry candidates per event in profit order, falling back to the next candidate when the current best candidate fails pre-execution validation (depth/freshness/budget) instead of dropping the whole event for that scan; added focused engine regression coverage for the fallback path.

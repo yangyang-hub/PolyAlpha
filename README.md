@@ -398,7 +398,7 @@ max_markets_per_strategy = 50
 health_port = 18381
 
 [market_filter]
-ws_max_instruments = 500
+ws_max_instruments = 350
 market_refresh_interval_secs = 1800
 
 [weather]

@@ -13,7 +13,6 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
 use pa_core::config::Settings;
-use pa_core::weather::weather_entry_window_open_now;
 
 type HealthCheck = Box<dyn Fn() -> bool + Send + Sync>;
 
@@ -329,7 +328,6 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         "accounts_ready": ready_accounts,
         "trading_ready": ready_accounts > 0 && startup_ready && health_ready,
         "startup_ready": startup_ready,
-        "weather_entry_window_open": weather_entry_window_open_now(),
         "wallet_balance": wallet_balance,
         "positions_snapshot_updated_at": positions_updated_at.map(|ts| ts.to_rfc3339()),
         "accounts": account_status,

@@ -8,8 +8,10 @@ use chrono::Utc;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
+use std::collections::HashSet;
 
 use pa_execution::clob_executor::ClobExecutor;
+use pa_core::weather::{SettlementValidationStatus, settlement_validation_status};
 use pa_market_data::cache::OrderBookCache;
 use pa_market_data::gamma_feed::GammaFeed;
 
@@ -236,11 +238,60 @@ pub fn build_ws_token_list(
     enabled_strategies: &[String],
     ws_max: usize,
 ) -> Vec<U256> {
-    let mut strategy_mid: Vec<(U256, U256, f64)> = Vec::new();
-    let mut general_mid: Vec<(U256, U256, f64)> = Vec::new();
+    const NEG_RISK_WS_CAP_MAX: usize = 80;
+
+    #[derive(Clone, Copy)]
+    struct CandidatePair {
+        yes_tid: U256,
+        no_tid: U256,
+        priority: (u8, u8, u8, i64, i64),
+    }
+
+    fn price_priority(price: Option<f64>) -> (u8, i64) {
+        match price {
+            Some(p) => {
+                let dist = ((p - 0.50_f64).abs() * 1_000_000.0) as i64;
+                (0, dist)
+            }
+            None => (1, i64::MAX),
+        }
+    }
+
+    fn weather_priority(
+        m: &pa_core::types::MarketInfo,
+        price: Option<f64>,
+    ) -> Option<(u8, u8, u8, i64, i64)> {
+        let parsed = pa_strategy::weather::parse_weather_question(&m.question)?;
+        let validation_rank = match settlement_validation_status(&parsed.location) {
+            SettlementValidationStatus::Validated => 0,
+            SettlementValidationStatus::DefaultProtected => 1,
+        };
+        let chicago_penalty = if parsed.location == "Chicago" { 1 } else { 0 };
+        let neg_risk_penalty = if m.neg_risk { 1 } else { 0 };
+        let (price_rank, price_dist) = price_priority(price);
+        let liquidity_rank = -(m.liquidity * dec!(100)).round().to_i64().unwrap_or(0);
+        Some((
+            validation_rank,
+            chicago_penalty + neg_risk_penalty,
+            price_rank,
+            price_dist,
+            liquidity_rank,
+        ))
+    }
+
+    fn general_priority(m: &pa_core::types::MarketInfo, price: Option<f64>) -> (u8, u8, u8, i64, i64) {
+        let neg_risk_penalty = if m.neg_risk { 1 } else { 0 };
+        let (price_rank, price_dist) = price_priority(price);
+        let liquidity_rank = -(m.liquidity * dec!(100)).round().to_i64().unwrap_or(0);
+        (2, neg_risk_penalty, price_rank, price_dist, liquidity_rank)
+    }
+
+    let mut strategy_mid: Vec<CandidatePair> = Vec::new();
+    let mut general_mid: Vec<CandidatePair> = Vec::new();
+    let mut neg_risk_pairs: Vec<CandidatePair> = Vec::new();
 
     for m in markets {
-        if m.neg_risk || m.tokens.len() != 2 || !m.active {
+        if m.tokens.len() != 2 || !m.active {
             continue;
         }
 
@@ -251,59 +302,77 @@ pub fn build_ws_token_list(
                 .and_then(|p| p.to_f64())
         });
 
-        if let Some(yp) = yes_price {
-            if !(0.05..=0.95).contains(&yp) {
-                continue;
-            }
-            let dist = (yp - 0.50_f64).abs();
-            if GammaFeed::is_relevant_for_strategies(&m.question, enabled_strategies) {
-                strategy_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, dist));
+        if let Some(yp) = yes_price
+            && !(0.05..=0.95).contains(&yp)
+        {
+            continue;
+        }
+
+        let pair = CandidatePair {
+            yes_tid: m.tokens[0].token_id,
+            no_tid: m.tokens[1].token_id,
+            priority: if let Some(priority) = weather_priority(m, yes_price) {
+                priority
             } else {
-                general_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, dist));
-            }
+                general_priority(m, yes_price)
+            },
+        };
+
+        if m.neg_risk {
+            neg_risk_pairs.push(pair);
         } else if GammaFeed::is_relevant_for_strategies(&m.question, enabled_strategies) {
-            strategy_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, 1.0));
+            strategy_mid.push(pair);
         } else {
-            general_mid.push((m.tokens[0].token_id, m.tokens[1].token_id, 1.0));
+            general_mid.push(pair);
         }
     }
 
-    strategy_mid.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
-    general_mid.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+    strategy_mid.sort_by(|a, b| a.priority.cmp(&b.priority));
+    general_mid.sort_by(|a, b| a.priority.cmp(&b.priority));
+    neg_risk_pairs.sort_by(|a, b| a.priority.cmp(&b.priority));
 
     let mut token_ids: Vec<U256> = Vec::new();
+    let mut seen = HashSet::new();
 
     for tid in held_position_token_ids {
-        if !token_ids.contains(tid) {
+        if seen.insert(*tid) {
             token_ids.push(*tid);
         }
     }
 
-    for (yes_tid, no_tid, _) in &strategy_mid {
-        if !token_ids.contains(yes_tid) {
-            token_ids.push(*yes_tid);
+    for pair in &strategy_mid {
+        if seen.insert(pair.yes_tid) {
+            token_ids.push(pair.yes_tid);
         }
-        if !token_ids.contains(no_tid) {
-            token_ids.push(*no_tid);
+        if seen.insert(pair.no_tid) {
+            token_ids.push(pair.no_tid);
         }
     }
-    for (yes_tid, no_tid, _) in &general_mid {
-        if !token_ids.contains(yes_tid) {
-            token_ids.push(*yes_tid);
+    for pair in &general_mid {
+        if seen.insert(pair.yes_tid) {
+            token_ids.push(pair.yes_tid);
         }
-        if !token_ids.contains(no_tid) {
-            token_ids.push(*no_tid);
+        if seen.insert(pair.no_tid) {
+            token_ids.push(pair.no_tid);
         }
     }
 
-    let neg_risk_token_ids: Vec<_> = markets
-        .iter()
-        .filter(|m| m.neg_risk)
-        .flat_map(|m| m.tokens.iter().map(|t| t.token_id))
-        .collect();
-    for tid in &neg_risk_token_ids {
-        if !token_ids.contains(tid) {
-            token_ids.push(*tid);
+    let neg_risk_budget = ws_max.min(NEG_RISK_WS_CAP_MAX).min(ws_max / 4);
+    let mut neg_risk_added = 0usize;
+    for pair in &neg_risk_pairs {
+        if neg_risk_added >= neg_risk_budget {
+            break;
+        }
+        if seen.insert(pair.yes_tid) {
+            token_ids.push(pair.yes_tid);
+            neg_risk_added += 1;
+            if neg_risk_added >= neg_risk_budget {
+                break;
+            }
+        }
+        if seen.insert(pair.no_tid) {
+            token_ids.push(pair.no_tid);
+            neg_risk_added += 1;
         }
     }
 
@@ -349,4 +418,94 @@ pub fn infer_strategy_type(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::B256;
+    use pa_core::types::{MarketInfo, Outcome, TokenInfo};
+
+    fn make_market(
+        question: &str,
+        yes_tid: u64,
+        no_tid: u64,
+        yes_price: Decimal,
+        liquidity: Decimal,
+    ) -> MarketInfo {
+        MarketInfo {
+            condition_id: B256::from([yes_tid as u8; 32]),
+            question_id: B256::from([no_tid as u8; 32]),
+            question: question.to_string(),
+            neg_risk: false,
+            neg_risk_market_id: None,
+            tokens: vec![
+                TokenInfo {
+                    token_id: U256::from(yes_tid),
+                    outcome: Outcome::Yes,
+                    complement_id: U256::from(no_tid),
+                },
+                TokenInfo {
+                    token_id: U256::from(no_tid),
+                    outcome: Outcome::No,
+                    complement_id: U256::from(yes_tid),
+                },
+            ],
+            tick_size: dec!(0.01),
+            fee_rate_bps: 200,
+            active: true,
+            liquidity,
+            event_title: None,
+            end_date: None,
+            category: None,
+            outcome_prices: Some(vec![yes_price, Decimal::ONE - yes_price]),
+            gamma_best_bid: Some((yes_price - dec!(0.01)).max(dec!(0.01))),
+            gamma_best_ask: Some(yes_price),
+            rewards_min_size: None,
+            rewards_max_spread: None,
+            rewards_daily_rate: None,
+            holding_rewards_enabled: false,
+            fees_enabled: true,
+        }
+    }
+
+    #[test]
+    fn test_ws_token_list_prioritizes_validated_weather_city_over_default_protected() {
+        let validated = make_market(
+            "Will the highest temperature in Atlanta be between 70-71°F on March 19?",
+            11,
+            12,
+            dec!(0.50),
+            dec!(1000),
+        );
+        let protected = make_market(
+            "Will the highest temperature in San Francisco be between 60-61°F on March 19?",
+            21,
+            22,
+            dec!(0.50),
+            dec!(1000),
+        );
+
+        let tokens = build_ws_token_list(&[protected, validated], &[], &["weather".into()], 2);
+        assert_eq!(tokens, vec![U256::from(11u64), U256::from(12u64)]);
+    }
+
+    #[test]
+    fn test_ws_token_list_caps_neg_risk_tokens_to_small_budget() {
+        let mut markets = Vec::new();
+        for i in 0..60u64 {
+            let mut market = make_market(
+                &format!("Will the highest temperature in Atlanta be between {i}-{i}°F on March 19?"),
+                100 + i * 2,
+                101 + i * 2,
+                dec!(0.50),
+                dec!(1000),
+            );
+            market.neg_risk = true;
+            markets.push(market);
+        }
+
+        let tokens = build_ws_token_list(&markets, &[], &["weather".into()], 200);
+        assert_eq!(tokens.len(), 50);
+    }
 }

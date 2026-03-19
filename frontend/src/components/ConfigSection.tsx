@@ -33,7 +33,7 @@ const FIELD_HINTS: Record<string, Record<string, string>> = {
     min_liquidity: "最小市场流动性（USDC）",
     min_volume_24h: "最小 24h 交易量（USDC）",
     max_markets: "最大发现市场数",
-    ws_max_instruments: "WebSocket 最大订阅数（建议 ≤ 500）",
+    ws_max_instruments: "WebSocket 最大订阅数（建议 ≤ 350）",
     market_refresh_interval_secs: "市场刷新间隔（秒），0 = 不刷新",
   },
   weather: {
@@ -55,7 +55,7 @@ const FIELD_HINTS: Record<string, Record<string, string>> = {
     kma_api_key: "KMA API Hub Key（首尔/KMA 审计与回放）",
     met_office_api_key: "Met Office Weather DataHub Key（伦敦/Met Office 审计与回放）",
     met_office_obs_api_key: "Met Office Land Observations Key（伦敦实际值审计）",
-    target_cities: "目标城市列表，只扫描这些城市的天气市场。当前新的天气买入只会在 UTC+8 00:00-08:00 生成。",
+    target_cities: "目标城市列表，只扫描这些城市的天气市场。",
   },
   crypto_alpha: {
     min_edge_bps: "最小 edge（GBM模型概率 - 市场价，基点）",
