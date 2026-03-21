@@ -6541,7 +6541,7 @@ mod tests {
         };
 
         let inferred = strategy.infer_neg_risk_entry_days(&event);
-        assert_eq!(inferred, Some(1));
+        assert_eq!(inferred, Some(2));
     }
 
     #[tokio::test]

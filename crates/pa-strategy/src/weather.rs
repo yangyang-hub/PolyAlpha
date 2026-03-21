@@ -2407,6 +2407,7 @@ pub struct WeatherAlphaStrategy {
     /// Returns all held positions for this strategy: (token_id, size, avg_cost).
     get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
     forecast_cache: Arc<Mutex<HashMap<u64, CachedForecast>>>,
+    forecast_failure_cache: Arc<Mutex<HashMap<u64, Instant>>>,
     city_feedback: Arc<Mutex<HashMap<String, i8>>>,
     /// NegRisk multi-outcome weather events to scan.
     neg_risk_events: Vec<NegRiskEvent>,
@@ -2665,6 +2666,7 @@ impl WeatherAlphaStrategy {
             get_position,
             get_held_positions,
             forecast_cache: Arc::new(Mutex::new(HashMap::new())),
+            forecast_failure_cache: Arc::new(Mutex::new(HashMap::new())),
             city_feedback: Arc::new(Mutex::new(HashMap::new())),
             neg_risk_events,
             scan_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -2707,6 +2709,15 @@ impl WeatherAlphaStrategy {
             .map(|date| date.format("%Y-%m-%d").to_string())
             .unwrap_or_else(|| "unknown".to_string());
         format!("{}|{}|{}", location.to_lowercase(), metric_key, date_key)
+    }
+
+    fn forecast_failure_backoff_secs(error: &anyhow::Error) -> u64 {
+        let message = error.to_string().to_ascii_lowercase();
+        if message.contains("429") || message.contains("too many requests") {
+            300
+        } else {
+            30
+        }
     }
 
     /// Check if a location is NOAA-supported and in the target cities list.
@@ -3683,6 +3694,15 @@ impl WeatherAlphaStrategy {
                 return Some((entry.forecast.clone(), entry.is_fresh_signal));
             }
         }
+        {
+            let mut failure_cache = self.forecast_failure_cache.lock().unwrap();
+            failure_cache.retain(|_, retry_after| *retry_after > Instant::now());
+            if let Some(retry_after) = failure_cache.get(&cache_key)
+                && *retry_after > Instant::now()
+            {
+                return None;
+            }
+        }
 
         let forecast = match self
             .fetch_forecast_for_location(location, metric, target_date, precipitation_unit)
@@ -3690,12 +3710,26 @@ impl WeatherAlphaStrategy {
         {
             Ok(f) => f,
             Err(e) => {
+                let backoff_secs = Self::forecast_failure_backoff_secs(&e);
+                {
+                    let mut failure_cache = self.forecast_failure_cache.lock().unwrap();
+                    failure_cache.insert(
+                        cache_key,
+                        Instant::now() + Duration::from_secs(backoff_secs),
+                    );
+                }
                 if weather_location(location).is_some() {
                     Self::record_rejection_for_location(location, "forecast_fetch_failed");
                 } else {
                     Self::record_rejection_for_location(location, "geocode_failed");
                 }
-                tracing::warn!(location = %location, metric = ?metric, error = %e, "Failed to fetch forecast for NegRisk weather");
+                tracing::warn!(
+                    location = %location,
+                    metric = ?metric,
+                    error = %e,
+                    backoff_secs,
+                    "Failed to fetch forecast for NegRisk weather"
+                );
                 return None;
             }
         };
@@ -3732,6 +3766,10 @@ impl WeatherAlphaStrategy {
             );
             evict_stale_cache_entries(&mut cache, self.config.refresh_interval_secs * 2);
         }
+        self.forecast_failure_cache
+            .lock()
+            .unwrap()
+            .remove(&cache_key);
 
         Some((forecast, is_fresh_signal))
     }
@@ -6342,6 +6380,30 @@ mod tests {
         assert!(
             result.is_none(),
             "NegRisk side with missing bid should be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_forecast_by_location_respects_failure_backoff() {
+        let strategy = make_weather_strategy(HashMap::new(), vec![]);
+        let target_date = Some(Utc::now().date_naive() + chrono::Days::new(1));
+        let cache_key = WeatherAlphaStrategy::location_hash(
+            "London",
+            WeatherMetric::TemperatureMax,
+            target_date,
+        );
+        strategy
+            .forecast_failure_cache
+            .lock()
+            .unwrap()
+            .insert(cache_key, Instant::now() + Duration::from_secs(60));
+
+        let result = strategy
+            .get_forecast_by_location("London", WeatherMetric::TemperatureMax, target_date, "inch")
+            .await;
+        assert!(
+            result.is_none(),
+            "recent failure backoff should short-circuit provider fetch attempts"
         );
     }
 

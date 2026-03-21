@@ -83,6 +83,11 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-21
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Added a short-lived forecast failure backoff cache for weather location fetches so repeated provider errors (especially Met Office `429 Too Many Requests`) temporarily suppress immediate re-fetch attempts, included the chosen backoff in the warning log, and added focused regression coverage showing location-based forecast reads short-circuit while a failure backoff is active.
+- Why: NegRisk weather scans were only caching successful forecasts, so London/Met Office rate-limit responses caused the strategy to retry the same request on every scan cycle and flood logs with repeated warnings instead of backing off after the first failure.
+
+### 2026-03-21
 - Area: `crates/pa-strategy/src/crypto_alpha.rs`, `crates/pa-monitor/src/api.rs`
 - Change: Fixed crypto binary exit probability recomputation to use the same `event_title + question` event-aware sigma context as entry detection, added observable `beyond_entry_horizon` gate-reject diagnostics when markets are filtered by the new hard entry window, taught NegRisk entry-day inference to fall back to constituent market `end_date` instead of assuming `30` days when the event title omits a date, and surfaced `beyond_entry_horizon` as a first-class tuning hint/override suggestion in the status API.
 - Why: After tightening crypto entries to one day, the remaining gaps were inconsistent event-context handling between entry and binary exits, invisible horizon filtering in front-door diagnostics, and overly blunt NegRisk date inference that could block short-dated events simply because the parent title lacked an explicit calendar date.
