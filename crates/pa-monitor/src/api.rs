@@ -436,6 +436,23 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         }));
     }
 
+    fn suggestion_family(source_reason: &str) -> &'static str {
+        if source_reason.starts_with("scaled_for_") {
+            "gate_scale"
+        } else {
+            "gate_reject"
+        }
+    }
+
+    fn priority_rank(priority: &str) -> u8 {
+        match priority {
+            "high" => 3,
+            "medium" => 2,
+            "low" => 1,
+            _ => 0,
+        }
+    }
+
     let uptime_secs = (Utc::now() - state.start_time).num_seconds();
     let settings = state.config.load();
     let accounts = settings.resolved_accounts();
@@ -807,6 +824,121 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
             _ => {}
         }
     }
+    let mut bucket_family_counts: std::collections::HashMap<(String, String), (usize, usize)> =
+        std::collections::HashMap::new();
+    for decision in &recent_gate_rejects {
+        let key = (
+            asset_class_for_label(Some(&decision.asset)).to_string(),
+            normalized_event_subtype(decision.event_subtype.as_deref()).to_string(),
+        );
+        bucket_family_counts.entry(key).or_default().0 += 1;
+    }
+    for decision in &recent_gate_scales {
+        let key = (
+            asset_class_for_label(Some(&decision.asset)).to_string(),
+            normalized_event_subtype(decision.event_subtype.as_deref()).to_string(),
+        );
+        bucket_family_counts.entry(key).or_default().1 += 1;
+    }
+    crypto_override_suggestions.retain(|suggestion| {
+        let asset_class = suggestion
+            .get("selector_asset_class")
+            .and_then(|value| value.as_str())
+            .unwrap_or("any")
+            .to_string();
+        let event_subtype = suggestion
+            .get("selector_event_subtype")
+            .and_then(|value| value.as_str())
+            .unwrap_or("any")
+            .to_string();
+        let source_reason = suggestion
+            .get("source_reason")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let Some((reject_count, scale_count)) =
+            bucket_family_counts.get(&(asset_class, event_subtype))
+        else {
+            return true;
+        };
+        if reject_count == scale_count {
+            return true;
+        }
+        let dominant_family = if scale_count > reject_count {
+            "gate_scale"
+        } else {
+            "gate_reject"
+        };
+        suggestion_family(source_reason) == dominant_family
+    });
+    let mut deduped_override_suggestions: std::collections::HashMap<
+        (String, String, String, String),
+        serde_json::Value,
+    > = std::collections::HashMap::new();
+    for suggestion in crypto_override_suggestions {
+        let key = (
+            suggestion
+                .get("selector_asset_class")
+                .and_then(|value| value.as_str())
+                .unwrap_or("any")
+                .to_string(),
+            suggestion
+                .get("selector_event_subtype")
+                .and_then(|value| value.as_str())
+                .unwrap_or("any")
+                .to_string(),
+            suggestion
+                .get("target_field")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+            suggestion
+                .get("direction")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string(),
+        );
+        match deduped_override_suggestions.get(&key) {
+            Some(existing) => {
+                let existing_priority = priority_rank(
+                    existing
+                        .get("priority")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or(""),
+                );
+                let new_priority = priority_rank(
+                    suggestion
+                        .get("priority")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or(""),
+                );
+                if new_priority > existing_priority {
+                    deduped_override_suggestions.insert(key, suggestion);
+                }
+            }
+            None => {
+                deduped_override_suggestions.insert(key, suggestion);
+            }
+        }
+    }
+    let mut crypto_override_suggestions: Vec<_> =
+        deduped_override_suggestions.into_values().collect();
+    crypto_override_suggestions.sort_by(|a, b| {
+        let a_priority = priority_rank(
+            a.get("priority")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+        );
+        let b_priority = priority_rank(
+            b.get("priority")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+        );
+        b_priority.cmp(&a_priority).then_with(|| {
+            a.get("target_field")
+                .and_then(|value| value.as_str())
+                .cmp(&b.get("target_field").and_then(|value| value.as_str()))
+        })
+    });
     if top_count(&gate_scale_reason_counts_view) > top_count(&reason_counts)
         && !gate_scale_reason_counts_view.is_empty()
     {

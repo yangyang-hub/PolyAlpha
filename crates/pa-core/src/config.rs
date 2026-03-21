@@ -265,8 +265,8 @@ fn default_forecast_change_threshold() -> f64 {
     0.35
 }
 fn default_max_entry_price() -> Decimal {
-    Decimal::new(35, 2)
-} // 0.35
+    Decimal::new(38, 2)
+} // 0.38
 fn default_relative_stop_loss_ratio() -> Decimal {
     Decimal::new(80, 2)
 } // 0.80
@@ -283,7 +283,7 @@ fn default_target_cities() -> Vec<String> {
 impl Default for WeatherConfig {
     fn default() -> Self {
         Self {
-            min_edge_bps: 500,
+            min_edge_bps: 450,
             max_spread_bps: default_max_spread_bps(),
             max_position_pct: Decimal::new(50, 2), // 0.50 = 50% of balance
             kelly_fraction: Decimal::new(25, 2),   // 0.25 (quarter Kelly)

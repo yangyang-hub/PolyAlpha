@@ -83,6 +83,26 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-21
+- Area: `crates/pa-monitor/src/api.rs`, `crates/pa-strategy/src/crypto_alpha.rs`
+- Change: Added bucket-level arbitration and deduplication for `crypto_override_suggestions`, refined adaptive crypto gate-scale sizing feedback to prefer exact-asset matches before falling back to `asset_class × event_subtype`, and downgraded post-pre-sizing depth/size-retention failures to final sanity guards instead of re-emitting them as front-door `gate_reject` diagnostics.
+- Why: The remaining crypto strategy polish gaps were that override suggestions could still emit conflicting actions for the same tuning bucket, adaptive pre-sizing feedback was too coarse to react differently for a specific asset versus the whole class, and post-scale guard failures were still being represented like primary front-door friction even though the actionable signal had already been captured as `gate_scale`.
+
+### 2026-03-21
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Added lightweight in-memory city feedback for the weather strategy so capital-efficiency exits reward a city's future entry edge/size slightly while relative stop-loss and model-reversal exits penalize it, and applied that feedback on top of the existing preferred/conservative city overlays with focused regression coverage.
+- Why: Static city tiers are useful, but the strategy still needed a simple runtime mechanism to lean further into cities that are converting efficiently and back away from cities that are producing poor exits without waiting for manual retuning.
+
+### 2026-03-21
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Added a preferred-city overlay for higher-confidence weather cities (`Atlanta`, `Miami`, `New York`, `Dallas`, `Seattle`) that slightly lowers effective entry edge and slightly increases per-trade size, while restricting NegRisk surround entries to validated non-conservative cities and requiring an extra surround-specific edge buffer on top of the normal city/resolution threshold.
+- Why: The weather strategy should lean more aggressively into the cities with the best live/replay confidence while preventing the more speculative surround pattern from extending into conservative or gray-rollout cities such as London, Chicago, and still-protected locations.
+
+### 2026-03-21
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/weather.rs`, `config/default.toml`, `README.md`, `CLAUDE.md`
+- Change: Relaxed the weather entry profile by lowering the base `min_edge_bps` default from `500` to `450`, raising the base `max_entry_price` default from `0.35` to `0.38`, reducing the conservative-city edge overlay from `+100bps` to `+50bps`, and shrinking the short-dated edge overlays from `+100/+200bps` to `+50/+100bps`, with updated regression expectations and operator-facing docs.
+- Why: Live weather trading had become too sparse after city overlays and short-dated tightening stacked on top of the already conservative base thresholds, so the entry profile needs a modest reopening before judging the newer routing and WS changes.
+
+### 2026-03-21
 - Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/engine.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `src/app/account_runtime.rs`, `src/bin/backtest.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
 - Change: Added configurable execution-quality weights to risk settings, switched both engine-side prepared-opportunity scoring and crypto same-asset candidate scoring to a weighted geometric mean of profit retention, size retention, and slippage quality, and threaded the new weights through runtime/backtest wiring with focused regression coverage for weight-sensitive ordering.
 - Why: Crypto execution-quality ranking had evolved into a major strategy decision surface, but it still treated retained profit, retained size, and slippage quality as permanently equal; configurable weights let operators bias selection toward the execution durability dimension that matters most for a given market regime without discarding the existing multiplicative semantics.

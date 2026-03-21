@@ -2407,6 +2407,7 @@ pub struct WeatherAlphaStrategy {
     /// Returns all held positions for this strategy: (token_id, size, avg_cost).
     get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
     forecast_cache: Arc<Mutex<HashMap<u64, CachedForecast>>>,
+    city_feedback: Arc<Mutex<HashMap<String, i8>>>,
     /// NegRisk multi-outcome weather events to scan.
     neg_risk_events: Vec<NegRiskEvent>,
     /// Scan counter for periodic diagnostics.
@@ -2430,6 +2431,68 @@ pub struct WeatherAlphaDeps {
 }
 
 impl WeatherAlphaStrategy {
+    fn city_feedback_score(&self, location: &str) -> i8 {
+        self.city_feedback
+            .lock()
+            .unwrap()
+            .get(&location.to_ascii_lowercase())
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn record_city_feedback(&self, location: &str, delta: i8) {
+        let key = location.to_ascii_lowercase();
+        let mut feedback = self.city_feedback.lock().unwrap();
+        let next = feedback
+            .get(&key)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(delta)
+            .clamp(-3, 3);
+        feedback.insert(key, next);
+    }
+
+    fn city_feedback_edge_adjustment_bps(&self, location: &str) -> u32 {
+        match self.city_feedback_score(location) {
+            score if score >= 2 => 25,
+            score if score <= -2 => 50,
+            score if score <= -1 => 25,
+            _ => 0,
+        }
+    }
+
+    fn city_feedback_size_multiplier(&self, location: &str) -> Decimal {
+        match self.city_feedback_score(location) {
+            score if score >= 2 => dec!(1.10),
+            1 => dec!(1.05),
+            score if score <= -2 => dec!(0.80),
+            -1 => dec!(0.90),
+            _ => Decimal::ONE,
+        }
+    }
+
+    fn weather_market_location(market: &MarketInfo) -> Option<String> {
+        if market.neg_risk {
+            market
+                .event_title
+                .as_deref()
+                .and_then(parse_weather_event_title)
+                .map(|(_, location)| location)
+        } else {
+            parse_weather_question(&market.question).map(|parsed| parsed.location)
+        }
+    }
+
+    fn uses_preferred_city_overlay(location: &str) -> bool {
+        matches!(
+            location.to_ascii_lowercase().as_str(),
+            "atlanta" | "miami" | "new york" | "nyc" | "dallas" | "seattle"
+        ) && matches!(
+            settlement_validation_status(location),
+            SettlementValidationStatus::Validated
+        )
+    }
+
     fn uses_conservative_city_overlay(location: &str) -> bool {
         location.eq_ignore_ascii_case("Chicago")
             || location.eq_ignore_ascii_case("London")
@@ -2440,20 +2503,36 @@ impl WeatherAlphaStrategy {
     }
 
     fn effective_min_edge_bps(&self, location: &str) -> u32 {
-        self.config
+        let base = self
+            .config
             .min_edge_bps
             .saturating_add(settlement_extra_edge_bps_for_location(location))
             .saturating_add(if Self::uses_conservative_city_overlay(location) {
-                100
+                50
             } else {
                 0
-            })
+            });
+        let after_preferred = if Self::uses_preferred_city_overlay(location) {
+            base.saturating_sub(50)
+        } else {
+            base
+        };
+        match self.city_feedback_score(location) {
+            score if score >= 2 => after_preferred.saturating_sub(25),
+            score if score <= -2 => {
+                after_preferred.saturating_add(self.city_feedback_edge_adjustment_bps(location))
+            }
+            score if score <= -1 => {
+                after_preferred.saturating_add(self.city_feedback_edge_adjustment_bps(location))
+            }
+            _ => after_preferred,
+        }
     }
 
     fn short_dated_entry_edge_overlay_bps(hours_until_resolution: Option<i64>) -> u32 {
         match hours_until_resolution {
-            Some(hours) if hours <= 12 => 200,
-            Some(hours) if hours <= 24 => 100,
+            Some(hours) if hours <= 12 => 100,
+            Some(hours) if hours <= 24 => 50,
             _ => 0,
         }
     }
@@ -2494,11 +2573,25 @@ impl WeatherAlphaStrategy {
     }
 
     fn effective_max_position_usdc(&self, location: &str) -> Decimal {
-        if Self::uses_conservative_city_overlay(location) {
+        let base = if Self::uses_conservative_city_overlay(location) {
             self.config.max_position_usdc * dec!(0.75)
+        } else if Self::uses_preferred_city_overlay(location) {
+            self.config.max_position_usdc * dec!(1.10)
         } else {
             self.config.max_position_usdc
-        }
+        };
+        base * self.city_feedback_size_multiplier(location)
+    }
+
+    fn surround_allowed_for_location(location: &str) -> bool {
+        matches!(
+            settlement_validation_status(location),
+            SettlementValidationStatus::Validated
+        ) && !Self::uses_conservative_city_overlay(location)
+    }
+
+    fn surround_extra_edge_bps() -> u32 {
+        50
     }
 
     fn effective_max_position_usdc_for_resolution(
@@ -2572,6 +2665,7 @@ impl WeatherAlphaStrategy {
             get_position,
             get_held_positions,
             forecast_cache: Arc::new(Mutex::new(HashMap::new())),
+            city_feedback: Arc::new(Mutex::new(HashMap::new())),
             neg_risk_events,
             scan_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
@@ -3068,6 +3162,10 @@ impl WeatherAlphaStrategy {
     ) -> Vec<TradingOpportunity> {
         let mut opportunities = Vec::new();
 
+        if !Self::surround_allowed_for_location(location) {
+            return opportunities;
+        }
+
         // Parse target date
         let target_date =
             match parse_target_date_with_today(&event.title, market_local_today(location)) {
@@ -3153,9 +3251,8 @@ impl WeatherAlphaStrategy {
 
         // Surround entries should stay inside the same city/risk/resolution sizing
         // envelope as normal weather entries, then use half of that per bin.
-        let hours_until_resolution = Self::hours_until_resolution(
-            event.markets.iter().filter_map(|m| m.end_date).min(),
-        );
+        let hours_until_resolution =
+            Self::hours_until_resolution(event.markets.iter().filter_map(|m| m.end_date).min());
         let effective_max =
             self.effective_max_position_usdc_for_resolution(location, hours_until_resolution);
         let surround_size_per_bin = effective_max / Decimal::from(2);
@@ -3188,7 +3285,10 @@ impl WeatherAlphaStrategy {
             if let Some(side) = side {
                 let edge_bps = (side.edge * dec!(10000)).to_u32().unwrap_or(0);
 
-                if edge_bps < self.effective_min_edge_bps(&location) {
+                let min_edge_bps = self
+                    .effective_min_edge_bps_for_resolution(location, hours_until_resolution)
+                    .saturating_add(Self::surround_extra_edge_bps());
+                if edge_bps < min_edge_bps {
                     continue;
                 }
 
@@ -3905,6 +4005,11 @@ impl WeatherAlphaStrategy {
 
             // Capital efficiency exit: near-max price takes priority over generic profit-take.
             if best_bid >= self.config.capital_efficiency_threshold {
+                if let Some(market) = token_to_market.get(token_id).copied()
+                    && let Some(location) = Self::weather_market_location(market)
+                {
+                    self.record_city_feedback(&location, 1);
+                }
                 tracing::debug!(
                     token_id = %token_id,
                     best_bid = %best_bid,
@@ -3942,6 +4047,11 @@ impl WeatherAlphaStrategy {
                 }
 
                 let loss_pct = ((*avg_cost - best_bid) / *avg_cost * dec!(100)).round_dp(1);
+                if let Some(market) = token_to_market.get(token_id).copied()
+                    && let Some(location) = Self::weather_market_location(market)
+                {
+                    self.record_city_feedback(&location, -2);
+                }
                 tracing::debug!(
                     token_id = %token_id,
                     best_bid = %best_bid,
@@ -4122,6 +4232,7 @@ impl WeatherAlphaStrategy {
             };
 
             if effective_prob < best_bid - exit_buffer {
+                self.record_city_feedback(&location, -1);
                 tracing::debug!(
                     token_id = %token_id,
                     effective_prob = %effective_prob,
@@ -6976,18 +7087,24 @@ mod tests {
         assert!(!WeatherAlphaStrategy::uses_conservative_city_overlay(
             "Atlanta"
         ));
+        assert!(WeatherAlphaStrategy::uses_preferred_city_overlay("Atlanta"));
+        assert!(WeatherAlphaStrategy::uses_preferred_city_overlay("Miami"));
+        assert!(!WeatherAlphaStrategy::uses_preferred_city_overlay(
+            "Chicago"
+        ));
+        assert!(!WeatherAlphaStrategy::uses_preferred_city_overlay("London"));
 
         assert_eq!(
             strategy.effective_min_edge_bps("Chicago"),
-            strategy.config.min_edge_bps + 100
+            strategy.config.min_edge_bps + 50
         );
         assert_eq!(
             strategy.effective_min_edge_bps("San Francisco"),
-            strategy.config.min_edge_bps + 150 + 100
+            strategy.config.min_edge_bps + 150 + 50
         );
         assert_eq!(
             strategy.effective_min_edge_bps("Miami"),
-            strategy.config.min_edge_bps
+            strategy.config.min_edge_bps.saturating_sub(50)
         );
     }
 
@@ -7010,7 +7127,7 @@ mod tests {
         );
 
         assert_eq!(strategy.effective_max_entry_price("Miami"), dec!(0.35));
-        assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(4));
+        assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(4.40));
 
         assert_eq!(strategy.effective_max_entry_price("Chicago"), dec!(0.30));
         assert_eq!(strategy.effective_max_position_usdc("Chicago"), dec!(3.00));
@@ -7023,6 +7140,21 @@ mod tests {
             strategy.effective_max_position_usdc("San Francisco"),
             dec!(3.00)
         );
+    }
+
+    #[tokio::test]
+    async fn test_surround_skips_conservative_city() {
+        let event = make_neg_risk_event(
+            "Highest temperature in London on March 20",
+            vec![make_weather_market(
+                "Will the highest temperature in London be between 60-61°F on March 20?",
+            )],
+        );
+        let strategy = make_weather_strategy(HashMap::new(), vec![]);
+        let opportunities = strategy
+            .detect_neg_risk_surround(&event, WeatherMetric::TemperatureMax, "London")
+            .await;
+        assert!(opportunities.is_empty());
     }
 
     #[test]
@@ -7059,7 +7191,7 @@ mod tests {
 
         assert_eq!(
             strategy.effective_min_edge_bps_for_resolution("Miami", Some(24)),
-            600
+            550
         );
         assert_eq!(
             strategy.effective_max_entry_price_for_resolution("Miami", Some(24)),
@@ -7072,7 +7204,7 @@ mod tests {
 
         assert_eq!(
             strategy.effective_min_edge_bps_for_resolution("Miami", Some(12)),
-            700
+            600
         );
         assert_eq!(
             strategy.effective_max_entry_price_for_resolution("Miami", Some(12)),
@@ -7105,7 +7237,7 @@ mod tests {
 
         assert_eq!(
             strategy.effective_min_edge_bps_for_resolution("Chicago", Some(24)),
-            700
+            600
         );
         assert_eq!(
             strategy.effective_max_entry_price_for_resolution("Chicago", Some(24)),
@@ -7118,7 +7250,7 @@ mod tests {
 
         assert_eq!(
             strategy.effective_min_edge_bps_for_resolution("San Francisco", Some(12)),
-            950
+            800
         );
         assert_eq!(
             strategy.effective_max_entry_price_for_resolution("San Francisco", Some(12)),
@@ -7128,6 +7260,38 @@ mod tests {
             strategy.effective_max_position_usdc_for_resolution("San Francisco", Some(12)),
             dec!(2.25)
         );
+    }
+
+    #[test]
+    fn test_city_feedback_adjusts_entry_edge_and_size() {
+        let strategy = WeatherAlphaStrategy::new(
+            WeatherConfig {
+                min_edge_bps: 450,
+                max_position_usdc: dec!(4),
+                ..Default::default()
+            },
+            Decimal::ZERO,
+            WeatherAlphaDeps {
+                get_orderbook: Box::new(|_| None),
+                get_available_capital: Box::new(|| Decimal::ZERO),
+                get_position: Box::new(|_| Decimal::ZERO),
+                get_held_positions: Box::new(Vec::new),
+                neg_risk_events: vec![],
+            },
+        );
+
+        assert_eq!(strategy.effective_min_edge_bps("Miami"), 400);
+        assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(4.40));
+
+        strategy.record_city_feedback("Miami", 2);
+        assert_eq!(strategy.effective_min_edge_bps("Miami"), 375);
+        assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(4.84));
+
+        assert_eq!(strategy.effective_min_edge_bps("Chicago"), 500);
+        assert_eq!(strategy.effective_max_position_usdc("Chicago"), dec!(3.00));
+        strategy.record_city_feedback("Chicago", -2);
+        assert_eq!(strategy.effective_min_edge_bps("Chicago"), 550);
+        assert_eq!(strategy.effective_max_position_usdc("Chicago"), dec!(2.40));
     }
 
     #[test]

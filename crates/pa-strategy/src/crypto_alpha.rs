@@ -2761,25 +2761,11 @@ impl CryptoAlphaStrategy {
         } else {
             Decimal::ZERO
         };
+        // After pre-sizing, these checks are mostly a final guard against rounding or stale book
+        // edge cases. We deliberately avoid re-emitting them as front-door gate rejects because
+        // the actionable signal is the earlier `gate_scale`, not a second synthetic reject.
         if size_retention_ratio < effective_min_entry_size_retention_ratio {
             Self::record_rejection(asset, "insufficient_size_retention");
-            if let Some(gate_context) = gate_context {
-                self.record_gate_reject_decision(
-                    asset,
-                    Some(direction),
-                    gate_context.market_type,
-                    &gate_context.question,
-                    gate_context.days_to_resolution,
-                    gate_context.modeled_prob,
-                    gate_context.is_yes,
-                    gate_context.condition_id,
-                    "insufficient_size_retention",
-                    gate_context.event_context_source.clone(),
-                    gate_context.event_title.clone(),
-                    gate_context.event_category.clone(),
-                    gate_context.event_subtype.clone(),
-                );
-            }
             tracing::debug!(
                 asset = asset.name,
                 direction = ?direction,
@@ -2795,23 +2781,6 @@ impl CryptoAlphaStrategy {
         }
         if depth_ratio < effective_min_entry_depth_ratio {
             Self::record_rejection(asset, "insufficient_depth_buffer");
-            if let Some(gate_context) = gate_context {
-                self.record_gate_reject_decision(
-                    asset,
-                    Some(direction),
-                    gate_context.market_type,
-                    &gate_context.question,
-                    gate_context.days_to_resolution,
-                    gate_context.modeled_prob,
-                    gate_context.is_yes,
-                    gate_context.condition_id,
-                    "insufficient_depth_buffer",
-                    gate_context.event_context_source.clone(),
-                    gate_context.event_title.clone(),
-                    gate_context.event_category.clone(),
-                    gate_context.event_subtype.clone(),
-                );
-            }
             tracing::debug!(
                 asset = asset.name,
                 direction = ?direction,
@@ -2850,34 +2819,49 @@ impl CryptoAlphaStrategy {
 
         let target_asset_class = Self::asset_class_selector(asset);
         let target_subtype = Self::event_subtype_selector(event_subtype);
-        let matching_count = recent_crypto_candidate_decisions()
+        let recent_decisions: Vec<_> = recent_crypto_candidate_decisions()
             .into_iter()
             .take(lookback)
-            .filter(|decision| {
-                if decision.action != "gate_scale" {
-                    return false;
-                }
-                if decision.reason != "scaled_for_depth_buffer"
-                    && decision.reason != "scaled_for_size_retention"
-                {
-                    return false;
-                }
+            .collect();
+        let matching_count = |exact_asset: bool| -> u32 {
+            recent_decisions
+                .iter()
+                .filter(|decision| {
+                    if decision.action != "gate_scale" {
+                        return false;
+                    }
+                    if decision.reason != "scaled_for_depth_buffer"
+                        && decision.reason != "scaled_for_size_retention"
+                    {
+                        return false;
+                    }
 
-                let decision_asset = CRYPTO_ASSETS
-                    .iter()
-                    .find(|candidate| candidate.name.eq_ignore_ascii_case(&decision.asset));
-                let Some(decision_asset) = decision_asset else {
-                    return false;
-                };
-                if Self::asset_class_selector(decision_asset) != target_asset_class {
-                    return false;
-                }
+                    let decision_asset = CRYPTO_ASSETS
+                        .iter()
+                        .find(|candidate| candidate.name.eq_ignore_ascii_case(&decision.asset));
+                    let Some(decision_asset) = decision_asset else {
+                        return false;
+                    };
+                    if exact_asset {
+                        if decision_asset.binance_symbol != asset.binance_symbol {
+                            return false;
+                        }
+                    } else if Self::asset_class_selector(decision_asset) != target_asset_class {
+                        return false;
+                    }
 
-                Self::event_subtype_selector(Self::parse_event_subtype_label(
-                    decision.event_subtype.as_deref(),
-                )) == target_subtype
-            })
-            .count() as u32;
+                    Self::event_subtype_selector(Self::parse_event_subtype_label(
+                        decision.event_subtype.as_deref(),
+                    )) == target_subtype
+                })
+                .count() as u32
+        };
+        let exact_asset_count = matching_count(true);
+        let matching_count = if exact_asset_count >= trigger_count {
+            exact_asset_count
+        } else {
+            matching_count(false)
+        };
 
         if matching_count < trigger_count {
             return Decimal::ONE;

@@ -614,14 +614,14 @@ ws_max_instruments = 350
 market_refresh_interval_secs = 1800
 
 [weather]
-min_edge_bps = 600
-max_spread_bps = 1500
+min_edge_bps = 450
+max_spread_bps = 1700
 max_position_usdc = 4.0
 kelly_fraction = 0.25
 dynamic_sigma = true
 forecast_change_detection = false
 forecast_change_threshold = 0.35
-max_entry_price = 0.30
+max_entry_price = 0.38
 exit_buffer_bps = 50
 capital_efficiency_threshold = 0.98
 kma_api_key = ""
