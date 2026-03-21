@@ -78,6 +78,11 @@ impl RiskManagerImpl {
     pub fn positions_by_strategy(&self, st: StrategyType) -> Vec<(U256, Decimal, Decimal)> {
         self.positions.positions_by_strategy(st)
     }
+
+    /// Total realized PnL accumulated by this risk manager since process start.
+    pub fn total_realized_pnl(&self) -> Decimal {
+        self.pnl.total_realized()
+    }
 }
 
 #[async_trait]
@@ -177,6 +182,11 @@ mod tests {
             circuit_breaker_loss: dec!(1000),
             circuit_breaker_consecutive_losses: 5,
             max_slippage_bps: 50,
+            min_profit_retention_ratio: dec!(0.50),
+            min_size_retention_ratio: dec!(0.50),
+            execution_quality_profit_weight: dec!(1),
+            execution_quality_size_weight: dec!(1),
+            execution_quality_slippage_weight: dec!(1),
             min_order_usdc: dec!(1),
             min_profit_usdc: dec!(0.01),
             max_exposure_per_strategy: dec!(200),

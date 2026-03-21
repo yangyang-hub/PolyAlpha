@@ -65,6 +65,14 @@ pub struct AccountStatusEntry {
     pub private_key_present: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StrategyFinancialEntry {
+    pub wallet_balance: Decimal,
+    pub positions_market_value: Decimal,
+    pub portfolio_value: Decimal,
+    pub realized_pnl: Decimal,
+}
+
 /// Shared API state for all Axum handlers.
 pub struct ApiState {
     pub config: Arc<ArcSwap<Settings>>,
@@ -78,6 +86,9 @@ pub struct ApiState {
     pub positions_updated_at: Arc<tokio::sync::RwLock<Option<DateTime<Utc>>>>,
     /// Latest summed USDC balance across active accounts.
     pub wallet_balance: Arc<tokio::sync::RwLock<Decimal>>,
+    /// Strategy-scoped wallet/portfolio snapshots derived from active accounts and positions.
+    pub strategy_financials:
+        Arc<tokio::sync::RwLock<std::collections::HashMap<String, StrategyFinancialEntry>>>,
     /// True once startup has completed enough for the bot to be considered ready.
     pub startup_ready: Arc<AtomicBool>,
 }
@@ -359,14 +370,6 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         sorted_count_entries(&counts)
     }
 
-    fn top_label(entries: &[serde_json::Value]) -> Option<String> {
-        entries
-            .first()
-            .and_then(|entry| entry.get("label"))
-            .and_then(|value| value.as_str())
-            .map(ToString::to_string)
-    }
-
     fn top_count(entries: &[serde_json::Value]) -> usize {
         entries
             .first()
@@ -407,41 +410,69 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         }
     }
 
-    fn push_override_suggestion(
-        suggestions: &mut Vec<serde_json::Value>,
+    fn bucket_scope_label(asset_class: &str, event_subtype: &str) -> String {
+        match (asset_class, event_subtype) {
+            ("any", "any") => "all".into(),
+            (_, "any") => asset_class.to_string(),
+            ("any", _) => event_subtype.to_string(),
+            _ => format!("{asset_class} / {event_subtype}"),
+        }
+    }
+
+    fn dominant_bucket_reason(
+        counts: &std::collections::HashMap<String, usize>,
+    ) -> Option<(String, usize)> {
+        counts
+            .iter()
+            .max_by(|(reason_a, count_a), (reason_b, count_b)| {
+                count_a.cmp(count_b).then_with(|| reason_b.cmp(reason_a))
+            })
+            .map(|(reason, count)| (reason.clone(), *count))
+    }
+
+    fn push_scoped_hint(
+        hints: &mut Vec<serde_json::Value>,
+        kind: &str,
         priority: &str,
-        target_field: &str,
-        direction: &str,
-        asset: Option<&str>,
-        subtype: Option<&str>,
-        source_reason: &str,
-        rationale: String,
+        title: &str,
+        detail: String,
+        scope_label: String,
+        support_count: usize,
     ) {
-        let asset_class = asset_class_for_label(asset);
-        let event_subtype = normalized_event_subtype(subtype);
-        suggestions.push(json!({
+        hints.push(json!({
+            "kind": kind,
             "priority": priority,
-            "target_field": target_field,
-            "direction": direction,
-            "selector_asset_class": asset_class,
-            "selector_event_subtype": event_subtype,
-            "scope_label": match (asset, subtype) {
-                (Some(asset), Some(subtype)) if subtype != "generic" => format!("{asset} / {subtype}"),
-                (Some(asset), _) => asset.to_string(),
-                (_, Some(subtype)) if subtype != "generic" => subtype.to_string(),
-                _ => asset_class.to_string(),
-            },
-            "source_reason": source_reason,
-            "rationale": rationale,
+            "title": title,
+            "detail": detail,
+            "scope_label": scope_label,
+            "support_count": support_count,
         }));
     }
 
-    fn suggestion_family(source_reason: &str) -> &'static str {
-        if source_reason.starts_with("scaled_for_") {
-            "gate_scale"
-        } else {
-            "gate_reject"
-        }
+    fn push_scoped_override_suggestion(
+        suggestions: &mut Vec<serde_json::Value>,
+        kind: &str,
+        priority: &str,
+        target_field: &str,
+        direction: &str,
+        selector_asset_class: &str,
+        selector_event_subtype: &str,
+        source_reason: &str,
+        rationale: String,
+        support_count: usize,
+    ) {
+        suggestions.push(json!({
+            "kind": kind,
+            "priority": priority,
+            "target_field": target_field,
+            "direction": direction,
+            "selector_asset_class": selector_asset_class,
+            "selector_event_subtype": selector_event_subtype,
+            "scope_label": bucket_scope_label(selector_asset_class, selector_event_subtype),
+            "source_reason": source_reason,
+            "rationale": rationale,
+            "support_count": support_count,
+        }));
     }
 
     fn priority_rank(priority: &str) -> u8 {
@@ -472,6 +503,7 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         .count();
     let positions_updated_at = *state.positions_updated_at.read().await;
     let wallet_balance = *state.wallet_balance.read().await;
+    let strategy_financials = state.strategy_financials.read().await.clone();
     let startup_ready = state
         .startup_ready
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -654,274 +686,527 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
     let gate_scale_asset_counts_view = sorted_count_entries(&gate_scale_asset_counts);
     let gate_scale_subtype_counts_view = sorted_count_entries(&gate_scale_subtype_counts);
 
+    let recent_exits: Vec<_> = crate::diagnostics::recent_crypto_exit_decisions()
+        .into_iter()
+        .take(24)
+        .collect();
     let mut crypto_entry_tuning_hints = Vec::new();
     let mut crypto_override_suggestions = Vec::new();
-    if let Some(reason) = top_label(&reason_counts) {
-        let asset = top_label(&asset_counts).unwrap_or_else(|| "当前资产池".into());
-        let subtype = top_label(&subtype_counts).unwrap_or_else(|| "generic".into());
-        match reason.as_str() {
-            "asset_exposure_cap" => push_hint(
-                &mut crypto_entry_tuning_hints,
-                "gate_reject",
-                "high",
-                "先看敞口上限",
-                format!(
-                    "{asset} 最近最常撞前门敞口限制，先检查单资产/单方向上限，而不是先放宽 entry 参数。事件类型：{subtype}。"
-                ),
-            ),
-            "min_order_or_budget" => push_hint(
-                &mut crypto_entry_tuning_hints,
-                "gate_reject",
-                "high",
-                "先看预算与 sizing",
-                format!(
-                    "{asset} 最近更像是预算或最小下单约束问题，优先检查 sizing、可用资金和最小成交额。事件类型：{subtype}。"
-                ),
-            ),
-            "edge_below_threshold" => push_hint(
-                &mut crypto_entry_tuning_hints,
-                "gate_reject",
-                "medium",
-                "先看 edge 门槛",
-                format!(
-                    "{asset} 最近主要卡在 edge，不要先动流动性参数；优先检查 min_edge 与概率校准。事件类型：{subtype}。"
-                ),
-            ),
-            "spread_too_wide" => push_hint(
-                &mut crypto_entry_tuning_hints,
-                "gate_reject",
-                "medium",
-                "先看 spread 与市场流动性",
-                format!(
-                    "{asset} 最近主要卡在价差，优先确认 market spread 是否长期偏宽，再决定是否放宽 max_spread。事件类型：{subtype}。"
-                ),
-            ),
-            "insufficient_depth_buffer" | "insufficient_size_retention" => push_hint(
-                &mut crypto_entry_tuning_hints,
-                "gate_reject",
-                "medium",
-                "先看执行约束",
-                format!(
-                    "{asset} 最近主要卡在 depth/size retention，优先检查 depth ratio、size retention 和 event-aware execution tuning。事件类型：{subtype}。"
-                ),
-            ),
-            _ => {}
-        }
-        match reason.as_str() {
-            "edge_below_threshold" => push_override_suggestion(
-                &mut crypto_override_suggestions,
-                "medium",
-                "min_edge_multiplier",
-                "loosen",
-                Some(&asset),
-                Some(&subtype),
-                "edge_below_threshold",
-                format!(
-                    "{asset} 最近主要因为 edge 不足被挡在前门，适合先审视对应桶的 min_edge 是否过严。"
-                ),
-            ),
-            "spread_too_wide" => push_override_suggestion(
-                &mut crypto_override_suggestions,
-                "medium",
-                "max_spread_multiplier",
-                "loosen",
-                Some(&asset),
-                Some(&subtype),
-                "spread_too_wide",
-                format!(
-                    "{asset} 最近主要因为 spread 过宽被挡掉，若确认市场长期偏宽，可放松对应桶的 max_spread。"
-                ),
-            ),
-            "insufficient_depth_buffer" => push_override_suggestion(
-                &mut crypto_override_suggestions,
-                "medium",
-                "depth_ratio_multiplier",
-                "loosen",
-                Some(&asset),
-                Some(&subtype),
-                "insufficient_depth_buffer",
-                format!(
-                    "{asset} 最近主要卡在 depth buffer，若不是想继续牺牲成交概率，可先放松对应桶的 depth ratio。"
-                ),
-            ),
-            "insufficient_size_retention" => push_override_suggestion(
-                &mut crypto_override_suggestions,
-                "medium",
-                "size_retention_multiplier",
-                "loosen",
-                Some(&asset),
-                Some(&subtype),
-                "insufficient_size_retention",
-                format!(
-                    "{asset} 最近主要卡在 retained size，若不是想继续缩量，可先放松对应桶的 retained-size 约束。"
-                ),
-            ),
-            "asset_exposure_cap" => push_override_suggestion(
-                &mut crypto_override_suggestions,
-                "high",
-                "max_exposure_per_asset_pct",
-                "raise",
-                Some(&asset),
-                Some(&subtype),
-                "asset_exposure_cap",
-                format!(
-                    "{asset} 最近反复撞资产敞口上限，更像是风控容量问题，而不是 entry 参数问题。"
-                ),
-            ),
-            _ => {}
-        }
-    }
-    if let Some(reason) = top_label(&gate_scale_reason_counts_view) {
-        let asset = top_label(&gate_scale_asset_counts_view).unwrap_or_else(|| "当前资产池".into());
-        let subtype =
-            top_label(&gate_scale_subtype_counts_view).unwrap_or_else(|| "generic".into());
-        match reason.as_str() {
-            "scaled_for_depth_buffer" => push_hint(
-                &mut crypto_entry_tuning_hints,
-                "gate_scale",
-                "medium",
-                "前门主要在预缩量而非拒绝",
-                format!(
-                    "{asset} 最近更多是为满足 depth buffer 被前置缩量，说明 entry 能过但目标下单量偏乐观。优先检查 depth ratio、Kelly 和事件桶 depth multiplier。事件类型：{subtype}。"
-                ),
-            ),
-            "scaled_for_size_retention" => push_hint(
-                &mut crypto_entry_tuning_hints,
-                "gate_scale",
-                "medium",
-                "数量保真主导缩量",
-                format!(
-                    "{asset} 最近更多是为了满足 retained size 被缩量，说明 execution 质量约束在主导。优先检查 size retention multiplier 和 event-aware sizing。事件类型：{subtype}。"
-                ),
-            ),
-            _ => {}
-        }
-        match reason.as_str() {
-            "scaled_for_depth_buffer" => push_override_suggestion(
-                &mut crypto_override_suggestions,
-                "medium",
-                "size_multiplier",
-                "tighten",
-                Some(&asset),
-                Some(&subtype),
-                "scaled_for_depth_buffer",
-                format!(
-                    "{asset} 最近更多是为了满足 depth buffer 被预缩量，说明这个桶的目标下单量偏大，适合先收紧 size。"
-                ),
-            ),
-            "scaled_for_size_retention" => push_override_suggestion(
-                &mut crypto_override_suggestions,
-                "medium",
-                "size_multiplier",
-                "tighten",
-                Some(&asset),
-                Some(&subtype),
-                "scaled_for_size_retention",
-                format!(
-                    "{asset} 最近更多是为了满足 retained size 被预缩量，说明这个桶的 sizing 对当前流动性过于乐观。"
-                ),
-            ),
-            _ => {}
-        }
-    }
-    let mut bucket_family_counts: std::collections::HashMap<(String, String), (usize, usize)> =
-        std::collections::HashMap::new();
+    let mut crypto_post_entry_tuning_hints = Vec::new();
+    let mut crypto_post_entry_override_suggestions = Vec::new();
+
+    let mut bucket_reject_reason_counts: std::collections::HashMap<
+        (String, String),
+        std::collections::HashMap<String, usize>,
+    > = std::collections::HashMap::new();
+    let mut bucket_scale_reason_counts: std::collections::HashMap<
+        (String, String),
+        std::collections::HashMap<String, usize>,
+    > = std::collections::HashMap::new();
+    let mut bucket_asset_counts: std::collections::HashMap<
+        (String, String),
+        std::collections::HashMap<String, usize>,
+    > = std::collections::HashMap::new();
+
     for decision in &recent_gate_rejects {
         let key = (
             asset_class_for_label(Some(&decision.asset)).to_string(),
             normalized_event_subtype(decision.event_subtype.as_deref()).to_string(),
         );
-        bucket_family_counts.entry(key).or_default().0 += 1;
+        *bucket_reject_reason_counts
+            .entry(key.clone())
+            .or_default()
+            .entry(decision.reason.clone())
+            .or_insert(0) += 1;
+        *bucket_asset_counts
+            .entry(key)
+            .or_default()
+            .entry(decision.asset.clone())
+            .or_insert(0) += 1;
     }
     for decision in &recent_gate_scales {
         let key = (
             asset_class_for_label(Some(&decision.asset)).to_string(),
             normalized_event_subtype(decision.event_subtype.as_deref()).to_string(),
         );
-        bucket_family_counts.entry(key).or_default().1 += 1;
+        *bucket_scale_reason_counts
+            .entry(key.clone())
+            .or_default()
+            .entry(decision.reason.clone())
+            .or_insert(0) += 1;
+        *bucket_asset_counts
+            .entry(key)
+            .or_default()
+            .entry(decision.asset.clone())
+            .or_insert(0) += 1;
     }
-    crypto_override_suggestions.retain(|suggestion| {
-        let asset_class = suggestion
-            .get("selector_asset_class")
-            .and_then(|value| value.as_str())
-            .unwrap_or("any")
-            .to_string();
-        let event_subtype = suggestion
-            .get("selector_event_subtype")
-            .and_then(|value| value.as_str())
-            .unwrap_or("any")
-            .to_string();
-        let source_reason = suggestion
-            .get("source_reason")
-            .and_then(|value| value.as_str())
-            .unwrap_or("");
-        let Some((reject_count, scale_count)) =
-            bucket_family_counts.get(&(asset_class, event_subtype))
-        else {
-            return true;
-        };
-        if reject_count == scale_count {
-            return true;
+
+    let mut entry_bucket_actions = Vec::new();
+    let mut bucket_keys: std::collections::BTreeSet<(String, String)> =
+        std::collections::BTreeSet::new();
+    bucket_keys.extend(bucket_reject_reason_counts.keys().cloned());
+    bucket_keys.extend(bucket_scale_reason_counts.keys().cloned());
+    for (asset_class, event_subtype) in bucket_keys {
+        let reject_reasons = bucket_reject_reason_counts
+            .get(&(asset_class.clone(), event_subtype.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let scale_reasons = bucket_scale_reason_counts
+            .get(&(asset_class.clone(), event_subtype.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let reject_total: usize = reject_reasons.values().sum();
+        let scale_total: usize = scale_reasons.values().sum();
+        if reject_total == 0 && scale_total == 0 {
+            continue;
         }
-        let dominant_family = if scale_count > reject_count {
-            "gate_scale"
+        let (family, dominant_reason, support_count) = if scale_total > reject_total {
+            let Some((reason, count)) = dominant_bucket_reason(&scale_reasons) else {
+                continue;
+            };
+            ("gate_scale", reason, count)
         } else {
-            "gate_reject"
+            let Some((reason, count)) = dominant_bucket_reason(&reject_reasons) else {
+                continue;
+            };
+            ("gate_reject", reason, count)
         };
-        suggestion_family(source_reason) == dominant_family
+        let top_asset = bucket_asset_counts
+            .get(&(asset_class.clone(), event_subtype.clone()))
+            .and_then(top_count_entry)
+            .and_then(|value| {
+                value
+                    .get("label")
+                    .and_then(|label| label.as_str())
+                    .map(ToString::to_string)
+            })
+            .unwrap_or_else(|| asset_class.clone());
+        entry_bucket_actions.push((
+            asset_class,
+            event_subtype,
+            family.to_string(),
+            dominant_reason,
+            support_count,
+            top_asset,
+        ));
+    }
+    entry_bucket_actions.sort_by(|a, b| {
+        b.4.cmp(&a.4)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
     });
-    let mut deduped_override_suggestions: std::collections::HashMap<
-        (String, String, String, String),
-        serde_json::Value,
-    > = std::collections::HashMap::new();
-    for suggestion in crypto_override_suggestions {
-        let key = (
-            suggestion
-                .get("selector_asset_class")
-                .and_then(|value| value.as_str())
-                .unwrap_or("any")
-                .to_string(),
-            suggestion
-                .get("selector_event_subtype")
-                .and_then(|value| value.as_str())
-                .unwrap_or("any")
-                .to_string(),
-            suggestion
-                .get("target_field")
-                .and_then(|value| value.as_str())
-                .unwrap_or("")
-                .to_string(),
-            suggestion
-                .get("direction")
-                .and_then(|value| value.as_str())
-                .unwrap_or("")
-                .to_string(),
-        );
-        match deduped_override_suggestions.get(&key) {
-            Some(existing) => {
-                let existing_priority = priority_rank(
-                    existing
-                        .get("priority")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or(""),
+    for (asset_class, event_subtype, family, dominant_reason, support_count, top_asset) in
+        entry_bucket_actions.into_iter().take(6)
+    {
+        let scope_label = bucket_scope_label(&asset_class, &event_subtype);
+        match (family.as_str(), dominant_reason.as_str()) {
+            ("gate_reject", "asset_exposure_cap") => {
+                push_scoped_hint(
+                    &mut crypto_entry_tuning_hints,
+                    "gate_reject",
+                    "high",
+                    "先看敞口上限",
+                    format!(
+                        "{scope_label} 最近主要被 {top_asset} 的资产敞口限制挡住，先看容量上限，不要先放宽 entry 参数。"
+                    ),
+                    scope_label.clone(),
+                    support_count,
                 );
-                let new_priority = priority_rank(
-                    suggestion
-                        .get("priority")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or(""),
+                push_scoped_override_suggestion(
+                    &mut crypto_override_suggestions,
+                    "entry",
+                    "high",
+                    "max_exposure_per_asset_pct",
+                    "raise",
+                    &asset_class,
+                    &event_subtype,
+                    "asset_exposure_cap",
+                    format!("{scope_label} 最近更像容量不够，而不是 alpha 不够。"),
+                    support_count,
                 );
-                if new_priority > existing_priority {
-                    deduped_override_suggestions.insert(key, suggestion);
-                }
             }
-            None => {
-                deduped_override_suggestions.insert(key, suggestion);
+            ("gate_reject", "min_order_or_budget") => {
+                push_scoped_hint(
+                    &mut crypto_entry_tuning_hints,
+                    "gate_reject",
+                    "high",
+                    "先看预算与 sizing",
+                    format!(
+                        "{scope_label} 最近主要卡在预算/最小下单，优先检查 sizing 和可用资金，而不是先放宽 edge。"
+                    ),
+                    scope_label.clone(),
+                    support_count,
+                );
+                push_scoped_override_suggestion(
+                    &mut crypto_override_suggestions,
+                    "entry",
+                    "medium",
+                    "size_multiplier",
+                    "tighten",
+                    &asset_class,
+                    &event_subtype,
+                    "min_order_or_budget",
+                    format!(
+                        "{scope_label} 最近经常连最小有效下单量都够不到，说明 sizing 对预算仍偏乐观。"
+                    ),
+                    support_count,
+                );
             }
+            ("gate_reject", "edge_below_threshold") => {
+                push_scoped_hint(
+                    &mut crypto_entry_tuning_hints,
+                    "gate_reject",
+                    "medium",
+                    "先看 edge 门槛",
+                    format!(
+                        "{scope_label} 最近更像 alpha 不足，优先审视 min_edge 和概率校准，而不是先动流动性参数。"
+                    ),
+                    scope_label.clone(),
+                    support_count,
+                );
+                push_scoped_override_suggestion(
+                    &mut crypto_override_suggestions,
+                    "entry",
+                    "medium",
+                    "min_edge_multiplier",
+                    "loosen",
+                    &asset_class,
+                    &event_subtype,
+                    "edge_below_threshold",
+                    format!("{scope_label} 最近主要因为 edge 不够进不去，先看 min_edge 是否过严。"),
+                    support_count,
+                );
+            }
+            ("gate_reject", "spread_too_wide") => {
+                push_scoped_hint(
+                    &mut crypto_entry_tuning_hints,
+                    "gate_reject",
+                    "medium",
+                    "先看 spread 与流动性",
+                    format!(
+                        "{scope_label} 最近主要卡在价差，优先确认这类市场是不是长期偏宽，再决定是否放松 max_spread。"
+                    ),
+                    scope_label.clone(),
+                    support_count,
+                );
+                push_scoped_override_suggestion(
+                    &mut crypto_override_suggestions,
+                    "entry",
+                    "medium",
+                    "max_spread_multiplier",
+                    "loosen",
+                    &asset_class,
+                    &event_subtype,
+                    "spread_too_wide",
+                    format!("{scope_label} 最近主要因为 spread 过宽被挡掉，适合先审 max_spread。"),
+                    support_count,
+                );
+            }
+            ("gate_reject", "insufficient_depth_buffer") => {
+                push_scoped_hint(
+                    &mut crypto_entry_tuning_hints,
+                    "gate_reject",
+                    "medium",
+                    "先看 depth 约束",
+                    format!(
+                        "{scope_label} 最近主要卡在 depth buffer，不像是纯 edge 不足，更像执行约束过紧。"
+                    ),
+                    scope_label.clone(),
+                    support_count,
+                );
+                push_scoped_override_suggestion(
+                    &mut crypto_override_suggestions,
+                    "entry",
+                    "medium",
+                    "depth_ratio_multiplier",
+                    "loosen",
+                    &asset_class,
+                    &event_subtype,
+                    "insufficient_depth_buffer",
+                    format!(
+                        "{scope_label} 最近反复卡在 depth buffer，优先看 depth_ratio_multiplier。"
+                    ),
+                    support_count,
+                );
+            }
+            ("gate_reject", "insufficient_size_retention") => {
+                push_scoped_hint(
+                    &mut crypto_entry_tuning_hints,
+                    "gate_reject",
+                    "medium",
+                    "先看 retained size 约束",
+                    format!(
+                        "{scope_label} 最近主要卡在 retained size，更像 execution quality 约束主导。"
+                    ),
+                    scope_label.clone(),
+                    support_count,
+                );
+                push_scoped_override_suggestion(
+                    &mut crypto_override_suggestions,
+                    "entry",
+                    "medium",
+                    "size_retention_multiplier",
+                    "loosen",
+                    &asset_class,
+                    &event_subtype,
+                    "insufficient_size_retention",
+                    format!(
+                        "{scope_label} 最近 retained-size 门槛偏严，优先看 size_retention_multiplier。"
+                    ),
+                    support_count,
+                );
+            }
+            ("gate_scale", "scaled_for_depth_buffer") => {
+                push_scoped_hint(
+                    &mut crypto_entry_tuning_hints,
+                    "gate_scale",
+                    "medium",
+                    "前门主要在预缩量",
+                    format!(
+                        "{scope_label} 最近更多是为了满足 depth buffer 被前置缩量，说明目标下单量对当前深度偏乐观。"
+                    ),
+                    scope_label.clone(),
+                    support_count,
+                );
+                push_scoped_override_suggestion(
+                    &mut crypto_override_suggestions,
+                    "entry",
+                    "medium",
+                    "size_multiplier",
+                    "tighten",
+                    &asset_class,
+                    &event_subtype,
+                    "scaled_for_depth_buffer",
+                    format!(
+                        "{scope_label} 最近经常因为 depth buffer 被预裁单，先收紧 size 更自然。"
+                    ),
+                    support_count,
+                );
+            }
+            ("gate_scale", "scaled_for_size_retention") => {
+                push_scoped_hint(
+                    &mut crypto_entry_tuning_hints,
+                    "gate_scale",
+                    "medium",
+                    "数量保真主导缩量",
+                    format!(
+                        "{scope_label} 最近更多是为了满足 retained size 被前置缩量，说明 sizing 对实际流动性仍偏乐观。"
+                    ),
+                    scope_label.clone(),
+                    support_count,
+                );
+                push_scoped_override_suggestion(
+                    &mut crypto_override_suggestions,
+                    "entry",
+                    "medium",
+                    "size_multiplier",
+                    "tighten",
+                    &asset_class,
+                    &event_subtype,
+                    "scaled_for_size_retention",
+                    format!(
+                        "{scope_label} 最近经常因为 retained size 被预缩量，先收紧 size 更贴近真实可执行量。"
+                    ),
+                    support_count,
+                );
+            }
+            _ => {}
         }
     }
-    let mut crypto_override_suggestions: Vec<_> =
-        deduped_override_suggestions.into_values().collect();
+
+    let mut exit_bucket_reason_counts: std::collections::HashMap<
+        (String, String),
+        std::collections::HashMap<String, usize>,
+    > = std::collections::HashMap::new();
+    let mut exit_bucket_asset_counts: std::collections::HashMap<
+        (String, String),
+        std::collections::HashMap<String, usize>,
+    > = std::collections::HashMap::new();
+    for decision in &recent_exits {
+        let asset_label = decision.asset.as_deref().unwrap_or_default();
+        let key = (
+            asset_class_for_label(Some(asset_label)).to_string(),
+            normalized_event_subtype(decision.event_subtype.as_deref()).to_string(),
+        );
+        *exit_bucket_reason_counts
+            .entry(key.clone())
+            .or_default()
+            .entry(decision.reason.clone())
+            .or_insert(0) += 1;
+        if !asset_label.is_empty() {
+            *exit_bucket_asset_counts
+                .entry(key)
+                .or_default()
+                .entry(asset_label.to_string())
+                .or_insert(0) += 1;
+        }
+    }
+    let mut exit_bucket_actions = Vec::new();
+    for ((asset_class, event_subtype), reason_counts_by_bucket) in exit_bucket_reason_counts {
+        let Some((dominant_reason, support_count)) =
+            dominant_bucket_reason(&reason_counts_by_bucket)
+        else {
+            continue;
+        };
+        let top_asset = exit_bucket_asset_counts
+            .get(&(asset_class.clone(), event_subtype.clone()))
+            .and_then(top_count_entry)
+            .and_then(|value| {
+                value
+                    .get("label")
+                    .and_then(|label| label.as_str())
+                    .map(ToString::to_string)
+            })
+            .unwrap_or_else(|| asset_class.clone());
+        exit_bucket_actions.push((
+            asset_class,
+            event_subtype,
+            dominant_reason,
+            support_count,
+            top_asset,
+        ));
+    }
+    exit_bucket_actions.sort_by(|a, b| {
+        b.3.cmp(&a.3)
+            .then_with(|| a.0.cmp(&b.0))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    for (asset_class, event_subtype, dominant_reason, support_count, top_asset) in
+        exit_bucket_actions.into_iter().take(4)
+    {
+        let scope_label = bucket_scope_label(&asset_class, &event_subtype);
+        match dominant_reason.as_str() {
+            "edge_decay" => {
+                push_scoped_hint(
+                    &mut crypto_post_entry_tuning_hints,
+                    "post_entry",
+                    "medium",
+                    "持仓后 edge 衰减偏快",
+                    format!(
+                        "{scope_label} 最近更多由 {top_asset} 的 edge_decay 触发，说明 entry 后 edge 保持性偏弱。"
+                    ),
+                    scope_label.clone(),
+                    support_count,
+                );
+                push_scoped_override_suggestion(
+                    &mut crypto_post_entry_override_suggestions,
+                    "post_entry",
+                    "medium",
+                    "hold_edge_multiplier",
+                    "tighten",
+                    &asset_class,
+                    &event_subtype,
+                    "edge_decay",
+                    format!("{scope_label} 最近频繁 edge_decay，适合先提高 hold-edge 要求。"),
+                    support_count,
+                );
+            }
+            "capital_efficiency" => {
+                push_scoped_hint(
+                    &mut crypto_post_entry_tuning_hints,
+                    "post_entry",
+                    "medium",
+                    "资金效率退出偏多",
+                    format!(
+                        "{scope_label} 最近更多由 {top_asset} 的 capital_efficiency 离场，说明这类仓位更像短拿而非继续持有。"
+                    ),
+                    scope_label.clone(),
+                    support_count,
+                );
+                push_scoped_override_suggestion(
+                    &mut crypto_post_entry_override_suggestions,
+                    "post_entry",
+                    "medium",
+                    "capital_efficiency_multiplier",
+                    "tighten",
+                    &asset_class,
+                    &event_subtype,
+                    "capital_efficiency",
+                    format!(
+                        "{scope_label} 最近资金效率退出偏多，适合让这类仓位更早承认 capital efficiency。"
+                    ),
+                    support_count,
+                );
+            }
+            "model_reversal" => {
+                push_scoped_hint(
+                    &mut crypto_post_entry_tuning_hints,
+                    "post_entry",
+                    "medium",
+                    "模型反转退出偏多",
+                    format!(
+                        "{scope_label} 最近更多由 {top_asset} 的 model_reversal 离场，说明 reversal buffer 可能偏宽。"
+                    ),
+                    scope_label.clone(),
+                    support_count,
+                );
+                push_scoped_override_suggestion(
+                    &mut crypto_post_entry_override_suggestions,
+                    "post_entry",
+                    "medium",
+                    "model_reversal_buffer_multiplier",
+                    "tighten",
+                    &asset_class,
+                    &event_subtype,
+                    "model_reversal",
+                    format!("{scope_label} 最近模型反转退出偏多，适合先收紧 reversal buffer。"),
+                    support_count,
+                );
+            }
+            "relative_stop_loss" => {
+                push_scoped_hint(
+                    &mut crypto_post_entry_tuning_hints,
+                    "post_entry",
+                    "high",
+                    "止损退出偏多",
+                    format!(
+                        "{scope_label} 最近更多由 {top_asset} 的 relative_stop_loss 离场，说明 entry 后下行容忍度可能过高。"
+                    ),
+                    scope_label.clone(),
+                    support_count,
+                );
+                push_scoped_override_suggestion(
+                    &mut crypto_post_entry_override_suggestions,
+                    "post_entry",
+                    "high",
+                    "size_multiplier",
+                    "tighten",
+                    &asset_class,
+                    &event_subtype,
+                    "relative_stop_loss",
+                    format!(
+                        "{scope_label} 最近止损退出偏多，先收紧 size 往往比继续放宽 exits 更稳。"
+                    ),
+                    support_count,
+                );
+            }
+            _ => {}
+        }
+    }
+
+    crypto_entry_tuning_hints.sort_by(|a, b| {
+        let a_priority = priority_rank(
+            a.get("priority")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+        );
+        let b_priority = priority_rank(
+            b.get("priority")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+        );
+        let a_support = a
+            .get("support_count")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let b_support = b
+            .get("support_count")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        b_priority
+            .cmp(&a_priority)
+            .then_with(|| b_support.cmp(&a_support))
+    });
     crypto_override_suggestions.sort_by(|a, b| {
         let a_priority = priority_rank(
             a.get("priority")
@@ -933,12 +1218,65 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
                 .and_then(|value| value.as_str())
                 .unwrap_or(""),
         );
-        b_priority.cmp(&a_priority).then_with(|| {
-            a.get("target_field")
-                .and_then(|value| value.as_str())
-                .cmp(&b.get("target_field").and_then(|value| value.as_str()))
-        })
+        let a_support = a
+            .get("support_count")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let b_support = b
+            .get("support_count")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        b_priority
+            .cmp(&a_priority)
+            .then_with(|| b_support.cmp(&a_support))
     });
+    crypto_post_entry_tuning_hints.sort_by(|a, b| {
+        let a_priority = priority_rank(
+            a.get("priority")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+        );
+        let b_priority = priority_rank(
+            b.get("priority")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+        );
+        let a_support = a
+            .get("support_count")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let b_support = b
+            .get("support_count")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        b_priority
+            .cmp(&a_priority)
+            .then_with(|| b_support.cmp(&a_support))
+    });
+    crypto_post_entry_override_suggestions.sort_by(|a, b| {
+        let a_priority = priority_rank(
+            a.get("priority")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+        );
+        let b_priority = priority_rank(
+            b.get("priority")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+        );
+        let a_support = a
+            .get("support_count")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let b_support = b
+            .get("support_count")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        b_priority
+            .cmp(&a_priority)
+            .then_with(|| b_support.cmp(&a_support))
+    });
+
     if top_count(&gate_scale_reason_counts_view) > top_count(&reason_counts)
         && !gate_scale_reason_counts_view.is_empty()
     {
@@ -963,6 +1301,7 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         "trading_ready": ready_accounts > 0 && startup_ready && health_ready,
         "startup_ready": startup_ready,
         "wallet_balance": wallet_balance,
+        "strategy_financials": strategy_financials,
         "positions_snapshot_updated_at": positions_updated_at.map(|ts| ts.to_rfc3339()),
         "crypto_gate_reject_summary": {
             "recent_count": recent_gate_rejects.len(),
@@ -1010,6 +1349,8 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         },
         "crypto_entry_tuning_hints": crypto_entry_tuning_hints,
         "crypto_override_suggestions": crypto_override_suggestions,
+        "crypto_post_entry_tuning_hints": crypto_post_entry_tuning_hints,
+        "crypto_post_entry_override_suggestions": crypto_post_entry_override_suggestions,
         "accounts": account_status,
     }))
 }

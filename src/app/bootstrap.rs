@@ -74,6 +74,11 @@ pub fn start_api_server(
     shared_positions: Arc<tokio::sync::RwLock<Vec<PositionApiEntry>>>,
     shared_positions_updated_at: Arc<tokio::sync::RwLock<Option<chrono::DateTime<Utc>>>>,
     wallet_balance: Arc<tokio::sync::RwLock<rust_decimal::Decimal>>,
+    strategy_financials: Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, pa_monitor::api::StrategyFinancialEntry>,
+        >,
+    >,
     startup_ready: Arc<AtomicBool>,
 ) {
     let api_state = Arc::new(ApiState {
@@ -87,6 +92,7 @@ pub fn start_api_server(
         positions: shared_positions,
         positions_updated_at: shared_positions_updated_at,
         wallet_balance,
+        strategy_financials,
         startup_ready,
     });
     let health_port = settings.monitor.health_port;

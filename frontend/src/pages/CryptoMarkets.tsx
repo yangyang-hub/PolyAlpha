@@ -52,6 +52,14 @@ function decisionReasonLabel(reason: string): string {
       return "价差";
     case "size":
       return "数量";
+    case "edge_decay":
+      return "Edge Decay";
+    case "capital_efficiency":
+      return "资金效率";
+    case "model_reversal":
+      return "模型反转";
+    case "relative_stop_loss":
+      return "相对止损";
     case "scaled_for_size_retention":
       return "预缩量-数量保真";
     case "scaled_for_depth_buffer":
@@ -150,7 +158,11 @@ export default function CryptoMarkets() {
     (sum, p) => sum + Number(p.current_price ?? 0) * Number(p.size),
     0,
   );
-  const walletBalance = Number(status?.wallet_balance ?? 0);
+  const strategyFinancials = status?.strategy_financials?.crypto_alpha;
+  const walletBalance = Number(strategyFinancials?.wallet_balance ?? 0);
+  const strategyPositionsMarketValue = Number(strategyFinancials?.positions_market_value ?? totalMarkValue);
+  const strategyPortfolioValue = Number(strategyFinancials?.portfolio_value ?? walletBalance + strategyPositionsMarketValue);
+  const strategyRealizedPnl = Number(strategyFinancials?.realized_pnl ?? 0);
   const marketCount = new Set((positions ?? []).map((p) => p.condition_id).filter(Boolean)).size;
   const decisionAssetOptions = ["全部", ...Array.from(new Set((decisions ?? []).map((decision) => decision.asset)))];
   const decisionDirectionOptions = [
@@ -294,6 +306,8 @@ export default function CryptoMarkets() {
   const gateScaleRecentCount = status?.crypto_gate_scale_summary?.recent_count ?? visibleGateScales.length;
   const tuningHints = status?.crypto_entry_tuning_hints ?? [];
   const overrideSuggestions = status?.crypto_override_suggestions ?? [];
+  const postEntryHints = status?.crypto_post_entry_tuning_hints ?? [];
+  const postEntryOverrideSuggestions = status?.crypto_post_entry_override_suggestions ?? [];
   const averageEfficiencyDelta =
     visibleReplacements.length > 0
       ? visibleReplacements.reduce(
@@ -411,6 +425,29 @@ export default function CryptoMarkets() {
         </div>
       )}
 
+      {status && (
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <div className="stat bg-base-200 rounded-box p-4">
+            <div className="stat-title text-xs">资产总值</div>
+            <div className="stat-value text-lg">${strategyPortfolioValue.toFixed(2)}</div>
+          </div>
+          <div className="stat bg-base-200 rounded-box p-4">
+            <div className="stat-title text-xs">可用余额</div>
+            <div className="stat-value text-lg">${walletBalance.toFixed(2)}</div>
+          </div>
+          <div className="stat bg-base-200 rounded-box p-4">
+            <div className="stat-title text-xs">持仓市值</div>
+            <div className="stat-value text-lg">${strategyPositionsMarketValue.toFixed(2)}</div>
+          </div>
+          <div className="stat bg-base-200 rounded-box p-4">
+            <div className="stat-title text-xs">已实现收益（进程内）</div>
+            <div className={`stat-value text-lg ${strategyRealizedPnl >= 0 ? "text-success" : "text-error"}`}>
+              ${strategyRealizedPnl.toFixed(2)}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Strategy stats */}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-5">
         <div className="stat bg-base-200 rounded-box p-4">
@@ -427,7 +464,7 @@ export default function CryptoMarkets() {
         </div>
         <div className="stat bg-base-200 rounded-box p-4">
           <div className="stat-title text-xs">持仓市值</div>
-          <div className="stat-value text-lg">${totalMarkValue.toFixed(2)}</div>
+          <div className="stat-value text-lg">${strategyPositionsMarketValue.toFixed(2)}</div>
         </div>
         <div className="stat bg-base-200 rounded-box p-4">
           <div className="stat-title text-xs">未实现盈亏</div>
@@ -849,6 +886,12 @@ export default function CryptoMarkets() {
                       >
                         {hint.priority}
                       </span>
+                      {hint.scope_label ? (
+                        <span className="badge badge-sm badge-outline">{hint.scope_label}</span>
+                      ) : null}
+                      {hint.support_count ? (
+                        <span className="badge badge-sm badge-ghost">{hint.support_count}x</span>
+                      ) : null}
                       <span className="font-medium">{hint.title}</span>
                     </div>
                     <div className="opacity-80">{hint.detail}</div>
@@ -879,6 +922,82 @@ export default function CryptoMarkets() {
                         {suggestion.priority}
                       </span>
                       <span className="font-medium">{suggestion.scope_label}</span>
+                      {suggestion.support_count ? (
+                        <span className="badge badge-sm badge-ghost">{suggestion.support_count}x</span>
+                      ) : null}
+                      <span className="badge badge-sm badge-outline">{suggestion.target_field}</span>
+                      <span className="badge badge-sm badge-outline">{suggestion.direction}</span>
+                    </div>
+                    <div className="mb-1 opacity-80">{suggestion.rationale}</div>
+                    <div className="opacity-60">
+                      selector: class={suggestion.selector_asset_class}
+                      {" · "}
+                      event={suggestion.selector_event_subtype}
+                      {" · "}
+                      source={decisionReasonLabel(suggestion.source_reason)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {postEntryHints.length > 0 && (
+            <div className="mb-3 rounded-box bg-accent/10 px-3 py-2 text-xs">
+              <div className="mb-2 font-medium">持仓 / 退出参数建议</div>
+              <div className="grid gap-2">
+                {postEntryHints.slice(0, 3).map((hint, index) => (
+                  <div key={`${hint.kind}-${hint.title}-${index}`} className="rounded-box bg-base-100/60 px-2 py-2">
+                    <div className="mb-1 flex items-center gap-2">
+                      <span
+                        className={`badge badge-sm ${
+                          hint.priority === "high"
+                            ? "badge-error"
+                            : hint.priority === "medium"
+                              ? "badge-warning"
+                              : "badge-info"
+                        }`}
+                      >
+                        {hint.priority}
+                      </span>
+                      {hint.scope_label ? (
+                        <span className="badge badge-sm badge-outline">{hint.scope_label}</span>
+                      ) : null}
+                      {hint.support_count ? (
+                        <span className="badge badge-sm badge-ghost">{hint.support_count}x</span>
+                      ) : null}
+                      <span className="font-medium">{hint.title}</span>
+                    </div>
+                    <div className="opacity-80">{hint.detail}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {postEntryOverrideSuggestions.length > 0 && (
+            <div className="mb-3 rounded-box bg-warning/10 px-3 py-2 text-xs">
+              <div className="mb-2 font-medium">建议的持仓 / 退出 Override 调整</div>
+              <div className="grid gap-2">
+                {postEntryOverrideSuggestions.slice(0, 3).map((suggestion, index) => (
+                  <div
+                    key={`${suggestion.target_field}-${suggestion.scope_label}-${index}`}
+                    className="rounded-box bg-base-100/60 px-2 py-2"
+                  >
+                    <div className="mb-1 flex flex-wrap items-center gap-2">
+                      <span
+                        className={`badge badge-sm ${
+                          suggestion.priority === "high"
+                            ? "badge-error"
+                            : suggestion.priority === "medium"
+                              ? "badge-warning"
+                              : "badge-info"
+                        }`}
+                      >
+                        {suggestion.priority}
+                      </span>
+                      <span className="font-medium">{suggestion.scope_label}</span>
+                      {suggestion.support_count ? (
+                        <span className="badge badge-sm badge-ghost">{suggestion.support_count}x</span>
+                      ) : null}
                       <span className="badge badge-sm badge-outline">{suggestion.target_field}</span>
                       <span className="badge badge-sm badge-outline">{suggestion.direction}</span>
                     </div>

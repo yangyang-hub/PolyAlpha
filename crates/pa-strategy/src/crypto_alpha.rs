@@ -2639,12 +2639,19 @@ impl CryptoAlphaStrategy {
             * event_size_multiplier
             * horizon_size_multiplier
             * effective_max;
-        let adaptive_gate_scale_multiplier = self.adaptive_gate_scale_size_multiplier(
-            asset,
-            gate_context.and_then(|context| {
-                Self::parse_event_subtype_label(context.event_subtype.as_deref())
-            }),
-        );
+        let gate_event_subtype = gate_context
+            .and_then(|context| Self::parse_event_subtype_label(context.event_subtype.as_deref()));
+        let adaptive_gate_scale_multiplier = self
+            .adaptive_gate_scale_size_multiplier(
+                asset,
+                gate_event_subtype,
+                Some("scaled_for_depth_buffer"),
+            )
+            .min(self.adaptive_gate_scale_size_multiplier(
+                asset,
+                gate_event_subtype,
+                Some("scaled_for_size_retention"),
+            ));
         let size = (kelly_size * adaptive_gate_scale_multiplier)
             .min(effective_max)
             .min(available);
@@ -2721,6 +2728,8 @@ impl CryptoAlphaStrategy {
                     gate_context.is_yes,
                     gate_context.condition_id,
                     scale_reason,
+                    size,
+                    unconstrained_size,
                     gate_context.event_context_source.clone(),
                     gate_context.event_title.clone(),
                     gate_context.event_category.clone(),
@@ -2798,12 +2807,84 @@ impl CryptoAlphaStrategy {
         Some(size)
     }
 
+    fn adaptive_gate_scale_signal(
+        &self,
+        asset: &'static CryptoAsset,
+        event_subtype: Option<CryptoEventSubtype>,
+        preferred_reason: Option<&str>,
+        exact_asset: bool,
+    ) -> Decimal {
+        let lookback = self.config.gate_scale_feedback_lookback;
+        if lookback == 0 {
+            return Decimal::ZERO;
+        }
+
+        let target_asset_class = Self::asset_class_selector(asset);
+        let target_subtype = Self::event_subtype_selector(event_subtype);
+        let mut signal = Decimal::ZERO;
+        let mut recency_weight = Decimal::ONE;
+        let recency_decay = dec!(0.85);
+
+        for decision in recent_crypto_candidate_decisions()
+            .into_iter()
+            .take(lookback)
+        {
+            if decision.action != "gate_scale" {
+                recency_weight *= recency_decay;
+                continue;
+            }
+            if let Some(reason) = preferred_reason
+                && decision.reason != reason
+            {
+                recency_weight *= recency_decay;
+                continue;
+            }
+            let Some(decision_asset) = CRYPTO_ASSETS
+                .iter()
+                .find(|candidate| candidate.name.eq_ignore_ascii_case(&decision.asset))
+            else {
+                recency_weight *= recency_decay;
+                continue;
+            };
+            if exact_asset {
+                if decision_asset.binance_symbol != asset.binance_symbol {
+                    recency_weight *= recency_decay;
+                    continue;
+                }
+            } else if Self::asset_class_selector(decision_asset) != target_asset_class {
+                recency_weight *= recency_decay;
+                continue;
+            }
+            if Self::event_subtype_selector(Self::parse_event_subtype_label(
+                decision.event_subtype.as_deref(),
+            )) != target_subtype
+            {
+                recency_weight *= recency_decay;
+                continue;
+            }
+
+            let size_retention = if decision.selected_executable_size_retention > Decimal::ZERO {
+                decision
+                    .selected_executable_size_retention
+                    .min(Decimal::ONE)
+                    .max(Decimal::ZERO)
+            } else {
+                Decimal::ONE
+            };
+            let severity = Decimal::ONE + (Decimal::ONE - size_retention).max(Decimal::ZERO);
+            signal += recency_weight * severity;
+            recency_weight *= recency_decay;
+        }
+
+        signal.max(Decimal::ZERO)
+    }
+
     fn adaptive_gate_scale_size_multiplier(
         &self,
         asset: &'static CryptoAsset,
         event_subtype: Option<CryptoEventSubtype>,
+        preferred_reason: Option<&str>,
     ) -> Decimal {
-        let lookback = self.config.gate_scale_feedback_lookback;
         let trigger_count = self.config.gate_scale_feedback_trigger_count;
         let max_steps = self.config.gate_scale_feedback_max_steps;
         let step_multiplier = self
@@ -2812,63 +2893,37 @@ impl CryptoAlphaStrategy {
             .min(Decimal::ONE)
             .max(Decimal::ZERO);
 
-        if lookback == 0 || trigger_count == 0 || max_steps == 0 || step_multiplier >= Decimal::ONE
-        {
+        if trigger_count == 0 || max_steps == 0 || step_multiplier >= Decimal::ONE {
             return Decimal::ONE;
         }
 
-        let target_asset_class = Self::asset_class_selector(asset);
-        let target_subtype = Self::event_subtype_selector(event_subtype);
-        let recent_decisions: Vec<_> = recent_crypto_candidate_decisions()
-            .into_iter()
-            .take(lookback)
-            .collect();
-        let matching_count = |exact_asset: bool| -> u32 {
-            recent_decisions
-                .iter()
-                .filter(|decision| {
-                    if decision.action != "gate_scale" {
-                        return false;
-                    }
-                    if decision.reason != "scaled_for_depth_buffer"
-                        && decision.reason != "scaled_for_size_retention"
-                    {
-                        return false;
-                    }
-
-                    let decision_asset = CRYPTO_ASSETS
-                        .iter()
-                        .find(|candidate| candidate.name.eq_ignore_ascii_case(&decision.asset));
-                    let Some(decision_asset) = decision_asset else {
-                        return false;
-                    };
-                    if exact_asset {
-                        if decision_asset.binance_symbol != asset.binance_symbol {
-                            return false;
-                        }
-                    } else if Self::asset_class_selector(decision_asset) != target_asset_class {
-                        return false;
-                    }
-
-                    Self::event_subtype_selector(Self::parse_event_subtype_label(
-                        decision.event_subtype.as_deref(),
-                    )) == target_subtype
-                })
-                .count() as u32
-        };
-        let exact_asset_count = matching_count(true);
-        let matching_count = if exact_asset_count >= trigger_count {
-            exact_asset_count
+        let trigger = Decimal::from(trigger_count);
+        let exact_reason_signal =
+            self.adaptive_gate_scale_signal(asset, event_subtype, preferred_reason, true);
+        let exact_asset_signal = self.adaptive_gate_scale_signal(asset, event_subtype, None, true);
+        let class_reason_signal =
+            self.adaptive_gate_scale_signal(asset, event_subtype, preferred_reason, false);
+        let class_signal = self.adaptive_gate_scale_signal(asset, event_subtype, None, false);
+        let matching_signal = if exact_reason_signal >= trigger {
+            exact_reason_signal
+        } else if exact_asset_signal >= trigger {
+            exact_asset_signal
+        } else if class_reason_signal >= trigger {
+            class_reason_signal
         } else {
-            matching_count(false)
+            class_signal
         };
 
-        if matching_count < trigger_count {
+        if matching_signal < trigger {
             return Decimal::ONE;
         }
 
-        let mut steps = 1 + ((matching_count - trigger_count) / trigger_count);
-        steps = steps.min(max_steps);
+        let mut steps = 0;
+        let mut remaining = matching_signal;
+        while remaining >= trigger && steps < max_steps {
+            steps += 1;
+            remaining -= trigger;
+        }
 
         let mut multiplier = Decimal::ONE;
         for _ in 0..steps {
@@ -3501,6 +3556,8 @@ impl CryptoAlphaStrategy {
             is_yes,
             condition_id,
             reason,
+            Decimal::ZERO,
+            Decimal::ZERO,
             event_context_source,
             event_title,
             event_category,
@@ -3519,6 +3576,8 @@ impl CryptoAlphaStrategy {
         is_yes: bool,
         condition_id: B256,
         reason: &'static str,
+        scaled_size: Decimal,
+        unconstrained_size: Decimal,
         event_context_source: Option<String>,
         event_title: Option<String>,
         event_category: Option<String>,
@@ -3535,6 +3594,8 @@ impl CryptoAlphaStrategy {
             is_yes,
             condition_id,
             reason,
+            scaled_size,
+            unconstrained_size,
             event_context_source,
             event_title,
             event_category,
@@ -3554,11 +3615,21 @@ impl CryptoAlphaStrategy {
         is_yes: bool,
         condition_id: B256,
         reason: &'static str,
+        scaled_size: Decimal,
+        unconstrained_size: Decimal,
         event_context_source: Option<String>,
         event_title: Option<String>,
         event_category: Option<String>,
         event_subtype: Option<String>,
     ) {
+        let executable_size_retention =
+            if action == "gate_scale" && unconstrained_size > Decimal::ZERO {
+                (scaled_size / unconstrained_size)
+                    .min(Decimal::ONE)
+                    .max(Decimal::ZERO)
+            } else {
+                Decimal::ZERO
+            };
         record_crypto_candidate_decision(CryptoCandidateDecision {
             recorded_at: Utc::now(),
             asset: asset.name.to_string(),
@@ -3589,7 +3660,7 @@ impl CryptoAlphaStrategy {
             replaced_efficiency: None,
             selected_executable_profit_retention: Decimal::ZERO,
             replaced_executable_profit_retention: None,
-            selected_executable_size_retention: Decimal::ZERO,
+            selected_executable_size_retention: executable_size_retention,
             replaced_executable_size_retention: None,
             selected_executable_quality_score: Decimal::ZERO,
             replaced_executable_quality_score: None,
@@ -7522,6 +7593,129 @@ mod tests {
             )
             .unwrap();
         assert_eq!(adapted_size, dec!(16.20));
+
+        pa_monitor::diagnostics::clear_crypto_candidate_decisions();
+    }
+
+    #[test]
+    fn test_crypto_gate_scale_feedback_weights_more_severe_scaling_higher() {
+        pa_monitor::diagnostics::clear_crypto_candidate_decisions();
+
+        let token_id = U256::from(46u64);
+        let mut strategy = make_crypto_strategy(
+            HashMap::from([(
+                token_id,
+                OrderBook {
+                    token_id,
+                    bids: vec![PriceLevel {
+                        price: dec!(0.49),
+                        size: dec!(50),
+                    }],
+                    asks: vec![PriceLevel {
+                        price: dec!(0.50),
+                        size: dec!(10),
+                    }],
+                    timestamp: Utc::now(),
+                },
+            )]),
+            vec![],
+        );
+        strategy.config.gate_scale_feedback_lookback = 8;
+        strategy.config.gate_scale_feedback_trigger_count = 2;
+        strategy.config.gate_scale_feedback_step_multiplier = dec!(0.90);
+        strategy.config.gate_scale_feedback_max_steps = 2;
+
+        for idx in 0..2 {
+            record_crypto_candidate_decision(CryptoCandidateDecision {
+                recorded_at: Utc::now(),
+                asset: "Bitcoin".into(),
+                direction: "Up".into(),
+                action: "gate_scale".into(),
+                reason: "scaled_for_depth_buffer".into(),
+                event_context_source: Some("calendar".into()),
+                event_title: Some(format!("Bitcoin unlock mild {idx}")),
+                event_category: Some("Crypto".into()),
+                event_subtype: Some("unlock".into()),
+                selected_question: "Will Bitcoin exceed $105,000 by December 31, 2026?".into(),
+                selected_condition_id: B256::from([idx as u8 + 21; 32]),
+                selected_market_type: "binary".into(),
+                selected_modeled_prob: dec!(0.60),
+                selected_is_yes: true,
+                selected_days_to_resolution: 30,
+                replaced_question: None,
+                replaced_condition_id: None,
+                replaced_market_type: None,
+                replaced_modeled_prob: None,
+                replaced_is_yes: None,
+                replaced_days_to_resolution: None,
+                selected_estimated_profit: dec!(10),
+                replaced_estimated_profit: None,
+                selected_efficiency: dec!(0.12),
+                replaced_efficiency: None,
+                selected_executable_profit_retention: dec!(0.90),
+                replaced_executable_profit_retention: None,
+                selected_executable_size_retention: dec!(0.95),
+                replaced_executable_size_retention: None,
+                selected_executable_quality_score: dec!(0.72),
+                replaced_executable_quality_score: None,
+                selected_executable_efficiency: dec!(0.11),
+                replaced_executable_efficiency: None,
+                selected_depth_buffer: dec!(1.05),
+                replaced_depth_buffer: None,
+            });
+        }
+
+        let mild_multiplier = strategy.adaptive_gate_scale_size_multiplier(
+            &CRYPTO_ASSETS[0],
+            Some(CryptoEventSubtype::Unlock),
+            Some("scaled_for_depth_buffer"),
+        );
+
+        record_crypto_candidate_decision(CryptoCandidateDecision {
+            recorded_at: Utc::now(),
+            asset: "Bitcoin".into(),
+            direction: "Up".into(),
+            action: "gate_scale".into(),
+            reason: "scaled_for_depth_buffer".into(),
+            event_context_source: Some("calendar".into()),
+            event_title: Some("Bitcoin unlock severe".into()),
+            event_category: Some("Crypto".into()),
+            event_subtype: Some("unlock".into()),
+            selected_question: "Will Bitcoin exceed $106,000 by December 31, 2026?".into(),
+            selected_condition_id: B256::from([42u8; 32]),
+            selected_market_type: "binary".into(),
+            selected_modeled_prob: dec!(0.60),
+            selected_is_yes: true,
+            selected_days_to_resolution: 30,
+            replaced_question: None,
+            replaced_condition_id: None,
+            replaced_market_type: None,
+            replaced_modeled_prob: None,
+            replaced_is_yes: None,
+            replaced_days_to_resolution: None,
+            selected_estimated_profit: dec!(10),
+            replaced_estimated_profit: None,
+            selected_efficiency: dec!(0.12),
+            replaced_efficiency: None,
+            selected_executable_profit_retention: dec!(0.90),
+            replaced_executable_profit_retention: None,
+            selected_executable_size_retention: dec!(0.50),
+            replaced_executable_size_retention: None,
+            selected_executable_quality_score: dec!(0.50),
+            replaced_executable_quality_score: None,
+            selected_executable_efficiency: dec!(0.08),
+            replaced_executable_efficiency: None,
+            selected_depth_buffer: dec!(1.01),
+            replaced_depth_buffer: None,
+        });
+
+        let severe_multiplier = strategy.adaptive_gate_scale_size_multiplier(
+            &CRYPTO_ASSETS[0],
+            Some(CryptoEventSubtype::Unlock),
+            Some("scaled_for_depth_buffer"),
+        );
+
+        assert!(severe_multiplier < mild_multiplier);
 
         pa_monitor::diagnostics::clear_crypto_candidate_decisions();
     }

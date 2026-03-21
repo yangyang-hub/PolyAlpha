@@ -1,7 +1,6 @@
 import { useCallback } from "react";
-import { fetchPositions, fetchSection, fetchMetrics, type PositionEntry } from "../api";
+import { fetchPositions, fetchSection, fetchStatus, type PositionEntry, type StatusResponse } from "../api";
 import { usePolling } from "../hooks/usePolling";
-import { parseMetrics } from "../lib/metrics";
 
 interface Wallet {
   address: string;
@@ -12,12 +11,10 @@ interface Wallet {
 export default function SmartMoney() {
   const posFetcher = useCallback(() => fetchPositions("smart_money"), []);
   const configFetcher = useCallback(() => fetchSection("smart_money"), []);
-  const metricsFetcher = useCallback(() => fetchMetrics(), []);
+  const statusFetcher = useCallback(() => fetchStatus(), []);
   const { data: positions, loading: posLoading } = usePolling<PositionEntry[]>(posFetcher, 15000);
   const { data: config } = usePolling<Record<string, unknown>>(configFetcher, 60000);
-  const { data: metricsRaw } = usePolling<string>(metricsFetcher, 15000);
-
-  const metrics = metricsRaw ? parseMetrics(metricsRaw) : null;
+  const { data: status } = usePolling<StatusResponse>(statusFetcher, 15000);
   const wallets: Wallet[] = Array.isArray(config?.wallets) ? (config.wallets as Wallet[]) : [];
 
   const totalCost = (positions ?? []).reduce((s, p) => s + Number(p.cost_basis), 0);
@@ -37,11 +34,12 @@ export default function SmartMoney() {
       <h1 className="text-2xl font-bold">跟单交易</h1>
 
       {/* Portfolio overview */}
-      {metrics && (() => {
-        const cash = metrics.get("usdc_balance") ?? 0;
-        const posValue = metrics.get("positions_market_value_usd") ?? 0;
-        const portfolio = cash + posValue;
-        const pnl = metrics.get("realized_pnl_usd") ?? 0;
+      {status && (() => {
+        const financials = status.strategy_financials?.smart_money;
+        const cash = Number(financials?.wallet_balance ?? 0);
+        const posValue = Number(financials?.positions_market_value ?? 0);
+        const portfolio = Number(financials?.portfolio_value ?? cash + posValue);
+        const realizedPnl = Number(financials?.realized_pnl ?? 0);
         return (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
             <div className="stat bg-base-200 rounded-box p-4">
@@ -63,9 +61,9 @@ export default function SmartMoney() {
               </div>
             </div>
             <div className="stat bg-base-200 rounded-box p-4">
-              <div className="stat-title text-xs">已实现收益</div>
-              <div className={`stat-value text-lg ${pnl >= 0 ? "text-success" : "text-error"}`}>
-                ${pnl.toFixed(2)}
+              <div className="stat-title text-xs">已实现收益（进程内）</div>
+              <div className={`stat-value text-lg ${realizedPnl >= 0 ? "text-success" : "text-error"}`}>
+                ${realizedPnl.toFixed(2)}
               </div>
             </div>
           </div>

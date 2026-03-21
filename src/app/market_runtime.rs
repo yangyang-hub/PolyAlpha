@@ -26,6 +26,11 @@ pub struct MarketRuntimeArtifacts {
     pub shared_positions: Arc<tokio::sync::RwLock<Vec<pa_monitor::api::PositionApiEntry>>>,
     pub shared_positions_updated_at: Arc<tokio::sync::RwLock<Option<chrono::DateTime<Utc>>>>,
     pub wallet_balance: Arc<tokio::sync::RwLock<rust_decimal::Decimal>>,
+    pub strategy_financials: Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, pa_monitor::api::StrategyFinancialEntry>,
+        >,
+    >,
     pub startup_ready: Arc<AtomicBool>,
     pub shared_markets: Arc<tokio::sync::RwLock<Vec<pa_core::types::MarketInfo>>>,
     pub neg_risk_events: Vec<pa_core::types::NegRiskEvent>,
@@ -55,6 +60,7 @@ pub async fn initialize_market_runtime(
     let shared_positions_updated_at: Arc<tokio::sync::RwLock<Option<chrono::DateTime<Utc>>>> =
         Arc::new(tokio::sync::RwLock::new(None));
     let wallet_balance = Arc::new(tokio::sync::RwLock::new(rust_decimal::Decimal::ZERO));
+    let strategy_financials = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     let startup_ready = Arc::new(AtomicBool::new(false));
     start_api_server(
         settings,
@@ -64,6 +70,7 @@ pub async fn initialize_market_runtime(
         Arc::clone(&shared_positions),
         Arc::clone(&shared_positions_updated_at),
         Arc::clone(&wallet_balance),
+        Arc::clone(&strategy_financials),
         Arc::clone(&startup_ready),
     );
 
@@ -142,6 +149,7 @@ pub async fn initialize_market_runtime(
         shared_positions,
         shared_positions_updated_at,
         wallet_balance,
+        strategy_financials,
         startup_ready,
         shared_markets,
         neg_risk_events,
@@ -156,6 +164,11 @@ pub async fn populate_initial_positions_snapshot(
     shared_positions: &Arc<tokio::sync::RwLock<Vec<pa_monitor::api::PositionApiEntry>>>,
     shared_positions_updated_at: &Arc<tokio::sync::RwLock<Option<chrono::DateTime<Utc>>>>,
     wallet_balance: &Arc<tokio::sync::RwLock<rust_decimal::Decimal>>,
+    strategy_financials: &Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, pa_monitor::api::StrategyFinancialEntry>,
+        >,
+    >,
 ) {
     let markets_snapshot = shared_markets.read().await;
     let api_cache = market_data.cache().clone();
@@ -165,9 +178,12 @@ pub async fn populate_initial_positions_snapshot(
         .iter()
         .map(|ctx| **ctx.usdc_balance.load())
         .sum();
+    let strategy_financials_snapshot =
+        crate::app::tasks::compute_strategy_financials(account_contexts, &entries);
     *shared_positions.write().await = entries;
     *shared_positions_updated_at.write().await = Some(Utc::now());
     *wallet_balance.write().await = total_balance;
+    *strategy_financials.write().await = strategy_financials_snapshot;
     if count > 0 {
         tracing::info!(positions = count, "API positions snapshot populated");
     }
@@ -181,6 +197,11 @@ pub fn spawn_shared_runtime_tasks(
     shared_positions: Arc<tokio::sync::RwLock<Vec<pa_monitor::api::PositionApiEntry>>>,
     shared_positions_updated_at: Arc<tokio::sync::RwLock<Option<chrono::DateTime<Utc>>>>,
     wallet_balance: Arc<tokio::sync::RwLock<rust_decimal::Decimal>>,
+    strategy_financials: Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, pa_monitor::api::StrategyFinancialEntry>,
+        >,
+    >,
     active_enabled_strategies: Vec<String>,
     smart_money_token_maps: Vec<
         Arc<
@@ -198,6 +219,7 @@ pub fn spawn_shared_runtime_tasks(
         shared_positions,
         shared_positions_updated_at,
         wallet_balance,
+        strategy_financials,
         cancel.clone(),
     );
 

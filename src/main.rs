@@ -54,6 +54,7 @@ async fn main() -> Result<()> {
     let shared_positions = runtime.shared_positions;
     let shared_positions_updated_at = runtime.shared_positions_updated_at;
     let wallet_balance = runtime.wallet_balance;
+    let strategy_financials = runtime.strategy_financials;
     let startup_ready = runtime.startup_ready;
     let shared_markets = runtime.shared_markets;
     let neg_risk_events = runtime.neg_risk_events;
@@ -86,6 +87,7 @@ async fn main() -> Result<()> {
         &shared_positions,
         &shared_positions_updated_at,
         &wallet_balance,
+        &strategy_financials,
     )
     .await;
 
@@ -121,6 +123,7 @@ async fn main() -> Result<()> {
         Arc::clone(&shared_positions),
         Arc::clone(&shared_positions_updated_at),
         Arc::clone(&wallet_balance),
+        Arc::clone(&strategy_financials),
         active_enabled_strategies.clone(),
         smart_money_token_maps,
         cancel.clone(),

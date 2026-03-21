@@ -22,6 +22,12 @@ export interface StatusResponse {
   accounts_ready: number;
   trading_ready: boolean;
   wallet_balance: string;
+  strategy_financials?: Record<string, {
+    wallet_balance: string;
+    positions_market_value: string;
+    portfolio_value: string;
+    realized_pnl: string;
+  }>;
   positions_snapshot_updated_at: string | null;
   crypto_gate_reject_summary?: {
     recent_count: number;
@@ -82,8 +88,11 @@ export interface StatusResponse {
     priority: string;
     title: string;
     detail: string;
+    scope_label?: string;
+    support_count?: number;
   }[];
   crypto_override_suggestions?: {
+    kind?: string;
     priority: string;
     target_field: string;
     direction: string;
@@ -92,6 +101,27 @@ export interface StatusResponse {
     scope_label: string;
     source_reason: string;
     rationale: string;
+    support_count?: number;
+  }[];
+  crypto_post_entry_tuning_hints?: {
+    kind: string;
+    priority: string;
+    title: string;
+    detail: string;
+    scope_label?: string;
+    support_count?: number;
+  }[];
+  crypto_post_entry_override_suggestions?: {
+    kind?: string;
+    priority: string;
+    target_field: string;
+    direction: string;
+    selector_asset_class: string;
+    selector_event_subtype: string;
+    scope_label: string;
+    source_reason: string;
+    rationale: string;
+    support_count?: number;
   }[];
   accounts: AccountStatusEntry[];
 }

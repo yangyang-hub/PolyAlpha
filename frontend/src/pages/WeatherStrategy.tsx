@@ -99,16 +99,17 @@ export default function WeatherStrategy() {
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">天气策略</h1>
 
-      {/* Account-level overview */}
+      {/* Strategy-level overview */}
       {metrics && (() => {
-        const cash = metrics.get("usdc_balance") ?? 0;
-        const posValue = metrics.get("positions_market_value_usd") ?? 0;
+        const financials = status?.strategy_financials?.weather;
+        const cash = Number(financials?.wallet_balance ?? 0);
+        const posValue = Number(financials?.positions_market_value ?? 0);
         const portfolio = cash + posValue;
-        const pnl = metrics.get("realized_pnl_usd") ?? 0;
+        const pnl = Number(financials?.realized_pnl ?? 0);
         return (
           <div className="space-y-2">
             <div className="text-xs opacity-60">
-              账户级资金概览，不是天气策略专属。天气策略自己的成本和未实现盈亏见下方“策略统计”和“当前持仓”。
+              仅统计启用了天气策略的钱包资金与天气持仓市值；“已实现收益”当前为 bot 进程启动以来的天气策略累计值，不是 Polymarket 官网全历史口径。
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
             <div className="stat bg-base-200 rounded-box p-4">
@@ -130,7 +131,7 @@ export default function WeatherStrategy() {
               </div>
             </div>
             <div className="stat bg-base-200 rounded-box p-4">
-              <div className="stat-title text-xs">已实现收益</div>
+              <div className="stat-title text-xs">已实现收益（进程内）</div>
               <div className={`stat-value text-lg ${pnl >= 0 ? "text-success" : "text-error"}`}>
                 ${pnl.toFixed(2)}
               </div>

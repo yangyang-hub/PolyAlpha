@@ -38,6 +38,57 @@ use pa_strategy::weather::{
 use crate::app::helpers::{build_ws_token_list, infer_strategy_type, seed_market_cache};
 use crate::app::types::AccountContext;
 
+pub fn compute_strategy_financials(
+    account_contexts: &[AccountContext],
+    positions: &[pa_monitor::api::PositionApiEntry],
+) -> std::collections::HashMap<String, pa_monitor::api::StrategyFinancialEntry> {
+    let account_strategy_state: Vec<(Vec<String>, Decimal, Decimal)> = account_contexts
+        .iter()
+        .map(|ctx| {
+            (
+                ctx.strategies.clone(),
+                **ctx.usdc_balance.load(),
+                ctx.risk_manager_impl.total_realized_pnl(),
+            )
+        })
+        .collect();
+    compute_strategy_financials_from_state(&account_strategy_state, positions)
+}
+
+fn compute_strategy_financials_from_state(
+    account_strategy_state: &[(Vec<String>, Decimal, Decimal)],
+    positions: &[pa_monitor::api::PositionApiEntry],
+) -> std::collections::HashMap<String, pa_monitor::api::StrategyFinancialEntry> {
+    let mut by_strategy: std::collections::HashMap<
+        String,
+        pa_monitor::api::StrategyFinancialEntry,
+    > = std::collections::HashMap::new();
+
+    for (strategies, balance, realized_pnl) in account_strategy_state {
+        for strategy in strategies {
+            let entry = by_strategy.entry(strategy.clone()).or_default();
+            entry.wallet_balance += *balance;
+            entry.realized_pnl += *realized_pnl;
+        }
+    }
+
+    for position in positions {
+        if let Some(strategy) = &position.strategy {
+            let entry = by_strategy.entry(strategy.clone()).or_default();
+            entry.positions_market_value += position
+                .current_price
+                .map(|price| price * position.size)
+                .unwrap_or(Decimal::ZERO);
+        }
+    }
+
+    for entry in by_strategy.values_mut() {
+        entry.portfolio_value = entry.wallet_balance + entry.positions_market_value;
+    }
+
+    by_strategy
+}
+
 pub fn spawn_balance_refresh(
     account_name: String,
     executor: Arc<dyn Executor>,
@@ -111,6 +162,11 @@ pub fn spawn_positions_snapshot_refresh(
     shared_positions: Arc<tokio::sync::RwLock<Vec<pa_monitor::api::PositionApiEntry>>>,
     shared_positions_updated_at: Arc<tokio::sync::RwLock<Option<chrono::DateTime<Utc>>>>,
     wallet_balance: Arc<tokio::sync::RwLock<Decimal>>,
+    strategy_financials: Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, pa_monitor::api::StrategyFinancialEntry>,
+        >,
+    >,
     cancel: CancellationToken,
 ) {
     let risk_managers: Vec<Arc<RiskManagerImpl>> = account_contexts
@@ -120,6 +176,14 @@ pub fn spawn_positions_snapshot_refresh(
     let balances: Vec<Arc<ArcSwap<Decimal>>> = account_contexts
         .iter()
         .map(|ctx| Arc::clone(&ctx.usdc_balance))
+        .collect();
+    let strategy_assignments: Vec<Vec<String>> = account_contexts
+        .iter()
+        .map(|ctx| ctx.strategies.clone())
+        .collect();
+    let realized_pnl_loaders: Vec<Arc<RiskManagerImpl>> = account_contexts
+        .iter()
+        .map(|ctx| Arc::clone(&ctx.risk_manager_impl))
         .collect();
 
     tokio::spawn(async move {
@@ -199,10 +263,19 @@ pub fn spawn_positions_snapshot_refresh(
 
                     let total_bal: Decimal = balances.iter().map(|b| **b.load()).sum();
                     *wallet_balance.write().await = total_bal;
+                    let account_strategy_state: Vec<(Vec<String>, Decimal, Decimal)> = strategy_assignments
+                        .iter()
+                        .cloned()
+                        .zip(balances.iter().map(|b| **b.load()))
+                        .zip(realized_pnl_loaders.iter().map(|rm| rm.total_realized_pnl()))
+                        .map(|((strategies, balance), realized_pnl)| (strategies, balance, realized_pnl))
+                        .collect();
+                    let positions_snapshot = shared_positions.read().await;
+                    *strategy_financials.write().await =
+                        compute_strategy_financials_from_state(&account_strategy_state, &positions_snapshot);
                     let total_exp: Decimal = risk_managers.iter().map(|rm| rm.total_exposure()).sum();
                     let market_value: Decimal = {
-                        let positions = shared_positions.read().await;
-                        positions.iter()
+                        positions_snapshot.iter()
                             .filter_map(|p| p.current_price.map(|cp| p.size * cp))
                             .sum()
                     };

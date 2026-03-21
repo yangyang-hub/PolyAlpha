@@ -83,6 +83,16 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-21
+- Area: `crates/pa-strategy/src/crypto_alpha.rs`, `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Refined adaptive crypto gate-scale feedback so repeated pre-sizing now weights exact-asset matches, reason-specific friction, recency, and shrink severity instead of using a flat bucket count; preserved retained-size severity on `gate_scale` diagnostics; replaced generic entry override suggestions with per-bucket single-action suggestions; and added post-entry tuning/override suggestions derived from recent crypto exits to both the status API and the CryptoMarkets page.
+- Why: The remaining crypto strategy gaps were no longer missing control surfaces but overly coarse feedback loops: repeated pre-sizing still reacted too bluntly, override suggestions could remain too generic to apply safely, and holding/exit diagnostics were not yet feeding back into actionable post-entry parameter guidance.
+
+### 2026-03-21
+- Area: `crates/pa-monitor/src/api.rs`, `crates/pa-risk/src/manager.rs`, `src/app/bootstrap.rs`, `src/app/market_runtime.rs`, `src/app/tasks.rs`, `src/main.rs`, `frontend/src/api.ts`, `frontend/src/pages/WeatherStrategy.tsx`, `frontend/src/pages/CryptoMarkets.tsx`, `frontend/src/pages/SmartMoney.tsx`
+- Change: Added `strategy_financials` to the runtime status API by aggregating wallet cash, marked-to-market position value, and process-lifetime realized PnL per strategy from strategy-assigned accounts, switched the weather/crypto/smart-money pages to use strategy-scoped balances instead of global portfolio totals, relabeled strategy realized PnL as process-local instead of pretending to match Polymarket's full historical ledger, and updated the `pa-risk` test fixture for the newer `RiskConfig` execution-quality fields.
+- Why: Market-specific frontend pages were showing misleading all-account cash and portfolio values, while their realized-PnL cards were still pulling a global in-process gauge that does not match Polymarket's full historical收益口径.
+
+### 2026-03-21
 - Area: `crates/pa-monitor/src/api.rs`, `crates/pa-strategy/src/crypto_alpha.rs`
 - Change: Added bucket-level arbitration and deduplication for `crypto_override_suggestions`, refined adaptive crypto gate-scale sizing feedback to prefer exact-asset matches before falling back to `asset_class × event_subtype`, and downgraded post-pre-sizing depth/size-retention failures to final sanity guards instead of re-emitting them as front-door `gate_reject` diagnostics.
 - Why: The remaining crypto strategy polish gaps were that override suggestions could still emit conflicting actions for the same tuning bucket, adaptive pre-sizing feedback was too coarse to react differently for a specific asset versus the whole class, and post-scale guard failures were still being represented like primary front-door friction even though the actionable signal had already been captured as `gate_scale`.
