@@ -8,6 +8,7 @@ use pa_core::types::{
 };
 use pa_market_data::event_calendar::EventCalendarService;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -45,6 +46,12 @@ pub struct StrategyEngineOptions {
     pub event_calendar: Option<Arc<EventCalendarService>>,
     pub min_order_usdc: Decimal,
     pub max_market_end_days: Option<u64>,
+    pub max_slippage_bps: u32,
+    pub min_profit_retention_ratio: Decimal,
+    pub min_size_retention_ratio: Decimal,
+    pub execution_quality_profit_weight: Decimal,
+    pub execution_quality_size_weight: Decimal,
+    pub execution_quality_slippage_weight: Decimal,
 }
 
 pub struct StrategyEngine {
@@ -63,11 +70,27 @@ pub struct StrategyEngine {
     min_order_usdc: Decimal,
     /// Only trade markets ending within this many days. None = no filter.
     max_market_end_days: Option<u64>,
+    /// Maximum allowed upward repricing during freshness validation, in basis points.
+    max_slippage_bps: u32,
+    /// Minimum fraction of original estimated profit required after buy-side freshness repricing.
+    min_profit_retention_ratio: Decimal,
+    /// Minimum fraction of original requested size required after buy-side freshness scaling.
+    min_size_retention_ratio: Decimal,
+    execution_quality_profit_weight: Decimal,
+    execution_quality_size_weight: Decimal,
+    execution_quality_slippage_weight: Decimal,
     /// Cooldown map: (condition_id, strategy_type) → expiry time.
     /// Prevents retry flooding when the same opportunity is detected repeatedly.
     cooldowns: Mutex<HashMap<(B256, StrategyType), Instant>>,
     /// Global execution pause until this time (e.g. after balance/allowance failure).
     execution_paused_until: Mutex<Instant>,
+}
+
+struct PreparedOpportunity {
+    opportunity: TradingOpportunity,
+    profit_retention_ratio: Decimal,
+    size_retention_ratio: Decimal,
+    execution_quality_score: Decimal,
 }
 
 impl StrategyEngine {
@@ -199,6 +222,228 @@ impl StrategyEngine {
         }
     }
 
+    fn buy_freshness_limit_price(limit_price: Decimal, max_slippage_bps: u32) -> Decimal {
+        (limit_price * (Decimal::ONE + (Decimal::from(max_slippage_bps) / dec!(10000))))
+            .min(Decimal::ONE)
+    }
+
+    fn effective_max_slippage_bps(&self, opp: &TradingOpportunity) -> u32 {
+        use rust_decimal::prelude::ToPrimitive;
+
+        let multiplier = opp
+            .max_slippage_bps_multiplier
+            .unwrap_or(Decimal::ONE)
+            .max(Decimal::ZERO);
+        let effective = (Decimal::from(self.max_slippage_bps) * multiplier)
+            .round_dp(0)
+            .max(Decimal::ZERO);
+        effective.to_u32().unwrap_or(u32::MAX)
+    }
+
+    fn buy_profit_retention_ok(
+        original_profit: Decimal,
+        adjusted_profit: Decimal,
+        min_profit_retention_ratio: Decimal,
+    ) -> bool {
+        if original_profit <= Decimal::ZERO {
+            return adjusted_profit > Decimal::ZERO;
+        }
+        let ratio = min_profit_retention_ratio
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO);
+        adjusted_profit >= original_profit * ratio
+    }
+
+    fn buy_size_retention_ok(
+        original_size: Decimal,
+        adjusted_size: Decimal,
+        min_size_retention_ratio: Decimal,
+    ) -> bool {
+        if original_size <= Decimal::ZERO {
+            return adjusted_size > Decimal::ZERO;
+        }
+        let ratio = min_size_retention_ratio
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO);
+        adjusted_size >= original_size * ratio
+    }
+
+    fn effective_min_profit_retention_ratio(&self, opp: &TradingOpportunity) -> Decimal {
+        let multiplier = opp
+            .min_profit_retention_ratio_multiplier
+            .unwrap_or(Decimal::ONE)
+            .max(Decimal::ZERO);
+        (self.min_profit_retention_ratio * multiplier)
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO)
+    }
+
+    fn effective_min_size_retention_ratio(&self, opp: &TradingOpportunity) -> Decimal {
+        let multiplier = opp
+            .min_size_retention_ratio_multiplier
+            .unwrap_or(Decimal::ONE)
+            .max(Decimal::ZERO);
+        (self.min_size_retention_ratio * multiplier)
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO)
+    }
+
+    fn buy_profit_retention_ratio(
+        original_profit: Decimal,
+        adjusted_profit: Decimal,
+        execution_plan: &ExecutionPlan,
+    ) -> Decimal {
+        if !matches!(
+            execution_plan,
+            ExecutionPlan::DirectionalBuy {
+                side: TradeSide::Buy,
+                ..
+            }
+        ) {
+            return Decimal::ONE;
+        }
+
+        if original_profit <= Decimal::ZERO {
+            return if adjusted_profit > Decimal::ZERO {
+                Decimal::ONE
+            } else {
+                Decimal::ZERO
+            };
+        }
+
+        (adjusted_profit / original_profit)
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO)
+    }
+
+    fn buy_size_retention_ratio(
+        original_execution_plan: &ExecutionPlan,
+        adjusted_execution_plan: &ExecutionPlan,
+    ) -> Decimal {
+        let (
+            ExecutionPlan::DirectionalBuy {
+                side: original_side,
+                size: original_size,
+                ..
+            },
+            ExecutionPlan::DirectionalBuy {
+                side: adjusted_side,
+                size: adjusted_size,
+                ..
+            },
+        ) = (original_execution_plan, adjusted_execution_plan);
+
+        if *original_side != TradeSide::Buy || *adjusted_side != TradeSide::Buy {
+            return Decimal::ONE;
+        }
+        if *original_size <= Decimal::ZERO {
+            return if *adjusted_size > Decimal::ZERO {
+                Decimal::ONE
+            } else {
+                Decimal::ZERO
+            };
+        }
+
+        (*adjusted_size / *original_size)
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO)
+    }
+
+    fn buy_slippage_quality_ratio(
+        original_execution_plan: &ExecutionPlan,
+        adjusted_execution_plan: &ExecutionPlan,
+        effective_max_slippage_bps: u32,
+    ) -> Decimal {
+        let (
+            ExecutionPlan::DirectionalBuy {
+                side: original_side,
+                price: original_price,
+                ..
+            },
+            ExecutionPlan::DirectionalBuy {
+                side: adjusted_side,
+                price: adjusted_price,
+                ..
+            },
+        ) = (original_execution_plan, adjusted_execution_plan);
+
+        if *original_side != TradeSide::Buy || *adjusted_side != TradeSide::Buy {
+            return Decimal::ONE;
+        }
+        if *original_price <= Decimal::ZERO {
+            return Decimal::ONE;
+        }
+        if effective_max_slippage_bps == 0 {
+            return if *adjusted_price <= *original_price {
+                Decimal::ONE
+            } else {
+                Decimal::ZERO
+            };
+        }
+
+        let used_bps = (((*adjusted_price - *original_price).max(Decimal::ZERO)) / *original_price)
+            * dec!(10000);
+        (Decimal::ONE - (used_bps / Decimal::from(effective_max_slippage_bps)))
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO)
+    }
+
+    fn execution_quality_score(
+        execution_quality_profit_weight: Decimal,
+        execution_quality_size_weight: Decimal,
+        execution_quality_slippage_weight: Decimal,
+        profit_retention_ratio: Decimal,
+        size_retention_ratio: Decimal,
+        slippage_quality_ratio: Decimal,
+        execution_plan: &ExecutionPlan,
+    ) -> Decimal {
+        if !matches!(
+            execution_plan,
+            ExecutionPlan::DirectionalBuy {
+                side: TradeSide::Buy,
+                ..
+            }
+        ) {
+            return Decimal::ONE;
+        }
+
+        let profit_weight = execution_quality_profit_weight.max(Decimal::ZERO);
+        let size_weight = execution_quality_size_weight.max(Decimal::ZERO);
+        let slippage_weight = execution_quality_slippage_weight.max(Decimal::ZERO);
+        let weight_sum = profit_weight + size_weight + slippage_weight;
+        if weight_sum <= Decimal::ZERO {
+            return Decimal::ONE;
+        }
+
+        let normalized_profit_weight = (profit_weight / weight_sum).to_f64().unwrap_or(0.0);
+        let normalized_size_weight = (size_weight / weight_sum).to_f64().unwrap_or(0.0);
+        let normalized_slippage_weight = (slippage_weight / weight_sum).to_f64().unwrap_or(0.0);
+        let profit_value = profit_retention_ratio
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO)
+            .to_f64()
+            .unwrap_or(0.0);
+        let size_value = size_retention_ratio
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO)
+            .to_f64()
+            .unwrap_or(0.0);
+        let slippage_value = slippage_quality_ratio
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO)
+            .to_f64()
+            .unwrap_or(0.0);
+
+        Decimal::from_f64_retain(
+            profit_value.powf(normalized_profit_weight)
+                * size_value.powf(normalized_size_weight)
+                * slippage_value.powf(normalized_slippage_weight),
+        )
+        .unwrap_or(Decimal::ZERO)
+        .min(Decimal::ONE)
+        .max(Decimal::ZERO)
+    }
+
     fn validate_execution_freshness(
         &self,
         opp: &TradingOpportunity,
@@ -229,6 +474,11 @@ impl StrategyEngine {
 
                 match side {
                     TradeSide::Buy => {
+                        let effective_max_slippage_bps = self.effective_max_slippage_bps(opp);
+                        let effective_min_size_retention_ratio =
+                            self.effective_min_size_retention_ratio(opp);
+                        let freshness_limit =
+                            Self::buy_freshness_limit_price(*price, effective_max_slippage_bps);
                         let best_ask = match book.best_ask() {
                             Some(level) => level.price,
                             None => {
@@ -241,41 +491,125 @@ impl StrategyEngine {
                             }
                         };
 
-                        if best_ask > *price {
+                        if best_ask > freshness_limit {
                             tracing::debug!(
                                 id = %opp.id,
                                 token_id = %token_id,
                                 original_limit = %price,
                                 current_best_ask = %best_ask,
-                                "Freshness rejected: ask moved above limit"
+                                freshness_limit = %freshness_limit,
+                                max_slippage_bps = effective_max_slippage_bps,
+                                "Freshness rejected: ask moved above slippage budget"
                             );
                             pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
                             pa_monitor::metrics::EXECUTION_FRESHNESS_REJECTIONS
-                                .with_label_values(&[strategy_label, "ask_above_limit"])
+                                .with_label_values(&[strategy_label, "ask_above_slippage_budget"])
                                 .inc();
                             return None;
                         }
 
-                        let walk = match book.walk_book(TradeSide::Buy, *size) {
-                            Some(walk) if walk.filled >= *size && walk.worst_price <= *price => {
-                                walk
-                            }
+                        let depth_at_limit = book.available_depth(TradeSide::Buy, freshness_limit);
+                        if depth_at_limit <= Decimal::ZERO {
+                            tracing::debug!(
+                                id = %opp.id,
+                                token_id = %token_id,
+                                size = %size,
+                                limit = %price,
+                                freshness_limit = %freshness_limit,
+                                "Freshness rejected: no executable ask depth within slippage budget"
+                            );
+                            pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+                            pa_monitor::metrics::EXECUTION_FRESHNESS_REJECTIONS
+                                .with_label_values(&[strategy_label, "insufficient_ask_depth"])
+                                .inc();
+                            return None;
+                        }
+
+                        let target_size = (*size).min(depth_at_limit).round_dp(2);
+                        if !Self::buy_size_retention_ok(
+                            *size,
+                            target_size,
+                            effective_min_size_retention_ratio,
+                        ) {
+                            tracing::debug!(
+                                id = %opp.id,
+                                token_id = %token_id,
+                                original_size = %size,
+                                adjusted_size = %target_size,
+                                min_size_retention_ratio = %effective_min_size_retention_ratio,
+                                "Freshness rejected: buy size retention fell below threshold"
+                            );
+                            pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+                            pa_monitor::metrics::EXECUTION_FRESHNESS_REJECTIONS
+                                .with_label_values(&[
+                                    strategy_label,
+                                    "size_retention_below_threshold",
+                                ])
+                                .inc();
+                            return None;
+                        }
+
+                        let walk = match book.walk_book(TradeSide::Buy, target_size) {
+                            Some(walk) if walk.worst_price <= freshness_limit => walk,
                             _ => {
                                 tracing::debug!(
                                     id = %opp.id,
                                     token_id = %token_id,
-                                    size = %size,
+                                    size = %target_size,
                                     limit = %price,
-                                    "Freshness rejected: insufficient executable ask depth"
+                                    freshness_limit = %freshness_limit,
+                                    "Freshness rejected: ask walk exceeded slippage budget"
                                 );
                                 pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
                                 pa_monitor::metrics::EXECUTION_FRESHNESS_REJECTIONS
-                                    .with_label_values(&[strategy_label, "insufficient_ask_depth"])
+                                    .with_label_values(&[
+                                        strategy_label,
+                                        "ask_slippage_budget_exceeded",
+                                    ])
                                     .inc();
                                 return None;
                             }
                         };
-                        let _ = walk;
+                        if target_size < *size {
+                            let capped_size = target_size;
+                            if capped_size < dec!(0.01) {
+                                tracing::debug!(
+                                    id = %opp.id,
+                                    token_id = %token_id,
+                                    filled = %walk.filled,
+                                    "Freshness rejected: scaled buy depth too small"
+                                );
+                                pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+                                pa_monitor::metrics::EXECUTION_FRESHNESS_REJECTIONS
+                                    .with_label_values(&[strategy_label, "buy_depth_too_small"])
+                                    .inc();
+                                return None;
+                            }
+                            tracing::debug!(
+                                id = %opp.id,
+                                token_id = %token_id,
+                                original_size = %size,
+                                capped_size = %capped_size,
+                                repriced_limit = %walk.worst_price,
+                                "Freshness scaling buy to current ask depth"
+                            );
+                            pa_monitor::metrics::EXECUTION_FRESHNESS_SCALED
+                                .with_label_values(&[strategy_label, "buy"])
+                                .inc();
+                            *size = capped_size;
+                            adjusted.size = capped_size;
+                        }
+                        if walk.worst_price != *price {
+                            tracing::debug!(
+                                id = %opp.id,
+                                token_id = %token_id,
+                                original_limit = %price,
+                                repriced_limit = %walk.worst_price,
+                                freshness_limit = %freshness_limit,
+                                "Freshness repricing buy within slippage budget"
+                            );
+                            *price = walk.worst_price;
+                        }
                         if !Self::is_executable_directional_order(TradeSide::Buy, *price, *size) {
                             tracing::debug!(
                                 id = %opp.id,
@@ -375,6 +709,34 @@ impl StrategyEngine {
             return None;
         }
 
+        let effective_min_profit_retention_ratio = self.effective_min_profit_retention_ratio(opp);
+
+        if matches!(
+            &adjusted.execution_plan,
+            ExecutionPlan::DirectionalBuy {
+                side: TradeSide::Buy,
+                ..
+            }
+        ) && !Self::buy_profit_retention_ok(
+            opp.estimated_profit,
+            adjusted.estimated_profit,
+            effective_min_profit_retention_ratio,
+        ) {
+            tracing::debug!(
+                id = %opp.id,
+                condition_id = %opp.condition_id,
+                original_profit = %opp.estimated_profit,
+                adjusted_profit = %adjusted.estimated_profit,
+                min_profit_retention_ratio = %effective_min_profit_retention_ratio,
+                "Freshness rejected: buy profit retention fell below threshold"
+            );
+            pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+            pa_monitor::metrics::EXECUTION_FRESHNESS_REJECTIONS
+                .with_label_values(&[strategy_label, "profit_retention_below_threshold"])
+                .inc();
+            return None;
+        }
+
         Some(adjusted)
     }
 
@@ -396,6 +758,12 @@ impl StrategyEngine {
             event_calendar,
             min_order_usdc,
             max_market_end_days,
+            max_slippage_bps,
+            min_profit_retention_ratio,
+            min_size_retention_ratio,
+            execution_quality_profit_weight,
+            execution_quality_size_weight,
+            execution_quality_slippage_weight,
         } = options;
 
         Self {
@@ -409,6 +777,12 @@ impl StrategyEngine {
             get_all_positions,
             min_order_usdc,
             max_market_end_days,
+            max_slippage_bps,
+            min_profit_retention_ratio,
+            min_size_retention_ratio,
+            execution_quality_profit_weight,
+            execution_quality_size_weight,
+            execution_quality_slippage_weight,
             cooldowns: Mutex::new(HashMap::new()),
             execution_paused_until: Mutex::new(Instant::now()),
         }
@@ -544,11 +918,16 @@ impl StrategyEngine {
                         );
                     }
                     if strategy.strategy_type() == StrategyType::Weather {
-                        self.process_weather_opportunities(opportunities, markets, &mut budget_remaining)
-                            .await;
+                        self.process_weather_opportunities(
+                            opportunities,
+                            markets,
+                            &mut budget_remaining,
+                        )
+                        .await;
                         continue;
                     }
 
+                    let mut prepared = Vec::new();
                     for opp in opportunities {
                         // Check execution pause inside opportunity loop too —
                         // a balance/allowance failure on opp N should stop opp N+1
@@ -564,7 +943,49 @@ impl StrategyEngine {
                             continue;
                         }
 
-                        self.handle_opportunity(opp, markets, &mut budget_remaining).await;
+                        if let Some(prepared_opp) =
+                            self.prepare_opportunity_for_execution(opp, markets).await
+                        {
+                            prepared.push(prepared_opp);
+                        }
+                    }
+
+                    prepared.sort_by(|a, b| {
+                        let a_cost = a.opportunity.execution_plan.estimated_cost();
+                        let b_cost = b.opportunity.execution_plan.estimated_cost();
+                        let a_eff = if a_cost > Decimal::ZERO {
+                            a.opportunity.estimated_profit / a_cost
+                        } else {
+                            Decimal::ZERO
+                        };
+                        let b_eff = if b_cost > Decimal::ZERO {
+                            b.opportunity.estimated_profit / b_cost
+                        } else {
+                            Decimal::ZERO
+                        };
+
+                        b.execution_quality_score
+                            .cmp(&a.execution_quality_score)
+                            .then_with(|| b.size_retention_ratio.cmp(&a.size_retention_ratio))
+                            .then_with(|| b.profit_retention_ratio.cmp(&a.profit_retention_ratio))
+                            .then_with(|| b_eff.cmp(&a_eff))
+                            .then_with(|| {
+                                b.opportunity
+                                    .estimated_profit
+                                    .cmp(&a.opportunity.estimated_profit)
+                            })
+                    });
+                    tracing::debug!(
+                        prepared_count = prepared.len(),
+                        "[Engine] Prepared non-weather opportunities sorted by execution quality"
+                    );
+
+                    for opp in prepared {
+                        if Instant::now() < *self.execution_paused_until.lock().unwrap() {
+                            break;
+                        }
+                        self.execute_prepared_opportunity(&opp.opportunity, &mut budget_remaining)
+                            .await;
                     }
                 }
                 Err(e) => {
@@ -611,7 +1032,8 @@ impl StrategyEngine {
             if Instant::now() < *self.execution_paused_until.lock().unwrap() {
                 break;
             }
-            self.handle_opportunity(opp, markets, budget_remaining).await;
+            self.handle_opportunity(opp, markets, budget_remaining)
+                .await;
         }
 
         let mut groups: Vec<Vec<TradingOpportunity>> = by_event
@@ -622,8 +1044,14 @@ impl StrategyEngine {
             })
             .collect();
         groups.sort_by(|a, b| {
-            let a_profit = a.first().map(|opp| opp.estimated_profit).unwrap_or(Decimal::ZERO);
-            let b_profit = b.first().map(|opp| opp.estimated_profit).unwrap_or(Decimal::ZERO);
+            let a_profit = a
+                .first()
+                .map(|opp| opp.estimated_profit)
+                .unwrap_or(Decimal::ZERO);
+            let b_profit = b
+                .first()
+                .map(|opp| opp.estimated_profit)
+                .unwrap_or(Decimal::ZERO);
             b_profit.cmp(&a_profit)
         });
 
@@ -633,7 +1061,10 @@ impl StrategyEngine {
             }
 
             for opp in candidates {
-                if self.handle_opportunity(opp, markets, budget_remaining).await {
+                if self
+                    .handle_opportunity(opp, markets, budget_remaining)
+                    .await
+                {
                     break;
                 }
             }
@@ -646,9 +1077,27 @@ impl StrategyEngine {
         markets: &[MarketInfo],
         budget_remaining: &mut Decimal,
     ) -> bool {
+        let opp = match self.prepare_opportunity_for_execution(opp, markets).await {
+            Some(prepared) => prepared,
+            None => {
+                return false;
+            }
+        };
+
+        self.execute_prepared_opportunity(&opp.opportunity, budget_remaining)
+            .await
+    }
+
+    async fn prepare_opportunity_for_execution(
+        &self,
+        opp: TradingOpportunity,
+        markets: &[MarketInfo],
+    ) -> Option<PreparedOpportunity> {
+        let original_estimated_profit = opp.estimated_profit;
+
         // Skip cooled-down opportunities (prevents retry flooding)
         if self.is_cooled_down(opp.condition_id, opp.strategy_type) {
-            return false;
+            return None;
         }
 
         // Apply event calendar position filter
@@ -677,17 +1126,63 @@ impl StrategyEngine {
             Some(validated) => validated,
             None => {
                 self.set_cooldown(opp.condition_id, opp.strategy_type, 60);
-                return false;
+                return None;
             }
         };
 
+        let pre_freshness_opp = opp.clone();
         let opp = match self.validate_execution_freshness(&opp, markets) {
             Some(validated) => validated,
             None => {
                 self.set_cooldown(opp.condition_id, opp.strategy_type, 30);
-                return false;
+                return None;
             }
         };
+
+        let profit_retention_ratio = Self::buy_profit_retention_ratio(
+            original_estimated_profit,
+            opp.estimated_profit,
+            &opp.execution_plan,
+        );
+        let size_retention_ratio =
+            Self::buy_size_retention_ratio(&pre_freshness_opp.execution_plan, &opp.execution_plan);
+        let slippage_quality_ratio = Self::buy_slippage_quality_ratio(
+            &pre_freshness_opp.execution_plan,
+            &opp.execution_plan,
+            self.effective_max_slippage_bps(&pre_freshness_opp),
+        );
+        let execution_quality_score = Self::execution_quality_score(
+            self.execution_quality_profit_weight,
+            self.execution_quality_size_weight,
+            self.execution_quality_slippage_weight,
+            profit_retention_ratio,
+            size_retention_ratio,
+            slippage_quality_ratio,
+            &opp.execution_plan,
+        );
+
+        Some(PreparedOpportunity {
+            opportunity: opp,
+            profit_retention_ratio,
+            size_retention_ratio,
+            execution_quality_score,
+        })
+    }
+
+    async fn execute_prepared_opportunity(
+        &self,
+        opp: &TradingOpportunity,
+        budget_remaining: &mut Decimal,
+    ) -> bool {
+        match self.risk_manager.check_pre_trade(&opp) {
+            RiskDecision::Approve => {}
+            RiskDecision::Reject(reason) => {
+                tracing::debug!(id = %opp.id, reason = ?reason, "Opportunity rejected by risk manager");
+                pa_monitor::metrics::OPPORTUNITIES_REJECTED.inc();
+                self.set_cooldown(opp.condition_id, opp.strategy_type, 10);
+                return false;
+            }
+        }
 
         // Budget guard: skip if estimated cost exceeds remaining budget.
         // Exit orders bypass this — selling held positions doesn't cost USDC.
@@ -707,7 +1202,7 @@ impl StrategyEngine {
             *budget_remaining -= cost;
         }
 
-        self.process_opportunity(&opp).await;
+        self.process_opportunity(opp).await;
         true
     }
 
@@ -726,17 +1221,6 @@ impl StrategyEngine {
         pa_monitor::metrics::OPPORTUNITIES_DETECTED_BY_STRATEGY
             .with_label_values(&[strategy_label])
             .inc();
-
-        // Pre-trade risk check
-        match self.risk_manager.check_pre_trade(opp) {
-            RiskDecision::Approve => {}
-            RiskDecision::Reject(reason) => {
-                tracing::debug!(id = %opp.id, reason = ?reason, "Opportunity rejected by risk manager");
-                pa_monitor::metrics::OPPORTUNITIES_REJECTED.inc();
-                self.set_cooldown(opp.condition_id, opp.strategy_type, 10);
-                return;
-            }
-        }
 
         // Execute
         let is_exit = opp.execution_plan.is_exit();
@@ -1114,6 +1598,9 @@ impl StrategyEngine {
                 spread: pos.avg_cost - best_bid,
                 size: sell_size,
                 estimated_profit: (best_bid - pos.avg_cost) * sell_size, // negative = loss
+                min_profit_retention_ratio_multiplier: None,
+                max_slippage_bps_multiplier: None,
+                min_size_retention_ratio_multiplier: None,
                 detected_at: chrono::Utc::now(),
                 execution_plan: ExecutionPlan::DirectionalBuy {
                     token_id: pos.token_id,
@@ -1280,12 +1767,12 @@ mod tests {
     use super::*;
     use alloy::primitives::B256;
     use async_trait::async_trait;
-    use std::sync::Mutex as StdMutex;
     use pa_core::types::{
         ExecutionResult, ExecutionStatus, OrderBook, PriceLevel, TradeRecord, TxType,
     };
     use rust_decimal_macros::dec;
     use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
 
     struct NoopStrategy;
 
@@ -1342,6 +1829,7 @@ mod tests {
 
     struct FixedStrategy {
         opps: Vec<TradingOpportunity>,
+        strategy_type: StrategyType,
     }
 
     #[async_trait]
@@ -1351,7 +1839,7 @@ mod tests {
         }
 
         fn strategy_type(&self) -> StrategyType {
-            StrategyType::Weather
+            self.strategy_type
         }
 
         async fn scan(&self, _markets: &[MarketInfo]) -> pa_core::Result<Vec<TradingOpportunity>> {
@@ -1365,7 +1853,10 @@ mod tests {
 
     #[async_trait]
     impl Executor for RecordingExecutor {
-        async fn execute(&self, opportunity: &TradingOpportunity) -> pa_core::Result<ExecutionResult> {
+        async fn execute(
+            &self,
+            opportunity: &TradingOpportunity,
+        ) -> pa_core::Result<ExecutionResult> {
             self.executed_questions
                 .lock()
                 .unwrap()
@@ -1407,6 +1898,26 @@ mod tests {
         fn reset_daily(&self) {}
     }
 
+    struct RejectingRiskManager;
+
+    impl RiskManager for RejectingRiskManager {
+        fn check_pre_trade(&self, _opportunity: &TradingOpportunity) -> RiskDecision {
+            RiskDecision::Reject(pa_core::types::RiskRejectReason::ExceedsTradeLimit)
+        }
+
+        fn update_position(&self, _result: &ExecutionResult) {}
+
+        fn is_circuit_broken(&self) -> bool {
+            false
+        }
+
+        fn total_exposure(&self) -> Decimal {
+            Decimal::ZERO
+        }
+
+        fn reset_daily(&self) {}
+    }
+
     fn make_engine(books: HashMap<U256, OrderBook>) -> StrategyEngine {
         let books = Arc::new(books);
         StrategyEngine::new(
@@ -1423,6 +1934,12 @@ mod tests {
                 event_calendar: None,
                 min_order_usdc: dec!(1),
                 max_market_end_days: None,
+                max_slippage_bps: 50,
+                min_profit_retention_ratio: dec!(0.50),
+                min_size_retention_ratio: dec!(0.50),
+                execution_quality_profit_weight: Decimal::ONE,
+                execution_quality_size_weight: Decimal::ONE,
+                execution_quality_slippage_weight: Decimal::ONE,
             },
         )
     }
@@ -1461,6 +1978,9 @@ mod tests {
             spread: dec!(0.10),
             estimated_profit: dec!(1),
             size,
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(1u64),
@@ -1487,6 +2007,9 @@ mod tests {
             spread: dec!(0.10),
             estimated_profit,
             size,
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(token_id),
@@ -1499,7 +2022,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_execution_freshness_rejects_buy_if_ask_moved_above_limit() {
+    fn test_validate_execution_freshness_rejects_buy_if_ask_moved_above_slippage_budget() {
         let engine = make_engine(HashMap::from([(
             U256::from(1u64),
             make_book(
@@ -1512,6 +2035,360 @@ mod tests {
         let opp = make_opp(TradeSide::Buy, dec!(0.10), dec!(5));
         let validated = engine.validate_execution_freshness(&opp, &[]);
         assert!(validated.is_none());
+    }
+
+    #[test]
+    fn test_validate_execution_freshness_allows_buy_within_slippage_budget() {
+        let books = HashMap::from([(
+            U256::from(1u64),
+            make_book(
+                U256::from(1u64),
+                &[(dec!(0.09), dec!(10))],
+                &[(dec!(0.102), dec!(10))],
+            ),
+        )]);
+        let books = Arc::new(books);
+        let engine = StrategyEngine::new(
+            vec![Box::new(NoopStrategy)],
+            Arc::new(NoopExecutor),
+            Arc::new(NoopRiskManager),
+            StrategyEngineDeps {
+                get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
+                get_available_capital: Box::new(|| dec!(1000)),
+                get_all_positions: Box::new(Vec::new),
+            },
+            StrategyEngineOptions {
+                scan_interval_ms: 1000,
+                event_calendar: None,
+                min_order_usdc: dec!(1),
+                max_market_end_days: None,
+                max_slippage_bps: 500,
+                min_profit_retention_ratio: dec!(0.50),
+                min_size_retention_ratio: dec!(0.50),
+                execution_quality_profit_weight: Decimal::ONE,
+                execution_quality_size_weight: Decimal::ONE,
+                execution_quality_slippage_weight: Decimal::ONE,
+            },
+        );
+
+        let mut opp = make_opp(TradeSide::Buy, dec!(0.10), dec!(10));
+        opp.estimated_profit = dec!(0.2);
+        let markets = vec![MarketInfo {
+            condition_id: B256::ZERO,
+            question_id: B256::ZERO,
+            question: "test".into(),
+            neg_risk: false,
+            neg_risk_market_id: None,
+            tokens: vec![],
+            tick_size: dec!(0.01),
+            fee_rate_bps: 0,
+            active: true,
+            liquidity: Decimal::ZERO,
+            event_title: None,
+            end_date: None,
+            category: None,
+            outcome_prices: None,
+            gamma_best_bid: None,
+            gamma_best_ask: None,
+            rewards_min_size: None,
+            rewards_max_spread: None,
+            rewards_daily_rate: None,
+            holding_rewards_enabled: false,
+            fees_enabled: false,
+        }];
+
+        let validated = engine.validate_execution_freshness(&opp, &markets).unwrap();
+        match validated.execution_plan {
+            ExecutionPlan::DirectionalBuy {
+                side, price, size, ..
+            } => {
+                assert_eq!(side, TradeSide::Buy);
+                assert_eq!(price, dec!(0.102));
+                assert_eq!(size, dec!(10));
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_execution_freshness_rejects_buy_when_profit_retention_too_low() {
+        let books = HashMap::from([(
+            U256::from(1u64),
+            make_book(
+                U256::from(1u64),
+                &[(dec!(0.09), dec!(10))],
+                &[(dec!(0.11), dec!(10))],
+            ),
+        )]);
+        let books = Arc::new(books);
+        let engine = StrategyEngine::new(
+            vec![Box::new(NoopStrategy)],
+            Arc::new(NoopExecutor),
+            Arc::new(NoopRiskManager),
+            StrategyEngineDeps {
+                get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
+                get_available_capital: Box::new(|| dec!(1000)),
+                get_all_positions: Box::new(Vec::new),
+            },
+            StrategyEngineOptions {
+                scan_interval_ms: 1000,
+                event_calendar: None,
+                min_order_usdc: dec!(1),
+                max_market_end_days: None,
+                max_slippage_bps: 1000,
+                min_profit_retention_ratio: dec!(0.80),
+                min_size_retention_ratio: dec!(0.50),
+                execution_quality_profit_weight: Decimal::ONE,
+                execution_quality_size_weight: Decimal::ONE,
+                execution_quality_slippage_weight: Decimal::ONE,
+            },
+        );
+
+        let mut opp = make_opp(TradeSide::Buy, dec!(0.10), dec!(10));
+        opp.estimated_profit = dec!(0.2);
+        let markets = vec![MarketInfo {
+            condition_id: B256::ZERO,
+            question_id: B256::ZERO,
+            question: "test".into(),
+            neg_risk: false,
+            neg_risk_market_id: None,
+            tokens: vec![],
+            tick_size: dec!(0.01),
+            fee_rate_bps: 0,
+            active: true,
+            liquidity: Decimal::ZERO,
+            event_title: None,
+            end_date: None,
+            category: None,
+            outcome_prices: None,
+            gamma_best_bid: None,
+            gamma_best_ask: None,
+            rewards_min_size: None,
+            rewards_max_spread: None,
+            rewards_daily_rate: None,
+            holding_rewards_enabled: false,
+            fees_enabled: false,
+        }];
+
+        assert!(
+            engine
+                .validate_execution_freshness(&opp, &markets)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_validate_execution_freshness_applies_opportunity_profit_retention_multiplier() {
+        let books = HashMap::from([(
+            U256::from(1u64),
+            make_book(
+                U256::from(1u64),
+                &[(dec!(0.09), dec!(10))],
+                &[(dec!(0.105), dec!(10))],
+            ),
+        )]);
+        let books = Arc::new(books);
+        let engine = StrategyEngine::new(
+            vec![Box::new(NoopStrategy)],
+            Arc::new(NoopExecutor),
+            Arc::new(NoopRiskManager),
+            StrategyEngineDeps {
+                get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
+                get_available_capital: Box::new(|| dec!(1000)),
+                get_all_positions: Box::new(Vec::new),
+            },
+            StrategyEngineOptions {
+                scan_interval_ms: 1000,
+                event_calendar: None,
+                min_order_usdc: dec!(1),
+                max_market_end_days: None,
+                max_slippage_bps: 1000,
+                min_profit_retention_ratio: dec!(0.50),
+                min_size_retention_ratio: dec!(0.50),
+                execution_quality_profit_weight: Decimal::ONE,
+                execution_quality_size_weight: Decimal::ONE,
+                execution_quality_slippage_weight: Decimal::ONE,
+            },
+        );
+
+        let mut opp = make_opp(TradeSide::Buy, dec!(0.10), dec!(10));
+        opp.estimated_profit = dec!(0.20);
+        opp.min_profit_retention_ratio_multiplier = Some(dec!(1.60));
+        let markets = vec![MarketInfo {
+            condition_id: B256::ZERO,
+            question_id: B256::ZERO,
+            question: "test".into(),
+            neg_risk: false,
+            neg_risk_market_id: None,
+            tokens: vec![],
+            tick_size: dec!(0.01),
+            fee_rate_bps: 0,
+            active: true,
+            liquidity: Decimal::ZERO,
+            event_title: None,
+            end_date: None,
+            category: None,
+            outcome_prices: None,
+            gamma_best_bid: None,
+            gamma_best_ask: None,
+            rewards_min_size: None,
+            rewards_max_spread: None,
+            rewards_daily_rate: None,
+            holding_rewards_enabled: false,
+            fees_enabled: false,
+        }];
+
+        assert!(
+            engine
+                .validate_execution_freshness(&opp, &markets)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_validate_execution_freshness_applies_opportunity_slippage_multiplier() {
+        let books = HashMap::from([(
+            U256::from(1u64),
+            make_book(
+                U256::from(1u64),
+                &[(dec!(0.09), dec!(10))],
+                &[(dec!(0.105), dec!(10))],
+            ),
+        )]);
+        let books = Arc::new(books);
+        let engine = StrategyEngine::new(
+            vec![Box::new(NoopStrategy)],
+            Arc::new(NoopExecutor),
+            Arc::new(NoopRiskManager),
+            StrategyEngineDeps {
+                get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
+                get_available_capital: Box::new(|| dec!(1000)),
+                get_all_positions: Box::new(Vec::new),
+            },
+            StrategyEngineOptions {
+                scan_interval_ms: 1000,
+                event_calendar: None,
+                min_order_usdc: dec!(1),
+                max_market_end_days: None,
+                max_slippage_bps: 1000,
+                min_profit_retention_ratio: dec!(0.50),
+                min_size_retention_ratio: dec!(0.50),
+                execution_quality_profit_weight: Decimal::ONE,
+                execution_quality_size_weight: Decimal::ONE,
+                execution_quality_slippage_weight: Decimal::ONE,
+            },
+        );
+
+        let opp = make_opp(TradeSide::Buy, dec!(0.10), dec!(10));
+        let markets = vec![MarketInfo {
+            condition_id: B256::ZERO,
+            question_id: B256::ZERO,
+            question: "test".into(),
+            neg_risk: false,
+            neg_risk_market_id: None,
+            tokens: vec![],
+            tick_size: dec!(0.01),
+            fee_rate_bps: 0,
+            active: true,
+            liquidity: Decimal::ZERO,
+            event_title: None,
+            end_date: None,
+            category: None,
+            outcome_prices: None,
+            gamma_best_bid: None,
+            gamma_best_ask: None,
+            rewards_min_size: None,
+            rewards_max_spread: None,
+            rewards_daily_rate: None,
+            holding_rewards_enabled: false,
+            fees_enabled: false,
+        }];
+
+        assert!(
+            engine
+                .validate_execution_freshness(&opp, &markets)
+                .is_some()
+        );
+
+        let mut stricter_opp = opp.clone();
+        stricter_opp.max_slippage_bps_multiplier = Some(dec!(0.40));
+        assert!(
+            engine
+                .validate_execution_freshness(&stricter_opp, &markets)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_validate_execution_freshness_applies_opportunity_size_retention_multiplier() {
+        let books = HashMap::from([(
+            U256::from(1u64),
+            make_book(
+                U256::from(1u64),
+                &[(dec!(0.29), dec!(10))],
+                &[(dec!(0.30), dec!(4))],
+            ),
+        )]);
+        let books = Arc::new(books);
+        let engine = StrategyEngine::new(
+            vec![Box::new(NoopStrategy)],
+            Arc::new(NoopExecutor),
+            Arc::new(NoopRiskManager),
+            StrategyEngineDeps {
+                get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
+                get_available_capital: Box::new(|| dec!(1000)),
+                get_all_positions: Box::new(Vec::new),
+            },
+            StrategyEngineOptions {
+                scan_interval_ms: 1000,
+                event_calendar: None,
+                min_order_usdc: dec!(1),
+                max_market_end_days: None,
+                max_slippage_bps: 1000,
+                min_profit_retention_ratio: dec!(0.30),
+                min_size_retention_ratio: dec!(0.30),
+                execution_quality_profit_weight: Decimal::ONE,
+                execution_quality_size_weight: Decimal::ONE,
+                execution_quality_slippage_weight: Decimal::ONE,
+            },
+        );
+
+        let mut opp = make_opp(TradeSide::Buy, dec!(0.30), dec!(10));
+        opp.estimated_profit = dec!(1.00);
+        let markets = vec![MarketInfo {
+            condition_id: B256::ZERO,
+            question_id: B256::ZERO,
+            question: "test".into(),
+            neg_risk: false,
+            neg_risk_market_id: None,
+            tokens: vec![],
+            tick_size: dec!(0.01),
+            fee_rate_bps: 0,
+            active: true,
+            liquidity: Decimal::ZERO,
+            event_title: None,
+            end_date: None,
+            category: None,
+            outcome_prices: None,
+            gamma_best_bid: None,
+            gamma_best_ask: None,
+            rewards_min_size: None,
+            rewards_max_spread: None,
+            rewards_daily_rate: None,
+            holding_rewards_enabled: false,
+            fees_enabled: false,
+        }];
+
+        let validated = engine.validate_execution_freshness(&opp, &markets).unwrap();
+        match validated.execution_plan {
+            ExecutionPlan::DirectionalBuy { size, .. } => assert_eq!(size, dec!(4)),
+        }
+
+        opp.min_size_retention_ratio_multiplier = Some(dec!(1.50));
+        assert!(
+            engine
+                .validate_execution_freshness(&opp, &markets)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1534,6 +2411,55 @@ mod tests {
             } => {
                 assert_eq!(side, TradeSide::Sell);
                 assert_eq!(price, dec!(0.40));
+                assert_eq!(size, dec!(3.25));
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_execution_freshness_scales_buy_to_ask_depth() {
+        let engine = make_engine(HashMap::from([(
+            U256::from(1u64),
+            make_book(
+                U256::from(1u64),
+                &[(dec!(0.49), dec!(10))],
+                &[(dec!(0.50), dec!(3.25))],
+            ),
+        )]));
+
+        let mut opp = make_opp(TradeSide::Buy, dec!(0.50), dec!(5));
+        opp.estimated_profit = dec!(1);
+        let markets = vec![MarketInfo {
+            condition_id: B256::ZERO,
+            question_id: B256::ZERO,
+            question: "test".into(),
+            neg_risk: false,
+            neg_risk_market_id: None,
+            tokens: vec![],
+            tick_size: dec!(0.01),
+            fee_rate_bps: 0,
+            active: true,
+            liquidity: Decimal::ZERO,
+            event_title: None,
+            end_date: None,
+            category: None,
+            outcome_prices: None,
+            gamma_best_bid: None,
+            gamma_best_ask: None,
+            rewards_min_size: None,
+            rewards_max_spread: None,
+            rewards_daily_rate: None,
+            holding_rewards_enabled: false,
+            fees_enabled: false,
+        }];
+        let validated = engine.validate_execution_freshness(&opp, &markets).unwrap();
+        assert_eq!(validated.size, dec!(3.25));
+        match validated.execution_plan {
+            ExecutionPlan::DirectionalBuy {
+                side, price, size, ..
+            } => {
+                assert_eq!(side, TradeSide::Buy);
+                assert_eq!(price, dec!(0.50));
                 assert_eq!(size, dec!(3.25));
             }
         }
@@ -1616,6 +2542,7 @@ mod tests {
         let engine = StrategyEngine::new(
             vec![Box::new(FixedStrategy {
                 opps: vec![best.clone(), fallback.clone()],
+                strategy_type: StrategyType::Weather,
             })],
             Arc::new(RecordingExecutor {
                 executed_questions: executed.clone(),
@@ -1631,6 +2558,12 @@ mod tests {
                 event_calendar: None,
                 min_order_usdc: dec!(1),
                 max_market_end_days: None,
+                max_slippage_bps: 50,
+                min_profit_retention_ratio: dec!(0.50),
+                min_size_retention_ratio: dec!(0.50),
+                execution_quality_profit_weight: Decimal::ONE,
+                execution_quality_size_weight: Decimal::ONE,
+                execution_quality_slippage_weight: Decimal::ONE,
             },
         );
 
@@ -1638,5 +2571,721 @@ mod tests {
 
         let executed_questions = executed.lock().unwrap().clone();
         assert_eq!(executed_questions, vec![fallback.question]);
+    }
+
+    #[tokio::test]
+    async fn test_handle_opportunity_does_not_consume_budget_on_risk_reject() {
+        let books = Arc::new(HashMap::from([(
+            U256::from(1u64),
+            make_book(
+                U256::from(1u64),
+                &[(dec!(0.49), dec!(10))],
+                &[(dec!(0.50), dec!(10))],
+            ),
+        )]));
+
+        let engine = StrategyEngine::new(
+            vec![Box::new(NoopStrategy)],
+            Arc::new(NoopExecutor),
+            Arc::new(RejectingRiskManager),
+            StrategyEngineDeps {
+                get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
+                get_available_capital: Box::new(|| dec!(1000)),
+                get_all_positions: Box::new(Vec::new),
+            },
+            StrategyEngineOptions {
+                scan_interval_ms: 1000,
+                event_calendar: None,
+                min_order_usdc: dec!(1),
+                max_market_end_days: None,
+                max_slippage_bps: 50,
+                min_profit_retention_ratio: dec!(0.50),
+                min_size_retention_ratio: dec!(0.50),
+                execution_quality_profit_weight: Decimal::ONE,
+                execution_quality_size_weight: Decimal::ONE,
+                execution_quality_slippage_weight: Decimal::ONE,
+            },
+        );
+
+        let mut budget_remaining = dec!(100);
+        let opp = make_opp(TradeSide::Buy, dec!(0.50), dec!(5));
+        let handled = engine
+            .handle_opportunity(opp, &[], &mut budget_remaining)
+            .await;
+        assert!(!handled);
+        assert_eq!(budget_remaining, dec!(100));
+    }
+
+    #[tokio::test]
+    async fn test_non_weather_sorts_by_prepared_efficiency() {
+        let executed = Arc::new(StdMutex::new(Vec::new()));
+        let books = Arc::new(HashMap::from([
+            (
+                U256::from(1u64),
+                make_book(
+                    U256::from(1u64),
+                    &[(dec!(0.59), dec!(10))],
+                    &[(dec!(0.60), dec!(5))],
+                ),
+            ),
+            (
+                U256::from(2u64),
+                make_book(
+                    U256::from(2u64),
+                    &[(dec!(0.39), dec!(10))],
+                    &[(dec!(0.40), dec!(5))],
+                ),
+            ),
+        ]));
+
+        let opp_a = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([1u8; 32]),
+            question: "A".into(),
+            spread: dec!(0.10),
+            estimated_profit: dec!(1.5),
+            size: dec!(5),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(1u64),
+                side: TradeSide::Buy,
+                price: dec!(0.60),
+                size: dec!(5),
+                condition_id: B256::from([1u8; 32]),
+            },
+        };
+        let opp_b = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([2u8; 32]),
+            question: "B".into(),
+            spread: dec!(0.10),
+            estimated_profit: dec!(1.2),
+            size: dec!(5),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(2u64),
+                side: TradeSide::Buy,
+                price: dec!(0.40),
+                size: dec!(5),
+                condition_id: B256::from([2u8; 32]),
+            },
+        };
+
+        let markets = vec![
+            MarketInfo {
+                condition_id: B256::from([1u8; 32]),
+                question_id: B256::from([1u8; 32]),
+                question: "A".into(),
+                neg_risk: false,
+                neg_risk_market_id: None,
+                tokens: vec![],
+                tick_size: dec!(0.01),
+                fee_rate_bps: 0,
+                active: true,
+                liquidity: Decimal::ZERO,
+                event_title: None,
+                end_date: None,
+                category: None,
+                outcome_prices: None,
+                gamma_best_bid: None,
+                gamma_best_ask: None,
+                rewards_min_size: None,
+                rewards_max_spread: None,
+                rewards_daily_rate: None,
+                holding_rewards_enabled: false,
+                fees_enabled: false,
+            },
+            MarketInfo {
+                condition_id: B256::from([2u8; 32]),
+                question_id: B256::from([2u8; 32]),
+                question: "B".into(),
+                neg_risk: false,
+                neg_risk_market_id: None,
+                tokens: vec![],
+                tick_size: dec!(0.01),
+                fee_rate_bps: 0,
+                active: true,
+                liquidity: Decimal::ZERO,
+                event_title: None,
+                end_date: None,
+                category: None,
+                outcome_prices: None,
+                gamma_best_bid: None,
+                gamma_best_ask: None,
+                rewards_min_size: None,
+                rewards_max_spread: None,
+                rewards_daily_rate: None,
+                holding_rewards_enabled: false,
+                fees_enabled: false,
+            },
+        ];
+
+        let engine = StrategyEngine::new(
+            vec![Box::new(FixedStrategy {
+                opps: vec![opp_a, opp_b],
+                strategy_type: StrategyType::CryptoAlpha,
+            })],
+            Arc::new(RecordingExecutor {
+                executed_questions: executed.clone(),
+            }),
+            Arc::new(NoopRiskManager),
+            StrategyEngineDeps {
+                get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
+                get_available_capital: Box::new(|| dec!(3.0)),
+                get_all_positions: Box::new(Vec::new),
+            },
+            StrategyEngineOptions {
+                scan_interval_ms: 1000,
+                event_calendar: None,
+                min_order_usdc: dec!(1),
+                max_market_end_days: None,
+                max_slippage_bps: 50,
+                min_profit_retention_ratio: dec!(0.50),
+                min_size_retention_ratio: dec!(0.50),
+                execution_quality_profit_weight: Decimal::ONE,
+                execution_quality_size_weight: Decimal::ONE,
+                execution_quality_slippage_weight: Decimal::ONE,
+            },
+        );
+
+        let prepared_a = engine
+            .prepare_opportunity_for_execution(
+                TradingOpportunity {
+                    id: Uuid::now_v7(),
+                    strategy_type: StrategyType::CryptoAlpha,
+                    condition_id: B256::from([1u8; 32]),
+                    question: "A".into(),
+                    spread: dec!(0.10),
+                    estimated_profit: dec!(1.5),
+                    size: dec!(5),
+                    min_profit_retention_ratio_multiplier: None,
+                    max_slippage_bps_multiplier: None,
+                    min_size_retention_ratio_multiplier: None,
+                    detected_at: Utc::now(),
+                    execution_plan: ExecutionPlan::DirectionalBuy {
+                        token_id: U256::from(1u64),
+                        side: TradeSide::Buy,
+                        price: dec!(0.60),
+                        size: dec!(5),
+                        condition_id: B256::from([1u8; 32]),
+                    },
+                },
+                &markets,
+            )
+            .await
+            .unwrap();
+        let prepared_b = engine
+            .prepare_opportunity_for_execution(
+                TradingOpportunity {
+                    id: Uuid::now_v7(),
+                    strategy_type: StrategyType::CryptoAlpha,
+                    condition_id: B256::from([2u8; 32]),
+                    question: "B".into(),
+                    spread: dec!(0.10),
+                    estimated_profit: dec!(1.2),
+                    size: dec!(5),
+                    min_profit_retention_ratio_multiplier: None,
+                    max_slippage_bps_multiplier: None,
+                    min_size_retention_ratio_multiplier: None,
+                    detected_at: Utc::now(),
+                    execution_plan: ExecutionPlan::DirectionalBuy {
+                        token_id: U256::from(2u64),
+                        side: TradeSide::Buy,
+                        price: dec!(0.40),
+                        size: dec!(5),
+                        condition_id: B256::from([2u8; 32]),
+                    },
+                },
+                &markets,
+            )
+            .await
+            .unwrap();
+        let prepared_a_eff = prepared_a.opportunity.estimated_profit
+            / prepared_a.opportunity.execution_plan.estimated_cost();
+        let prepared_b_eff = prepared_b.opportunity.estimated_profit
+            / prepared_b.opportunity.execution_plan.estimated_cost();
+        assert!(prepared_b_eff > prepared_a_eff);
+
+        engine.scan_and_execute(&markets).await;
+
+        let executed_questions = executed.lock().unwrap().clone();
+        assert_eq!(executed_questions, vec!["B"]);
+    }
+
+    #[tokio::test]
+    async fn test_non_weather_sorts_by_profit_retention_before_efficiency() {
+        let executed = Arc::new(StdMutex::new(Vec::new()));
+        let book_call_counts = Arc::new(StdMutex::new(HashMap::<U256, usize>::new()));
+
+        let opp_a = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([3u8; 32]),
+            question: "low-retention-higher-eff".into(),
+            spread: dec!(0.05),
+            estimated_profit: dec!(0.50),
+            size: dec!(5),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(1u64),
+                side: TradeSide::Buy,
+                price: dec!(0.20),
+                size: dec!(5),
+                condition_id: B256::from([3u8; 32]),
+            },
+        };
+        let opp_b = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([4u8; 32]),
+            question: "high-retention-lower-eff".into(),
+            spread: dec!(0.05),
+            estimated_profit: dec!(0.60),
+            size: dec!(5),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(2u64),
+                side: TradeSide::Buy,
+                price: dec!(0.50),
+                size: dec!(5),
+                condition_id: B256::from([4u8; 32]),
+            },
+        };
+
+        let markets = vec![
+            MarketInfo {
+                condition_id: B256::from([3u8; 32]),
+                question_id: B256::from([3u8; 32]),
+                question: "low-retention-higher-eff".into(),
+                neg_risk: false,
+                neg_risk_market_id: None,
+                tokens: vec![],
+                tick_size: dec!(0.01),
+                fee_rate_bps: 0,
+                active: true,
+                liquidity: Decimal::ZERO,
+                event_title: None,
+                end_date: None,
+                category: None,
+                outcome_prices: None,
+                gamma_best_bid: None,
+                gamma_best_ask: None,
+                rewards_min_size: None,
+                rewards_max_spread: None,
+                rewards_daily_rate: None,
+                holding_rewards_enabled: false,
+                fees_enabled: false,
+            },
+            MarketInfo {
+                condition_id: B256::from([4u8; 32]),
+                question_id: B256::from([4u8; 32]),
+                question: "high-retention-lower-eff".into(),
+                neg_risk: false,
+                neg_risk_market_id: None,
+                tokens: vec![],
+                tick_size: dec!(0.01),
+                fee_rate_bps: 0,
+                active: true,
+                liquidity: Decimal::ZERO,
+                event_title: None,
+                end_date: None,
+                category: None,
+                outcome_prices: None,
+                gamma_best_bid: None,
+                gamma_best_ask: None,
+                rewards_min_size: None,
+                rewards_max_spread: None,
+                rewards_daily_rate: None,
+                holding_rewards_enabled: false,
+                fees_enabled: false,
+            },
+        ];
+
+        let book_call_counts_for_closure = Arc::clone(&book_call_counts);
+        let engine = StrategyEngine::new(
+            vec![Box::new(FixedStrategy {
+                opps: vec![opp_a, opp_b],
+                strategy_type: StrategyType::CryptoAlpha,
+            })],
+            Arc::new(RecordingExecutor {
+                executed_questions: executed.clone(),
+            }),
+            Arc::new(NoopRiskManager),
+            StrategyEngineDeps {
+                get_orderbook: Box::new(move |token_id| {
+                    let mut counts = book_call_counts_for_closure.lock().unwrap();
+                    let entry = counts.entry(token_id).or_insert(0);
+                    *entry += 1;
+                    let phase = *entry;
+                    drop(counts);
+
+                    let odd_phase = phase % 2 == 1;
+
+                    match token_id {
+                        id if id == U256::from(1u64) && odd_phase => Some(make_book(
+                            U256::from(1u64),
+                            &[(dec!(0.19), dec!(10))],
+                            &[(dec!(0.20), dec!(5))],
+                        )),
+                        id if id == U256::from(1u64) => Some(make_book(
+                            U256::from(1u64),
+                            &[(dec!(0.19), dec!(10))],
+                            &[(dec!(0.24), dec!(5))],
+                        )),
+                        id if id == U256::from(2u64) && odd_phase => Some(make_book(
+                            U256::from(2u64),
+                            &[(dec!(0.50), dec!(10))],
+                            &[(dec!(0.50), dec!(5))],
+                        )),
+                        id if id == U256::from(2u64) => Some(make_book(
+                            U256::from(2u64),
+                            &[(dec!(0.50), dec!(10))],
+                            &[(dec!(0.51), dec!(5))],
+                        )),
+                        _ => None,
+                    }
+                }),
+                get_available_capital: Box::new(|| dec!(2.60)),
+                get_all_positions: Box::new(Vec::new),
+            },
+            StrategyEngineOptions {
+                scan_interval_ms: 1000,
+                event_calendar: None,
+                min_order_usdc: dec!(1),
+                max_market_end_days: None,
+                max_slippage_bps: 2500,
+                min_profit_retention_ratio: dec!(0.50),
+                min_size_retention_ratio: dec!(0.50),
+                execution_quality_profit_weight: Decimal::ONE,
+                execution_quality_size_weight: Decimal::ONE,
+                execution_quality_slippage_weight: Decimal::ONE,
+            },
+        );
+
+        let prepared_a = engine
+            .prepare_opportunity_for_execution(
+                TradingOpportunity {
+                    id: Uuid::now_v7(),
+                    strategy_type: StrategyType::CryptoAlpha,
+                    condition_id: B256::from([3u8; 32]),
+                    question: "low-retention-higher-eff".into(),
+                    spread: dec!(0.05),
+                    estimated_profit: dec!(0.50),
+                    size: dec!(5),
+                    min_profit_retention_ratio_multiplier: None,
+                    max_slippage_bps_multiplier: None,
+                    min_size_retention_ratio_multiplier: None,
+                    detected_at: Utc::now(),
+                    execution_plan: ExecutionPlan::DirectionalBuy {
+                        token_id: U256::from(1u64),
+                        side: TradeSide::Buy,
+                        price: dec!(0.20),
+                        size: dec!(5),
+                        condition_id: B256::from([3u8; 32]),
+                    },
+                },
+                &markets,
+            )
+            .await
+            .unwrap();
+        let prepared_b = engine
+            .prepare_opportunity_for_execution(
+                TradingOpportunity {
+                    id: Uuid::now_v7(),
+                    strategy_type: StrategyType::CryptoAlpha,
+                    condition_id: B256::from([4u8; 32]),
+                    question: "high-retention-lower-eff".into(),
+                    spread: dec!(0.05),
+                    estimated_profit: dec!(0.60),
+                    size: dec!(5),
+                    min_profit_retention_ratio_multiplier: None,
+                    max_slippage_bps_multiplier: None,
+                    min_size_retention_ratio_multiplier: None,
+                    detected_at: Utc::now(),
+                    execution_plan: ExecutionPlan::DirectionalBuy {
+                        token_id: U256::from(2u64),
+                        side: TradeSide::Buy,
+                        price: dec!(0.50),
+                        size: dec!(5),
+                        condition_id: B256::from([4u8; 32]),
+                    },
+                },
+                &markets,
+            )
+            .await
+            .unwrap();
+
+        let prepared_a_eff = prepared_a.opportunity.estimated_profit
+            / prepared_a.opportunity.execution_plan.estimated_cost();
+        let prepared_b_eff = prepared_b.opportunity.estimated_profit
+            / prepared_b.opportunity.execution_plan.estimated_cost();
+        assert!(prepared_a_eff > prepared_b_eff);
+        assert!(prepared_b.profit_retention_ratio > prepared_a.profit_retention_ratio);
+
+        engine.scan_and_execute(&markets).await;
+
+        let executed_questions = executed.lock().unwrap().clone();
+        assert_eq!(executed_questions, vec!["high-retention-lower-eff"]);
+    }
+
+    #[tokio::test]
+    async fn test_non_weather_sorts_by_execution_quality_score_accounts_for_size_retention() {
+        let executed = Arc::new(StdMutex::new(Vec::new()));
+        let book_call_counts = Arc::new(StdMutex::new(HashMap::<U256, usize>::new()));
+
+        let opp_a = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([5u8; 32]),
+            question: "high-profit-retention-low-size-retention".into(),
+            spread: dec!(0.05),
+            estimated_profit: dec!(0.50),
+            size: dec!(5),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(5u64),
+                side: TradeSide::Buy,
+                price: dec!(0.50),
+                size: dec!(5),
+                condition_id: B256::from([5u8; 32]),
+            },
+        };
+        let opp_b = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([6u8; 32]),
+            question: "lower-profit-retention-full-size".into(),
+            spread: dec!(0.05),
+            estimated_profit: dec!(0.50),
+            size: dec!(5),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(6u64),
+                side: TradeSide::Buy,
+                price: dec!(0.50),
+                size: dec!(5),
+                condition_id: B256::from([6u8; 32]),
+            },
+        };
+
+        let markets = vec![
+            MarketInfo {
+                condition_id: B256::from([5u8; 32]),
+                question_id: B256::from([5u8; 32]),
+                question: "high-profit-retention-low-size-retention".into(),
+                neg_risk: false,
+                neg_risk_market_id: None,
+                tokens: vec![],
+                tick_size: dec!(0.01),
+                fee_rate_bps: 0,
+                active: true,
+                liquidity: Decimal::ZERO,
+                event_title: None,
+                end_date: None,
+                category: None,
+                outcome_prices: None,
+                gamma_best_bid: None,
+                gamma_best_ask: None,
+                rewards_min_size: None,
+                rewards_max_spread: None,
+                rewards_daily_rate: None,
+                holding_rewards_enabled: false,
+                fees_enabled: false,
+            },
+            MarketInfo {
+                condition_id: B256::from([6u8; 32]),
+                question_id: B256::from([6u8; 32]),
+                question: "lower-profit-retention-full-size".into(),
+                neg_risk: false,
+                neg_risk_market_id: None,
+                tokens: vec![],
+                tick_size: dec!(0.01),
+                fee_rate_bps: 0,
+                active: true,
+                liquidity: Decimal::ZERO,
+                event_title: None,
+                end_date: None,
+                category: None,
+                outcome_prices: None,
+                gamma_best_bid: None,
+                gamma_best_ask: None,
+                rewards_min_size: None,
+                rewards_max_spread: None,
+                rewards_daily_rate: None,
+                holding_rewards_enabled: false,
+                fees_enabled: false,
+            },
+        ];
+
+        let book_call_counts_for_closure = Arc::clone(&book_call_counts);
+        let engine = StrategyEngine::new(
+            vec![Box::new(FixedStrategy {
+                opps: vec![opp_a, opp_b],
+                strategy_type: StrategyType::CryptoAlpha,
+            })],
+            Arc::new(RecordingExecutor {
+                executed_questions: executed.clone(),
+            }),
+            Arc::new(NoopRiskManager),
+            StrategyEngineDeps {
+                get_orderbook: Box::new(move |token_id| {
+                    let mut counts = book_call_counts_for_closure.lock().unwrap();
+                    let entry = counts.entry(token_id).or_insert(0);
+                    *entry += 1;
+                    let phase = *entry;
+                    drop(counts);
+
+                    let odd_phase = phase % 2 == 1;
+                    match token_id {
+                        id if id == U256::from(5u64) && odd_phase => Some(make_book(
+                            U256::from(5u64),
+                            &[(dec!(0.50), dec!(10))],
+                            &[(dec!(0.50), dec!(5))],
+                        )),
+                        id if id == U256::from(5u64) => Some(make_book(
+                            U256::from(5u64),
+                            &[(dec!(0.50), dec!(10))],
+                            &[(dec!(0.50), dec!(3))],
+                        )),
+                        id if id == U256::from(6u64) && odd_phase => Some(make_book(
+                            U256::from(6u64),
+                            &[(dec!(0.50), dec!(10))],
+                            &[(dec!(0.50), dec!(5))],
+                        )),
+                        id if id == U256::from(6u64) => Some(make_book(
+                            U256::from(6u64),
+                            &[(dec!(0.50), dec!(10))],
+                            &[(dec!(0.51), dec!(5))],
+                        )),
+                        _ => None,
+                    }
+                }),
+                get_available_capital: Box::new(|| dec!(10.0)),
+                get_all_positions: Box::new(Vec::new),
+            },
+            StrategyEngineOptions {
+                scan_interval_ms: 1000,
+                event_calendar: None,
+                min_order_usdc: dec!(1),
+                max_market_end_days: None,
+                max_slippage_bps: 1200,
+                min_profit_retention_ratio: dec!(0.30),
+                min_size_retention_ratio: dec!(0.30),
+                execution_quality_profit_weight: Decimal::ONE,
+                execution_quality_size_weight: Decimal::ONE,
+                execution_quality_slippage_weight: Decimal::ONE,
+            },
+        );
+
+        let prepared_a = engine
+            .prepare_opportunity_for_execution(
+                TradingOpportunity {
+                    id: Uuid::now_v7(),
+                    strategy_type: StrategyType::CryptoAlpha,
+                    condition_id: B256::from([5u8; 32]),
+                    question: "high-profit-retention-low-size-retention".into(),
+                    spread: dec!(0.05),
+                    estimated_profit: dec!(1.00),
+                    size: dec!(5),
+                    min_profit_retention_ratio_multiplier: None,
+                    max_slippage_bps_multiplier: None,
+                    min_size_retention_ratio_multiplier: None,
+                    detected_at: Utc::now(),
+                    execution_plan: ExecutionPlan::DirectionalBuy {
+                        token_id: U256::from(5u64),
+                        side: TradeSide::Buy,
+                        price: dec!(0.50),
+                        size: dec!(5),
+                        condition_id: B256::from([5u8; 32]),
+                    },
+                },
+                &markets,
+            )
+            .await
+            .unwrap();
+        let prepared_b = engine
+            .prepare_opportunity_for_execution(
+                TradingOpportunity {
+                    id: Uuid::now_v7(),
+                    strategy_type: StrategyType::CryptoAlpha,
+                    condition_id: B256::from([6u8; 32]),
+                    question: "lower-profit-retention-full-size".into(),
+                    spread: dec!(0.05),
+                    estimated_profit: dec!(1.00),
+                    size: dec!(5),
+                    min_profit_retention_ratio_multiplier: None,
+                    max_slippage_bps_multiplier: None,
+                    min_size_retention_ratio_multiplier: None,
+                    detected_at: Utc::now(),
+                    execution_plan: ExecutionPlan::DirectionalBuy {
+                        token_id: U256::from(6u64),
+                        side: TradeSide::Buy,
+                        price: dec!(0.50),
+                        size: dec!(5),
+                        condition_id: B256::from([6u8; 32]),
+                    },
+                },
+                &markets,
+            )
+            .await
+            .unwrap();
+
+        assert!(prepared_a.size_retention_ratio < prepared_b.size_retention_ratio);
+        assert!(prepared_b.execution_quality_score > prepared_a.execution_quality_score);
+
+        book_call_counts.lock().unwrap().clear();
+        engine.scan_and_execute(&markets).await;
+
+        let executed_questions = executed.lock().unwrap().clone();
+        assert_eq!(
+            executed_questions.first().map(String::as_str),
+            Some("lower-profit-retention-full-size")
+        );
+    }
+
+    #[test]
+    fn test_execution_quality_score_respects_configured_weights() {
+        let execution_plan = make_opp(TradeSide::Buy, dec!(0.50), dec!(5)).execution_plan;
+
+        let profit_heavy = StrategyEngine::execution_quality_score(
+            dec!(3.0),
+            Decimal::ONE,
+            Decimal::ONE,
+            dec!(0.90),
+            dec!(0.60),
+            dec!(0.90),
+            &execution_plan,
+        );
+        let size_heavy = StrategyEngine::execution_quality_score(
+            Decimal::ONE,
+            dec!(3.0),
+            Decimal::ONE,
+            dec!(0.90),
+            dec!(0.60),
+            dec!(0.90),
+            &execution_plan,
+        );
+
+        assert!(profit_heavy > size_heavy);
     }
 }

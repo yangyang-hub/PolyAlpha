@@ -23,7 +23,12 @@ const FIELD_HINTS: Record<string, Record<string, string>> = {
     max_daily_loss: "单日最大亏损（USDC），超过暂停交易",
     circuit_breaker_loss: "熔断亏损阈值（USDC），触发后停止所有交易",
     circuit_breaker_consecutive_losses: "连续亏损次数触发熔断",
-    max_slippage_bps: "最大滑点（基点）",
+    max_slippage_bps: "最大滑点（基点）：执行 freshness 允许的向上重报价预算",
+    min_profit_retention_ratio: "最小利润保真比例：重报价后需保留的原始预期利润比例",
+    min_size_retention_ratio: "最小数量保真比例：执行 freshness 缩量后需保留的原始下单量比例",
+    execution_quality_profit_weight: "执行质量分数里的利润保真权重",
+    execution_quality_size_weight: "执行质量分数里的数量保真权重",
+    execution_quality_slippage_weight: "执行质量分数里的滑点质量权重",
     min_order_usdc: "最小订单金额（USDC），低于此值跳过",
     min_profit_usdc: "最小利润要求（USDC）",
     max_exposure_per_strategy: "单策略最大敞口（USDC）",
@@ -66,6 +71,12 @@ const FIELD_HINTS: Record<string, Record<string, string>> = {
     history_refresh_interval_secs: "30日历史收盘价刷新间隔（秒）",
     iv_refresh_interval_secs: "隐含波动率刷新间隔（秒）",
     coingecko_api_key: "CoinGecko Demo API Key（留空则禁用备用源）",
+    min_entry_depth_ratio: "最小入场深度倍数：盘口可成交深度 / 目标下单量",
+    gate_scale_feedback_lookback: "自适应预缩量反馈查看的最近 gate_scale 条数",
+    gate_scale_feedback_trigger_count: "触发自适应预缩量反馈所需的最少 gate_scale 次数",
+    gate_scale_feedback_step_multiplier: "每一档 gate_scale 反馈对目标下单量施加的乘数",
+    gate_scale_feedback_max_steps: "自适应预缩量反馈最多叠加的档位数",
+    discovery_search_terms: "额外加密市场搜索词：在内置 crypto 发现词表基础上追加",
     exit_buffer_bps: "模型反转退出缓冲（基点）",
     capital_efficiency_threshold: "资金效率退出阈值（0-1）",
     drift_decay: "漂移衰减：0=风险中性(Black-Scholes)，1=完全历史漂移",
@@ -82,15 +93,23 @@ const FIELD_HINTS: Record<string, Record<string, string>> = {
     low_event_sigma_multiplier: "低影响事件 sigma 乘数",
     medium_event_sigma_multiplier: "中影响事件 sigma 乘数",
     high_event_sigma_multiplier: "高影响事件 sigma 乘数",
+    macro_event_sigma_multiplier: "宏观事件额外 sigma 乘数",
+    crypto_event_sigma_multiplier: "加密事件额外 sigma 乘数",
     low_event_size_multiplier: "低影响事件仓位乘数",
     medium_event_size_multiplier: "中影响事件仓位乘数",
     high_event_size_multiplier: "高影响事件仓位乘数",
+    macro_event_size_multiplier: "宏观事件额外仓位乘数",
+    crypto_event_size_multiplier: "加密事件额外仓位乘数",
     btc_probability_calibration: "BTC 概率校准收缩系数",
     eth_probability_calibration: "ETH 概率校准收缩系数",
     alt_probability_calibration: "其他币种概率校准收缩系数",
     binary_probability_calibration: "二元市场概率校准收缩系数",
     range_probability_calibration: "区间市场概率校准收缩系数",
-    calibration_overrides: "表驱动校准覆盖：按 asset+horizon+market_type 精细覆盖默认校准",
+    override_probability_blend: "运行时 override 概率混合系数",
+    override_probability_max_delta_bps: "运行时 override 概率最大偏移(bps)",
+    override_multiplier_blend: "运行时 override 乘数混合系数",
+    override_multiplier_max_delta_bps: "运行时 override 乘数最大偏移(bps)",
+    calibration_overrides: "表驱动校准覆盖：按 asset/asset_class/horizon/market_type/event_subtype 精细覆盖默认校准",
     short_horizon_max_days: "短期期限桶最大天数",
     medium_horizon_max_days: "中期期限桶最大天数",
     short_horizon_probability_calibration: "短期期限概率校准收缩系数",
@@ -204,6 +223,7 @@ export default function ConfigSection({ title, section, data, meta }: Props) {
             />
           ))}
         </div>
+        {section === "crypto_alpha" && <CryptoOverrideCoverageSummary data={data} />}
       </div>
     </div>
   );
@@ -224,11 +244,26 @@ function riskBadgeClass(tier: "low" | "medium" | "high" | undefined) {
 
 type CalibrationOverrideRow = {
   asset?: string;
+  asset_class?: string;
   horizon?: string;
   market_type?: string;
+  event_subtype?: string;
   probability_calibration?: number | string | null;
   sigma_multiplier?: number | string | null;
   size_multiplier?: number | string | null;
+  depth_ratio_multiplier?: number | string | null;
+  min_edge_multiplier?: number | string | null;
+  max_spread_multiplier?: number | string | null;
+  hold_edge_multiplier?: number | string | null;
+  edge_decay_exit_multiplier?: number | string | null;
+  edge_decay_confirmation_scan_multiplier?: number | string | null;
+  edge_decay_confirmation_window_multiplier?: number | string | null;
+  edge_decay_cooldown_multiplier?: number | string | null;
+  capital_efficiency_multiplier?: number | string | null;
+  model_reversal_buffer_multiplier?: number | string | null;
+  profit_retention_multiplier?: number | string | null;
+  slippage_multiplier?: number | string | null;
+  size_retention_multiplier?: number | string | null;
 };
 
 function isCalibrationOverrideRow(value: unknown): value is CalibrationOverrideRow {
@@ -255,12 +290,16 @@ function CalibrationScopeBadge({ value }: { value: string }) {
 
 function calibrationScopeScore(row: CalibrationOverrideRow) {
   const asset = row.asset || "*";
+  const assetClass = row.asset_class || "any";
   const horizon = row.horizon || "any";
   const marketType = row.market_type || "any";
+  const eventSubtype = row.event_subtype || "any";
   const assetScore = asset === "*" ? 0 : 1;
+  const assetClassScore = assetClass === "any" ? 0 : 1;
   const horizonScore = horizon === "any" ? 0 : horizon === "long" ? 1 : 2;
   const marketTypeScore = marketType === "any" ? 0 : 1;
-  return assetScore * 100 + horizonScore * 10 + marketTypeScore;
+  const eventSubtypeScore = eventSubtype === "any" ? 0 : 1;
+  return assetScore * 1000 + assetClassScore * 100 + horizonScore * 10 + marketTypeScore + eventSubtypeScore;
 }
 
 function calibrationMarketTypeGroupLabel(value: string) {
@@ -274,6 +313,137 @@ function calibrationMarketTypeGroupLabel(value: string) {
     default:
       return value;
   }
+}
+
+function CryptoOverrideCoverageSummary({ data }: { data: Record<string, unknown> }) {
+  const rawOverrides = Array.isArray(data.calibration_overrides)
+    ? data.calibration_overrides.filter((entry) => isCalibrationOverrideRow(entry))
+    : [];
+
+  const rows = [
+    { scope: "major", subtype: "unlock" },
+    { scope: "major", subtype: "upgrade" },
+    { scope: "major", subtype: "regulatory" },
+    { scope: "alt", subtype: "unlock" },
+    { scope: "alt", subtype: "upgrade" },
+    { scope: "alt", subtype: "regulatory" },
+  ].map((target) => {
+    const matching = rawOverrides.filter((row) => {
+      const assetClass = (row.asset_class || "any").toLowerCase();
+      const eventSubtype = (row.event_subtype || "any").toLowerCase();
+      const marketType = (row.market_type || "any").toLowerCase();
+      const horizon = (row.horizon || "any").toLowerCase();
+      const classMatch = assetClass === "any" || assetClass === target.scope;
+      const subtypeMatch = eventSubtype === "any" || eventSubtype === target.subtype;
+      const scopeMatch = classMatch && subtypeMatch;
+      const strategyRelevant = marketType === "any" || marketType === "binary" || marketType === "range";
+      const horizonRelevant = horizon === "any" || horizon === "short" || horizon === "medium" || horizon === "long";
+      return scopeMatch && strategyRelevant && horizonRelevant;
+    });
+
+    const sigmaCovered = matching.some((row) => row.sigma_multiplier !== undefined && row.sigma_multiplier !== null);
+    const sizeCovered = matching.some((row) => row.size_multiplier !== undefined && row.size_multiplier !== null);
+
+    return {
+      ...target,
+      sigmaCovered,
+      sizeCovered,
+      minEdgeCovered: matching.some(
+        (row) => row.min_edge_multiplier !== undefined && row.min_edge_multiplier !== null,
+      ),
+      maxSpreadCovered: matching.some(
+        (row) => row.max_spread_multiplier !== undefined && row.max_spread_multiplier !== null,
+      ),
+      ruleCount: matching.length,
+    };
+  });
+  const fullyMigratedCount = rows.filter(
+    (row) =>
+      row.sigmaCovered &&
+      row.sizeCovered &&
+      row.minEdgeCovered &&
+      row.maxSpreadCovered,
+  ).length;
+  const partiallyStatic = rows
+    .filter(
+      (row) =>
+        !(
+          row.sigmaCovered &&
+          row.sizeCovered &&
+          row.minEdgeCovered &&
+          row.maxSpreadCovered
+        ),
+    )
+    .map((row) => `${row.scope}/${row.subtype}`);
+
+  return (
+    <div className="mt-4 rounded-box border border-base-300 bg-base-100 p-3 sm:col-span-2">
+      <div className="text-xs opacity-70">override coverage</div>
+      <div className="mt-1 text-xs opacity-50">
+        当前 crypto subtype tuning 以 calibration table 为准；这张表只看 six buckets 的 override 覆盖情况。
+      </div>
+      <div className="mt-2 flex flex-wrap gap-2 text-xs">
+        <span className="badge badge-success badge-outline">
+          fully migrated {fullyMigratedCount}/{rows.length}
+        </span>
+        {partiallyStatic.length > 0 && (
+          <span className="badge badge-warning badge-outline">
+            remaining static: {partiallyStatic.join(", ")}
+          </span>
+        )}
+      </div>
+      <div className="mt-3 overflow-x-auto">
+        <table className="table table-xs">
+          <thead>
+            <tr>
+              <th>Scope</th>
+              <th>Subtype</th>
+              <th>Sigma</th>
+              <th>Size</th>
+              <th>Min Edge</th>
+              <th>Max Spread</th>
+              <th>Rules</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={`${row.scope}-${row.subtype}`}>
+                <td>
+                  <span
+                    className={`badge badge-sm ${row.scope === "major" ? "badge-info badge-outline" : "badge-warning badge-outline"}`}
+                  >
+                    {row.scope}
+                  </span>
+                </td>
+                <td className="capitalize">{row.subtype}</td>
+                <td>
+                  <span className={`badge badge-sm ${row.sigmaCovered ? "badge-success badge-outline" : "badge-ghost"}`}>
+                    {row.sigmaCovered ? "override" : "static"}
+                  </span>
+                </td>
+                <td>
+                  <span className={`badge badge-sm ${row.sizeCovered ? "badge-success badge-outline" : "badge-ghost"}`}>
+                    {row.sizeCovered ? "override" : "static"}
+                  </span>
+                </td>
+                <td>
+                  <span className={`badge badge-sm ${row.minEdgeCovered ? "badge-success badge-outline" : "badge-ghost"}`}>
+                    {row.minEdgeCovered ? "override" : "static"}
+                  </span>
+                </td>
+                <td>
+                  <span className={`badge badge-sm ${row.maxSpreadCovered ? "badge-success badge-outline" : "badge-ghost"}`}>
+                    {row.maxSpreadCovered ? "override" : "static"}
+                  </span>
+                </td>
+                <td className="font-mono">{row.ruleCount}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 }
 
 function FieldDisplay({
@@ -493,20 +663,38 @@ function FieldDisplay({
                       <thead>
                         <tr>
                           <th>asset</th>
+                          <th>class</th>
                           <th>horizon</th>
                           <th>market_type</th>
+                          <th>event</th>
                           <th>probability</th>
                           <th>sigma</th>
                           <th>size</th>
+                          <th>depth_ratio</th>
+                          <th>min_edge</th>
+                          <th>max_spread</th>
+                          <th>hold_edge</th>
+                          <th>edge_decay_exit</th>
+                          <th>confirm_scan</th>
+                          <th>confirm_window</th>
+                          <th>cooldown</th>
+                          <th>capital_eff</th>
+                          <th>model_buffer</th>
+                          <th>profit_retention</th>
+                          <th>slippage</th>
+                          <th>size_retention</th>
                         </tr>
                       </thead>
                       <tbody>
                         {groupedRows[groupKey].map((row, index) => (
                           <tr
-                            key={`${row.asset ?? "*"}-${row.horizon ?? "any"}-${row.market_type ?? "any"}-${index}`}
+                            key={`${row.asset ?? "*"}-${row.asset_class ?? "any"}-${row.horizon ?? "any"}-${row.market_type ?? "any"}-${row.event_subtype ?? "any"}-${index}`}
                           >
                             <td className="font-mono">
                               <CalibrationScopeBadge value={renderCalibrationCell(row.asset || "*")} />
+                            </td>
+                            <td className="font-mono">
+                              <CalibrationScopeBadge value={renderCalibrationCell(row.asset_class || "any")} />
                             </td>
                             <td className="font-mono">
                               <CalibrationScopeBadge value={renderCalibrationCell(row.horizon || "any")} />
@@ -514,9 +702,25 @@ function FieldDisplay({
                             <td className="font-mono">
                               <CalibrationScopeBadge value={renderCalibrationCell(row.market_type || "any")} />
                             </td>
+                            <td className="font-mono">
+                              <CalibrationScopeBadge value={renderCalibrationCell(row.event_subtype || "any")} />
+                            </td>
                             <td className="font-mono">{renderCalibrationCell(row.probability_calibration)}</td>
                             <td className="font-mono">{renderCalibrationCell(row.sigma_multiplier)}</td>
                             <td className="font-mono">{renderCalibrationCell(row.size_multiplier)}</td>
+                            <td className="font-mono">{renderCalibrationCell(row.depth_ratio_multiplier)}</td>
+                            <td className="font-mono">{renderCalibrationCell(row.min_edge_multiplier)}</td>
+                            <td className="font-mono">{renderCalibrationCell(row.max_spread_multiplier)}</td>
+                            <td className="font-mono">{renderCalibrationCell(row.hold_edge_multiplier)}</td>
+                            <td className="font-mono">{renderCalibrationCell(row.edge_decay_exit_multiplier)}</td>
+                            <td className="font-mono">{renderCalibrationCell(row.edge_decay_confirmation_scan_multiplier)}</td>
+                            <td className="font-mono">{renderCalibrationCell(row.edge_decay_confirmation_window_multiplier)}</td>
+                            <td className="font-mono">{renderCalibrationCell(row.edge_decay_cooldown_multiplier)}</td>
+                            <td className="font-mono">{renderCalibrationCell(row.capital_efficiency_multiplier)}</td>
+                            <td className="font-mono">{renderCalibrationCell(row.model_reversal_buffer_multiplier)}</td>
+                            <td className="font-mono">{renderCalibrationCell(row.profit_retention_multiplier)}</td>
+                            <td className="font-mono">{renderCalibrationCell(row.slippage_multiplier)}</td>
+                            <td className="font-mono">{renderCalibrationCell(row.size_retention_multiplier)}</td>
                           </tr>
                         ))}
                       </tbody>

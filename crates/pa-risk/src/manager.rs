@@ -204,6 +204,9 @@ mod tests {
             spread: dec!(0.05),
             estimated_profit: dec!(1.0),
             size,
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(1),
@@ -369,6 +372,9 @@ mod tests {
             spread: dec!(0.05),
             estimated_profit: dec!(1.0),
             size: dec!(10),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id,
@@ -428,6 +434,9 @@ mod tests {
             spread: dec!(-0.05),
             estimated_profit: dec!(-1.0), // negative profit (stop-loss)
             size: dec!(50),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(10),

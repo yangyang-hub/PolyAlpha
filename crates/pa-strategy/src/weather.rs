@@ -19,10 +19,9 @@ use pa_core::types::{
 };
 use pa_core::weather::{
     NOAA_SUPPORTED_LOCATIONS, SettlementValidationStatus, WeatherProvider,
-    normalize_noaa_location_name, settlement_extra_edge_bps_for_location,
-    settlement_risk_tier, settlement_validation_status,
-    settlement_sigma_multiplier_for_location, weather_kma_grid, weather_kma_station_id,
-    weather_location, weather_observation_site_hint, weather_timezone,
+    normalize_noaa_location_name, settlement_extra_edge_bps_for_location, settlement_risk_tier,
+    settlement_sigma_multiplier_for_location, settlement_validation_status, weather_kma_grid,
+    weather_kma_station_id, weather_location, weather_observation_site_hint, weather_timezone,
 };
 
 use crate::profitability::ProfitCalculator;
@@ -1524,7 +1523,7 @@ impl MetOfficeClient {
     ) -> anyhow::Result<ForecastData> {
         let _ = self.ensure_key()?;
         Err(anyhow::anyhow!(
-            "Met Office historical forecast archive is not wired yet; keep London audit-only"
+            "Met Office official historical forecast archive is not wired yet; London replay uses PostgreSQL forecast snapshots"
         ))
     }
 }
@@ -1852,7 +1851,7 @@ impl KmaClient {
     ) -> anyhow::Result<ForecastData> {
         let _ = self.ensure_key()?;
         Err(anyhow::anyhow!(
-            "KMA historical forecast archive is not wired yet; keep Seoul audit-only"
+            "KMA official historical forecast archive is not wired yet; Seoul replay uses PostgreSQL forecast snapshots"
         ))
     }
 }
@@ -2407,8 +2406,6 @@ pub struct WeatherAlphaStrategy {
     get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
     /// Returns all held positions for this strategy: (token_id, size, avg_cost).
     get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
-    /// Returns current wallet USDC balance for dynamic position sizing.
-    get_balance: Box<dyn Fn() -> Decimal + Send + Sync>,
     forecast_cache: Arc<Mutex<HashMap<u64, CachedForecast>>>,
     /// NegRisk multi-outcome weather events to scan.
     neg_risk_events: Vec<NegRiskEvent>,
@@ -2429,7 +2426,6 @@ pub struct WeatherAlphaDeps {
     pub get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
     pub get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
     pub get_held_positions: Box<dyn Fn() -> Vec<(U256, Decimal, Decimal)> + Send + Sync>,
-    pub get_balance: Box<dyn Fn() -> Decimal + Send + Sync>,
     pub neg_risk_events: Vec<NegRiskEvent>,
 }
 
@@ -2471,8 +2467,9 @@ impl WeatherAlphaStrategy {
         location: &str,
         hours_until_resolution: Option<i64>,
     ) -> u32 {
-        self.effective_min_edge_bps(location)
-            .saturating_add(Self::short_dated_entry_edge_overlay_bps(hours_until_resolution))
+        self.effective_min_edge_bps(location).saturating_add(
+            Self::short_dated_entry_edge_overlay_bps(hours_until_resolution),
+        )
     }
 
     fn effective_max_entry_price(&self, location: &str) -> Decimal {
@@ -2555,7 +2552,6 @@ impl WeatherAlphaStrategy {
             get_available_capital,
             get_position,
             get_held_positions,
-            get_balance,
             neg_risk_events,
         } = deps;
 
@@ -2575,7 +2571,6 @@ impl WeatherAlphaStrategy {
             get_available_capital,
             get_position,
             get_held_positions,
-            get_balance,
             forecast_cache: Arc::new(Mutex::new(HashMap::new())),
             neg_risk_events,
             scan_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -2790,7 +2785,8 @@ impl WeatherAlphaStrategy {
             return None;
         }
 
-        if ask_price > self.effective_max_entry_price_for_resolution(location, hours_until_resolution)
+        if ask_price
+            > self.effective_max_entry_price_for_resolution(location, hours_until_resolution)
         {
             Self::record_rejection("price_above_max_entry");
             return None;
@@ -2979,6 +2975,9 @@ impl WeatherAlphaStrategy {
                                 spread: side.edge,
                                 estimated_profit: est.net_profit,
                                 size,
+                                min_profit_retention_ratio_multiplier: None,
+                                max_slippage_bps_multiplier: None,
+                                min_size_retention_ratio_multiplier: None,
                                 detected_at: Utc::now(),
                                 execution_plan: ExecutionPlan::DirectionalBuy {
                                     token_id: side.token_id,
@@ -3033,6 +3032,9 @@ impl WeatherAlphaStrategy {
                                 spread: side.edge,
                                 estimated_profit: est.net_profit,
                                 size,
+                                min_profit_retention_ratio_multiplier: None,
+                                max_slippage_bps_multiplier: None,
+                                min_size_retention_ratio_multiplier: None,
                                 detected_at: Utc::now(),
                                 execution_plan: ExecutionPlan::DirectionalBuy {
                                     token_id: side.token_id,
@@ -3149,9 +3151,14 @@ impl WeatherAlphaStrategy {
             return opportunities; // No clear peak, skip surround
         }
 
-        // Calculate surround size: 50% of max position per bin
-        let effective_max = (self.get_balance)() * self.config.max_position_pct;
-        let surround_size_per_bin = effective_max / Decimal::from(2); // Use half of max for surround
+        // Surround entries should stay inside the same city/risk/resolution sizing
+        // envelope as normal weather entries, then use half of that per bin.
+        let hours_until_resolution = Self::hours_until_resolution(
+            event.markets.iter().filter_map(|m| m.end_date).min(),
+        );
+        let effective_max =
+            self.effective_max_position_usdc_for_resolution(location, hours_until_resolution);
+        let surround_size_per_bin = effective_max / Decimal::from(2);
         let min_prob = peak_prob * dec!(0.50); // Adjacent bins must have at least 50% of peak prob
 
         let mut bought_bins = 0u8;
@@ -3223,6 +3230,9 @@ impl WeatherAlphaStrategy {
                     spread: side.edge,
                     estimated_profit: est.net_profit,
                     size: final_size,
+                    min_profit_retention_ratio_multiplier: None,
+                    max_slippage_bps_multiplier: None,
+                    min_size_retention_ratio_multiplier: None,
                     detected_at: Utc::now(),
                     execution_plan: ExecutionPlan::DirectionalBuy {
                         token_id: market.tokens[0].token_id,
@@ -3531,6 +3541,9 @@ impl WeatherAlphaStrategy {
             spread: edge,
             estimated_profit: est.net_profit,
             size,
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id,
@@ -3644,10 +3657,12 @@ impl WeatherAlphaStrategy {
         let (forecast, is_fresh) = self
             .get_forecast_by_location(location, metric, target_date, precipitation_unit)
             .await?;
-        let hours_until_resolution =
-            event.markets.iter().filter_map(|market| market.end_date).min().map(|end| {
-                (end - Utc::now()).num_hours()
-            });
+        let hours_until_resolution = event
+            .markets
+            .iter()
+            .filter_map(|market| market.end_date)
+            .min()
+            .map(|end| (end - Utc::now()).num_hours());
 
         // Skip if forecast hasn't changed significantly (when change detection is enabled)
         if self.config.forecast_change_detection && !is_fresh {
@@ -3839,6 +3854,9 @@ impl WeatherAlphaStrategy {
             spread: edge,
             estimated_profit: est.net_profit,
             size,
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id,
@@ -4158,6 +4176,9 @@ impl WeatherAlphaStrategy {
             spread: best_bid - avg_cost,
             estimated_profit: est.net_profit,
             size,
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id,
@@ -4241,7 +4262,8 @@ impl Strategy for WeatherAlphaStrategy {
                     &market.question,
                     market_local_today(&parsed.location),
                 );
-                let event_key = Self::weather_event_key(&parsed.location, parsed.metric, target_date);
+                let event_key =
+                    Self::weather_event_key(&parsed.location, parsed.metric, target_date);
                 match best_by_event.get(&event_key) {
                     Some(existing) if existing.estimated_profit >= opp.estimated_profit => {}
                     _ => {
@@ -5722,7 +5744,6 @@ mod tests {
                 get_available_capital: Box::new(|| Decimal::MAX),
                 get_position: Box::new(|_| Decimal::ZERO),
                 get_held_positions: Box::new(move || held.clone()),
-                get_balance: Box::new(|| dec!(200)), // test balance $200
                 neg_risk_events: vec![],
             },
         )
@@ -5770,7 +5791,6 @@ mod tests {
                         .unwrap_or(Decimal::ZERO)
                 }),
                 get_held_positions: Box::new(move || held_for_scan.clone()),
-                get_balance: Box::new(|| dec!(200)),
                 neg_risk_events: vec![],
             },
         )
@@ -5990,7 +6010,6 @@ mod tests {
                 get_available_capital: Box::new(|| Decimal::MAX),
                 get_position: Box::new(|_| Decimal::ZERO),
                 get_held_positions: Box::new(move || held_clone.clone()),
-                get_balance: Box::new(|| dec!(200)), // test balance $200
                 neg_risk_events: vec![],
             },
         );
@@ -6500,7 +6519,6 @@ mod tests {
                 get_available_capital: Box::new(|| Decimal::MAX),
                 get_position: Box::new(|_| Decimal::ZERO),
                 get_held_positions: Box::new(move || held.clone()),
-                get_balance: Box::new(|| dec!(200)),
                 neg_risk_events: vec![],
             },
         );
@@ -6579,7 +6597,6 @@ mod tests {
                 get_available_capital: Box::new(|| Decimal::MAX),
                 get_position: Box::new(|_| Decimal::ZERO),
                 get_held_positions: Box::new(move || held.clone()),
-                get_balance: Box::new(|| dec!(200)),
                 neg_risk_events: vec![],
             },
         );
@@ -6662,7 +6679,6 @@ mod tests {
                 get_available_capital: Box::new(|| Decimal::MAX),
                 get_position: Box::new(|_| Decimal::ZERO),
                 get_held_positions: Box::new(move || held.clone()),
-                get_balance: Box::new(|| dec!(200)),
                 neg_risk_events: vec![],
             },
         );
@@ -6876,7 +6892,6 @@ mod tests {
                 get_available_capital: Box::new(|| Decimal::ZERO),
                 get_position: Box::new(|_| Decimal::ZERO),
                 get_held_positions: Box::new(Vec::new),
-                get_balance: Box::new(|| Decimal::ZERO),
                 neg_risk_events: vec![],
             },
         );
@@ -6902,7 +6917,6 @@ mod tests {
                 get_available_capital: Box::new(|| Decimal::ZERO),
                 get_position: Box::new(|_| Decimal::ZERO),
                 get_held_positions: Box::new(Vec::new),
-                get_balance: Box::new(|| Decimal::ZERO),
                 neg_risk_events: vec![],
             },
         );
@@ -6925,7 +6939,6 @@ mod tests {
                 get_available_capital: Box::new(|| Decimal::ZERO),
                 get_position: Box::new(|_| Decimal::ZERO),
                 get_held_positions: Box::new(Vec::new),
-                get_balance: Box::new(|| Decimal::ZERO),
                 neg_risk_events: vec![],
             },
         );
@@ -6947,17 +6960,22 @@ mod tests {
                 get_available_capital: Box::new(|| Decimal::ZERO),
                 get_position: Box::new(|_| Decimal::ZERO),
                 get_held_positions: Box::new(Vec::new),
-                get_balance: Box::new(|| Decimal::ZERO),
                 neg_risk_events: vec![],
             },
         );
 
-        assert!(WeatherAlphaStrategy::uses_conservative_city_overlay("Chicago"));
+        assert!(WeatherAlphaStrategy::uses_conservative_city_overlay(
+            "Chicago"
+        ));
         assert!(WeatherAlphaStrategy::uses_conservative_city_overlay(
             "San Francisco"
         ));
-        assert!(!WeatherAlphaStrategy::uses_conservative_city_overlay("Miami"));
-        assert!(!WeatherAlphaStrategy::uses_conservative_city_overlay("Atlanta"));
+        assert!(!WeatherAlphaStrategy::uses_conservative_city_overlay(
+            "Miami"
+        ));
+        assert!(!WeatherAlphaStrategy::uses_conservative_city_overlay(
+            "Atlanta"
+        ));
 
         assert_eq!(
             strategy.effective_min_edge_bps("Chicago"),
@@ -6987,7 +7005,6 @@ mod tests {
                 get_available_capital: Box::new(|| Decimal::ZERO),
                 get_position: Box::new(|_| Decimal::ZERO),
                 get_held_positions: Box::new(Vec::new),
-                get_balance: Box::new(|| Decimal::ZERO),
                 neg_risk_events: vec![],
             },
         );
@@ -6996,10 +7013,7 @@ mod tests {
         assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(4));
 
         assert_eq!(strategy.effective_max_entry_price("Chicago"), dec!(0.30));
-        assert_eq!(
-            strategy.effective_max_position_usdc("Chicago"),
-            dec!(3.00)
-        );
+        assert_eq!(strategy.effective_max_position_usdc("Chicago"), dec!(3.00));
 
         assert_eq!(
             strategy.effective_max_entry_price("San Francisco"),
@@ -7026,7 +7040,6 @@ mod tests {
                 get_available_capital: Box::new(|| Decimal::ZERO),
                 get_position: Box::new(|_| Decimal::ZERO),
                 get_held_positions: Box::new(Vec::new),
-                get_balance: Box::new(|| Decimal::ZERO),
                 neg_risk_events: vec![],
             },
         );
@@ -7086,7 +7099,6 @@ mod tests {
                 get_available_capital: Box::new(|| Decimal::ZERO),
                 get_position: Box::new(|_| Decimal::ZERO),
                 get_held_positions: Box::new(Vec::new),
-                get_balance: Box::new(|| Decimal::ZERO),
                 neg_risk_events: vec![],
             },
         );

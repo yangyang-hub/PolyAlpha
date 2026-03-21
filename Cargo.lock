@@ -3244,6 +3244,7 @@ dependencies = [
 name = "pa-monitor"
 version = "0.1.0"
 dependencies = [
+ "alloy",
  "anyhow",
  "arc-swap",
  "axum",
@@ -3587,6 +3588,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]

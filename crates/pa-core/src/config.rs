@@ -79,6 +79,23 @@ pub struct RiskConfig {
     pub circuit_breaker_loss: Decimal,
     pub circuit_breaker_consecutive_losses: u32,
     pub max_slippage_bps: u32,
+    /// Minimum fraction of original estimated profit that must remain after
+    /// execution freshness repricing for buy orders to stay executable.
+    #[serde(default = "default_min_profit_retention_ratio")]
+    pub min_profit_retention_ratio: Decimal,
+    /// Minimum fraction of original requested size that must remain after
+    /// buy-side freshness scaling for the opportunity to stay executable.
+    #[serde(default = "default_min_size_retention_ratio")]
+    pub min_size_retention_ratio: Decimal,
+    /// Execution-quality weight for retained profit when ranking buy opportunities.
+    #[serde(default = "default_execution_quality_profit_weight")]
+    pub execution_quality_profit_weight: Decimal,
+    /// Execution-quality weight for retained size when ranking buy opportunities.
+    #[serde(default = "default_execution_quality_size_weight")]
+    pub execution_quality_size_weight: Decimal,
+    /// Execution-quality weight for slippage quality when ranking buy opportunities.
+    #[serde(default = "default_execution_quality_slippage_weight")]
+    pub execution_quality_slippage_weight: Decimal,
     /// Minimum order size in USDC. Orders below this are skipped.
     #[serde(default = "default_min_order_usdc")]
     pub min_order_usdc: Decimal,
@@ -94,6 +111,26 @@ pub struct RiskConfig {
 }
 
 fn default_min_order_usdc() -> Decimal {
+    Decimal::ONE
+}
+
+fn default_min_profit_retention_ratio() -> Decimal {
+    Decimal::new(50, 2) // 0.50
+}
+
+fn default_min_size_retention_ratio() -> Decimal {
+    Decimal::new(50, 2) // 0.50
+}
+
+fn default_execution_quality_profit_weight() -> Decimal {
+    Decimal::ONE
+}
+
+fn default_execution_quality_size_weight() -> Decimal {
+    Decimal::ONE
+}
+
+fn default_execution_quality_slippage_weight() -> Decimal {
     Decimal::ONE
 }
 
@@ -315,12 +352,18 @@ pub struct CryptoCalibrationOverride {
     /// Asset selector: BTCUSDT / ETHUSDT / *.
     #[serde(default)]
     pub asset: String,
+    /// Asset-class selector: major / alt / any.
+    #[serde(default)]
+    pub asset_class: String,
     /// Horizon selector: short / medium / long / any.
     #[serde(default)]
     pub horizon: String,
     /// Market-type selector: binary / range / any.
     #[serde(default)]
     pub market_type: String,
+    /// Event-subtype selector: unlock / upgrade / regulatory / any.
+    #[serde(default)]
+    pub event_subtype: String,
     /// Optional probability shrink factor override.
     #[serde(default)]
     pub probability_calibration: Option<Decimal>,
@@ -330,6 +373,45 @@ pub struct CryptoCalibrationOverride {
     /// Optional entry-size multiplier override.
     #[serde(default)]
     pub size_multiplier: Option<Decimal>,
+    /// Optional entry-depth-ratio multiplier override.
+    #[serde(default)]
+    pub depth_ratio_multiplier: Option<Decimal>,
+    /// Optional min-edge multiplier override.
+    #[serde(default)]
+    pub min_edge_multiplier: Option<Decimal>,
+    /// Optional max-spread multiplier override.
+    #[serde(default)]
+    pub max_spread_multiplier: Option<Decimal>,
+    /// Optional hold-edge multiplier override for post-entry management.
+    #[serde(default)]
+    pub hold_edge_multiplier: Option<Decimal>,
+    /// Optional edge-decay exit multiplier override for post-entry management.
+    #[serde(default)]
+    pub edge_decay_exit_multiplier: Option<Decimal>,
+    /// Optional edge-decay confirmation-scan multiplier override for post-entry management.
+    #[serde(default)]
+    pub edge_decay_confirmation_scan_multiplier: Option<Decimal>,
+    /// Optional edge-decay confirmation-window multiplier override for post-entry management.
+    #[serde(default)]
+    pub edge_decay_confirmation_window_multiplier: Option<Decimal>,
+    /// Optional edge-decay cooldown multiplier override for post-entry management.
+    #[serde(default)]
+    pub edge_decay_cooldown_multiplier: Option<Decimal>,
+    /// Optional capital-efficiency threshold multiplier override for post-entry management.
+    #[serde(default)]
+    pub capital_efficiency_multiplier: Option<Decimal>,
+    /// Optional model-reversal exit-buffer multiplier override for post-entry management.
+    #[serde(default)]
+    pub model_reversal_buffer_multiplier: Option<Decimal>,
+    /// Optional buy-side minimum profit-retention multiplier override for execution freshness.
+    #[serde(default)]
+    pub profit_retention_multiplier: Option<Decimal>,
+    /// Optional buy-side slippage-budget multiplier override for execution freshness.
+    #[serde(default)]
+    pub slippage_multiplier: Option<Decimal>,
+    /// Optional buy-side minimum size-retention multiplier override for execution freshness.
+    #[serde(default)]
+    pub size_retention_multiplier: Option<Decimal>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -359,6 +441,24 @@ pub struct CryptoAlphaConfig {
     /// CoinGecko Demo API key (empty = fallback disabled).
     #[serde(default)]
     pub coingecko_api_key: String,
+    /// Minimum order-book depth multiple required at the chosen entry limit price.
+    #[serde(default = "default_crypto_min_entry_depth_ratio")]
+    pub min_entry_depth_ratio: Decimal,
+    /// Number of recent gate-scale decisions to inspect when applying adaptive pre-sizing.
+    #[serde(default = "default_crypto_gate_scale_feedback_lookback")]
+    pub gate_scale_feedback_lookback: usize,
+    /// Minimum matching gate-scale count before adaptive pre-sizing begins tightening size.
+    #[serde(default = "default_crypto_gate_scale_feedback_trigger_count")]
+    pub gate_scale_feedback_trigger_count: u32,
+    /// Per-step size multiplier applied once a gate-scale bucket repeatedly pre-scales entries.
+    #[serde(default = "default_crypto_gate_scale_feedback_step_multiplier")]
+    pub gate_scale_feedback_step_multiplier: Decimal,
+    /// Maximum number of adaptive pre-sizing steps applied from repeated gate-scale friction.
+    #[serde(default = "default_crypto_gate_scale_feedback_max_steps")]
+    pub gate_scale_feedback_max_steps: u32,
+    /// Extra Gamma public-search terms appended to the shared crypto discovery term set.
+    #[serde(default)]
+    pub discovery_search_terms: Vec<String>,
     /// Exit buffer in basis points. Sell when model_prob < best_bid - exit_buffer.
     #[serde(default = "default_exit_buffer_bps")]
     pub exit_buffer_bps: u32,
@@ -418,6 +518,12 @@ pub struct CryptoAlphaConfig {
     /// When a high-impact event matches a crypto market, multiply effective sigma by this factor.
     #[serde(default = "default_crypto_high_event_sigma_multiplier")]
     pub high_event_sigma_multiplier: Decimal,
+    /// Additional sigma multiplier for macro-category events.
+    #[serde(default = "default_crypto_macro_event_sigma_multiplier")]
+    pub macro_event_sigma_multiplier: Decimal,
+    /// Additional sigma multiplier for crypto-category events.
+    #[serde(default = "default_crypto_crypto_event_sigma_multiplier")]
+    pub crypto_event_sigma_multiplier: Decimal,
     /// When a low-impact event matches a crypto market, multiply entry sizing by this factor.
     #[serde(default = "default_crypto_low_event_size_multiplier")]
     pub low_event_size_multiplier: Decimal,
@@ -427,6 +533,12 @@ pub struct CryptoAlphaConfig {
     /// When a high-impact event matches a crypto market, multiply entry sizing by this factor.
     #[serde(default = "default_crypto_high_event_size_multiplier")]
     pub high_event_size_multiplier: Decimal,
+    /// Additional size multiplier for macro-category events.
+    #[serde(default = "default_crypto_macro_event_size_multiplier")]
+    pub macro_event_size_multiplier: Decimal,
+    /// Additional size multiplier for crypto-category events.
+    #[serde(default = "default_crypto_crypto_event_size_multiplier")]
+    pub crypto_event_size_multiplier: Decimal,
     /// Probability shrink factor for BTC markets before horizon calibration.
     #[serde(default = "default_crypto_btc_probability_calibration")]
     pub btc_probability_calibration: Decimal,
@@ -442,6 +554,22 @@ pub struct CryptoAlphaConfig {
     /// Probability shrink factor for range/NegRisk crypto markets after asset/horizon calibration.
     #[serde(default = "default_crypto_range_probability_calibration")]
     pub range_probability_calibration: Decimal,
+    /// Blend factor for runtime probability overrides vs the default baseline factor.
+    /// `0` keeps the baseline, `1` applies the override fully.
+    #[serde(default = "default_crypto_override_probability_blend")]
+    pub override_probability_blend: Decimal,
+    /// Maximum absolute deviation allowed between the runtime probability factor and the
+    /// default baseline factor, expressed in basis points of the calibration factor scale.
+    #[serde(default = "default_crypto_override_probability_max_delta_bps")]
+    pub override_probability_max_delta_bps: u32,
+    /// Blend factor for runtime multiplier overrides vs the neutral baseline multiplier of `1.0`.
+    /// `0` keeps the baseline, `1` applies the override fully.
+    #[serde(default = "default_crypto_override_multiplier_blend")]
+    pub override_multiplier_blend: Decimal,
+    /// Maximum absolute deviation allowed between a runtime multiplier override and the neutral
+    /// baseline multiplier of `1.0`, expressed in basis points of the multiplier scale.
+    #[serde(default = "default_crypto_override_multiplier_max_delta_bps")]
+    pub override_multiplier_max_delta_bps: u32,
     /// Optional table-driven calibration overrides keyed by asset+horizon+market_type.
     #[serde(default)]
     pub calibration_overrides: Vec<CryptoCalibrationOverride>,
@@ -594,6 +722,21 @@ fn default_crypto_history_refresh() -> u64 {
 fn default_crypto_iv_refresh() -> u64 {
     300
 }
+fn default_crypto_min_entry_depth_ratio() -> Decimal {
+    Decimal::new(125, 2)
+} // 1.25
+fn default_crypto_gate_scale_feedback_lookback() -> usize {
+    24
+}
+fn default_crypto_gate_scale_feedback_trigger_count() -> u32 {
+    3
+}
+fn default_crypto_gate_scale_feedback_step_multiplier() -> Decimal {
+    Decimal::new(90, 2)
+} // 0.90
+fn default_crypto_gate_scale_feedback_max_steps() -> u32 {
+    2
+}
 fn default_crypto_relative_stop_loss_ratio() -> Decimal {
     Decimal::new(80, 2)
 } // 0.80
@@ -630,6 +773,12 @@ fn default_crypto_medium_event_sigma_multiplier() -> Decimal {
 fn default_crypto_high_event_sigma_multiplier() -> Decimal {
     Decimal::new(130, 2)
 } // 1.30
+fn default_crypto_macro_event_sigma_multiplier() -> Decimal {
+    Decimal::new(110, 2)
+} // 1.10
+fn default_crypto_crypto_event_sigma_multiplier() -> Decimal {
+    Decimal::new(120, 2)
+} // 1.20
 fn default_crypto_low_event_size_multiplier() -> Decimal {
     Decimal::new(90, 2)
 } // 0.90
@@ -639,6 +788,12 @@ fn default_crypto_medium_event_size_multiplier() -> Decimal {
 fn default_crypto_high_event_size_multiplier() -> Decimal {
     Decimal::new(50, 2)
 } // 0.50
+fn default_crypto_macro_event_size_multiplier() -> Decimal {
+    Decimal::new(85, 2)
+} // 0.85
+fn default_crypto_crypto_event_size_multiplier() -> Decimal {
+    Decimal::new(75, 2)
+} // 0.75
 fn default_crypto_btc_probability_calibration() -> Decimal {
     Decimal::new(95, 2)
 } // 0.95
@@ -654,6 +809,18 @@ fn default_crypto_binary_probability_calibration() -> Decimal {
 fn default_crypto_range_probability_calibration() -> Decimal {
     Decimal::new(90, 2)
 } // 0.90
+fn default_crypto_override_probability_blend() -> Decimal {
+    Decimal::new(50, 2)
+} // 0.50
+fn default_crypto_override_probability_max_delta_bps() -> u32 {
+    1000
+}
+fn default_crypto_override_multiplier_blend() -> Decimal {
+    Decimal::ONE
+}
+fn default_crypto_override_multiplier_max_delta_bps() -> u32 {
+    2500
+}
 fn default_crypto_short_horizon_max_days() -> u32 {
     1
 }
@@ -786,6 +953,13 @@ impl Default for CryptoAlphaConfig {
             history_refresh_interval_secs: default_crypto_history_refresh(),
             iv_refresh_interval_secs: default_crypto_iv_refresh(),
             coingecko_api_key: String::new(),
+            min_entry_depth_ratio: default_crypto_min_entry_depth_ratio(),
+            gate_scale_feedback_lookback: default_crypto_gate_scale_feedback_lookback(),
+            gate_scale_feedback_trigger_count: default_crypto_gate_scale_feedback_trigger_count(),
+            gate_scale_feedback_step_multiplier: default_crypto_gate_scale_feedback_step_multiplier(
+            ),
+            gate_scale_feedback_max_steps: default_crypto_gate_scale_feedback_max_steps(),
+            discovery_search_terms: Vec::new(),
             exit_buffer_bps: default_exit_buffer_bps(),
             capital_efficiency_threshold: default_capital_efficiency_threshold(),
             drift_decay: default_drift_decay(),
@@ -803,14 +977,22 @@ impl Default for CryptoAlphaConfig {
             low_event_sigma_multiplier: default_crypto_low_event_sigma_multiplier(),
             medium_event_sigma_multiplier: default_crypto_medium_event_sigma_multiplier(),
             high_event_sigma_multiplier: default_crypto_high_event_sigma_multiplier(),
+            macro_event_sigma_multiplier: default_crypto_macro_event_sigma_multiplier(),
+            crypto_event_sigma_multiplier: default_crypto_crypto_event_sigma_multiplier(),
             low_event_size_multiplier: default_crypto_low_event_size_multiplier(),
             medium_event_size_multiplier: default_crypto_medium_event_size_multiplier(),
             high_event_size_multiplier: default_crypto_high_event_size_multiplier(),
+            macro_event_size_multiplier: default_crypto_macro_event_size_multiplier(),
+            crypto_event_size_multiplier: default_crypto_crypto_event_size_multiplier(),
             btc_probability_calibration: default_crypto_btc_probability_calibration(),
             eth_probability_calibration: default_crypto_eth_probability_calibration(),
             alt_probability_calibration: default_crypto_alt_probability_calibration(),
             binary_probability_calibration: default_crypto_binary_probability_calibration(),
             range_probability_calibration: default_crypto_range_probability_calibration(),
+            override_probability_blend: default_crypto_override_probability_blend(),
+            override_probability_max_delta_bps: default_crypto_override_probability_max_delta_bps(),
+            override_multiplier_blend: default_crypto_override_multiplier_blend(),
+            override_multiplier_max_delta_bps: default_crypto_override_multiplier_max_delta_bps(),
             calibration_overrides: Vec::new(),
             short_horizon_max_days: default_crypto_short_horizon_max_days(),
             medium_horizon_max_days: default_crypto_medium_horizon_max_days(),
@@ -1364,6 +1546,21 @@ impl Settings {
         {
             self.database.url = url;
         }
+        if let Ok(key) = std::env::var("PA_WEATHER__KMA_API_KEY")
+            && !key.trim().is_empty()
+        {
+            self.weather.kma_api_key = key;
+        }
+        if let Ok(key) = std::env::var("PA_WEATHER__MET_OFFICE_API_KEY")
+            && !key.trim().is_empty()
+        {
+            self.weather.met_office_api_key = key;
+        }
+        if let Ok(key) = std::env::var("PA_WEATHER__MET_OFFICE_OBS_API_KEY")
+            && !key.trim().is_empty()
+        {
+            self.weather.met_office_obs_api_key = key;
+        }
     }
 
     /// Merge strategies referenced by configured accounts into the global enabled list.
@@ -1508,6 +1705,101 @@ fn merge_json_value(base: &mut Value, overlay: Value) {
         }
         (base_slot, overlay_value) => {
             *base_slot = overlay_value;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_mutex() -> &'static Mutex<()> {
+        static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_MUTEX.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn test_weather_api_key_env_backfills() {
+        let _guard = env_mutex().lock().unwrap();
+
+        unsafe {
+            std::env::set_var("PA_WEATHER__KMA_API_KEY", "kma-test-key");
+            std::env::set_var("PA_WEATHER__MET_OFFICE_API_KEY", "met-forecast-test-key");
+            std::env::set_var("PA_WEATHER__MET_OFFICE_OBS_API_KEY", "met-obs-test-key");
+        }
+
+        let mut settings = Settings {
+            chain: ChainConfig {
+                chain_id: 137,
+                rpc_url: "https://polygon-rpc.com".to_string(),
+                rpc_fallbacks: Vec::new(),
+            },
+            clob: ClobConfig {
+                host: "https://clob.polymarket.com".to_string(),
+                ws_host: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_string(),
+                signature_type: 2,
+                proxy_wallet: String::new(),
+            },
+            gamma: GammaConfig {
+                host: "https://gamma-api.polymarket.com".to_string(),
+            },
+            strategy: StrategyConfig {
+                enabled: vec!["weather".to_string()],
+                scan_interval_ms: 100,
+                min_spread_bps: 100,
+                min_profit_usdc: Decimal::new(20, 2),
+                max_trade_size_usdc: Decimal::ONE,
+                order_type: "limit".to_string(),
+                max_market_end_days: None,
+            },
+            risk: RiskConfig {
+                max_position_per_market: Decimal::ONE,
+                max_total_exposure: Decimal::ONE,
+                max_daily_loss: Decimal::ONE,
+                circuit_breaker_loss: Decimal::ONE,
+                circuit_breaker_consecutive_losses: 3,
+                max_slippage_bps: 100,
+                min_profit_retention_ratio: default_min_profit_retention_ratio(),
+                min_size_retention_ratio: default_min_size_retention_ratio(),
+                execution_quality_profit_weight: default_execution_quality_profit_weight(),
+                execution_quality_size_weight: default_execution_quality_size_weight(),
+                execution_quality_slippage_weight: default_execution_quality_slippage_weight(),
+                min_order_usdc: default_min_order_usdc(),
+                min_profit_usdc: default_min_profit_usdc(),
+                max_exposure_per_strategy: default_max_exposure_per_strategy(),
+                max_markets_per_strategy: default_max_markets_per_strategy(),
+            },
+            database: DatabaseConfig::default(),
+            monitor: MonitorConfig {
+                prometheus_port: 9090,
+                health_port: 18381,
+                alert_webhook: String::new(),
+            },
+            market_filter: MarketFilterConfig {
+                min_liquidity: Decimal::ZERO,
+                min_volume_24h: Decimal::ZERO,
+                max_markets: 100,
+                ws_max_instruments: 350,
+                market_refresh_interval_secs: default_market_refresh_interval(),
+            },
+            weather: WeatherConfig::default(),
+            crypto_alpha: CryptoAlphaConfig::default(),
+            event_calendar: EventCalendarConfig::default(),
+            liquidity_rewards: LiquidityRewardsConfig::default(),
+            smart_money: SmartMoneyConfig::default(),
+            accounts: Vec::new(),
+        };
+        settings.apply_direct_env_backfills();
+
+        assert_eq!(settings.weather.kma_api_key, "kma-test-key");
+        assert_eq!(settings.weather.met_office_api_key, "met-forecast-test-key");
+        assert_eq!(settings.weather.met_office_obs_api_key, "met-obs-test-key");
+
+        unsafe {
+            std::env::remove_var("PA_WEATHER__KMA_API_KEY");
+            std::env::remove_var("PA_WEATHER__MET_OFFICE_API_KEY");
+            std::env::remove_var("PA_WEATHER__MET_OFFICE_OBS_API_KEY");
         }
     }
 }

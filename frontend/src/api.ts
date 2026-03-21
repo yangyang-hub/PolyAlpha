@@ -23,6 +23,76 @@ export interface StatusResponse {
   trading_ready: boolean;
   wallet_balance: string;
   positions_snapshot_updated_at: string | null;
+  crypto_gate_reject_summary?: {
+    recent_count: number;
+    top_reason: { label: string; count: number } | null;
+    top_asset: { label: string; count: number } | null;
+    top_subtype: { label: string; count: number } | null;
+    reason_counts: { label: string; count: number }[];
+    asset_counts: { label: string; count: number }[];
+    subtype_counts: { label: string; count: number }[];
+    reason_windows: {
+      recent_8: { label: string; count: number }[];
+      recent_24: { label: string; count: number }[];
+    };
+    asset_windows: {
+      recent_8: { label: string; count: number }[];
+      recent_24: { label: string; count: number }[];
+    };
+    subtype_windows: {
+      recent_8: { label: string; count: number }[];
+      recent_24: { label: string; count: number }[];
+    };
+    reason_details: {
+      label: string;
+      count: number;
+      top_asset: { label: string; count: number } | null;
+      top_subtype: { label: string; count: number } | null;
+    }[];
+  };
+  crypto_gate_scale_summary?: {
+    recent_count: number;
+    top_reason: { label: string; count: number } | null;
+    top_asset: { label: string; count: number } | null;
+    top_subtype: { label: string; count: number } | null;
+    reason_counts: { label: string; count: number }[];
+    asset_counts: { label: string; count: number }[];
+    subtype_counts: { label: string; count: number }[];
+    reason_windows: {
+      recent_8: { label: string; count: number }[];
+      recent_24: { label: string; count: number }[];
+    };
+    asset_windows: {
+      recent_8: { label: string; count: number }[];
+      recent_24: { label: string; count: number }[];
+    };
+    subtype_windows: {
+      recent_8: { label: string; count: number }[];
+      recent_24: { label: string; count: number }[];
+    };
+    reason_details: {
+      label: string;
+      count: number;
+      top_asset: { label: string; count: number } | null;
+      top_subtype: { label: string; count: number } | null;
+    }[];
+  };
+  crypto_entry_tuning_hints?: {
+    kind: string;
+    priority: string;
+    title: string;
+    detail: string;
+  }[];
+  crypto_override_suggestions?: {
+    priority: string;
+    target_field: string;
+    direction: string;
+    selector_asset_class: string;
+    selector_event_subtype: string;
+    scope_label: string;
+    source_reason: string;
+    rationale: string;
+  }[];
   accounts: AccountStatusEntry[];
 }
 
@@ -99,6 +169,48 @@ export interface CryptoAlphaConfigSection {
   max_exposure_per_asset_direction_pct: number;
 }
 
+export interface CryptoCandidateDecisionEntry {
+  recorded_at: string;
+  asset: string;
+  direction: string;
+  action: string;
+  reason: string;
+  event_context_source: string | null;
+  event_title: string | null;
+  event_category: string | null;
+  event_subtype: string | null;
+  selected_question: string;
+  replaced_question: string | null;
+  selected_estimated_profit: string;
+  replaced_estimated_profit: string | null;
+  selected_efficiency: string;
+  replaced_efficiency: string | null;
+  selected_executable_profit_retention: string;
+  replaced_executable_profit_retention: string | null;
+  selected_executable_size_retention: string;
+  replaced_executable_size_retention: string | null;
+  selected_executable_quality_score: string;
+  replaced_executable_quality_score: string | null;
+  selected_executable_efficiency: string;
+  replaced_executable_efficiency: string | null;
+  selected_depth_buffer: string;
+  replaced_depth_buffer: string | null;
+}
+
+export interface CryptoExitDecisionEntry {
+  recorded_at: string;
+  asset: string | null;
+  reason: string;
+  event_context_source: string | null;
+  event_title: string | null;
+  event_category: string | null;
+  event_subtype: string | null;
+  question: string;
+  best_bid: string;
+  avg_cost: string;
+  size: string;
+}
+
 // --- API functions ---
 
 async function get<T>(path: string): Promise<T> {
@@ -141,6 +253,14 @@ export function fetchLRStatus(): Promise<LrRuntimeStatus> {
 export function fetchPositions(strategy?: string): Promise<PositionEntry[]> {
   const q = strategy ? `?strategy=${encodeURIComponent(strategy)}` : "";
   return get(`/api/positions${q}`);
+}
+
+export function fetchCryptoCandidateDecisions(): Promise<CryptoCandidateDecisionEntry[]> {
+  return get("/api/crypto/decisions");
+}
+
+export function fetchCryptoExitDecisions(): Promise<CryptoExitDecisionEntry[]> {
+  return get("/api/crypto/exits");
 }
 
 export async function fetchMetrics(): Promise<string> {

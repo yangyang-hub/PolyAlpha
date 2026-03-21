@@ -1,0 +1,1227 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Crypto Calibration Pipeline Report</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6f4ed;
+        --panel: #fffdf7;
+        --panel-alt: #efe7d3;
+        --text: #1f1a12;
+        --muted: #6f6557;
+        --line: #d7ccb8;
+        --good: #1c6b3c;
+        --warn: #a26100;
+        --bad: #9e2a1f;
+        --shadow: 0 16px 40px rgba(31, 26, 18, 0.08);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua",
+          Palatino, Georgia, serif;
+        background:
+          radial-gradient(circle at top left, rgba(243, 216, 180, 0.6), transparent 28%),
+          linear-gradient(180deg, #f2eee3 0%, var(--bg) 100%);
+        color: var(--text);
+      }
+
+      main {
+        width: min(1120px, calc(100vw - 32px));
+        margin: 32px auto 48px;
+      }
+
+      .hero,
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        box-shadow: var(--shadow);
+      }
+
+      .hero {
+        padding: 28px;
+        margin-bottom: 20px;
+      }
+
+      h1,
+      h2 {
+        margin: 0;
+        font-weight: 600;
+        line-height: 1.1;
+      }
+
+      h1 {
+        font-size: clamp(32px, 4vw, 52px);
+        letter-spacing: -0.03em;
+      }
+
+      h2 {
+        font-size: 22px;
+        margin-bottom: 14px;
+      }
+
+      p {
+        margin: 0;
+        line-height: 1.6;
+      }
+
+      .hero p {
+        max-width: 760px;
+        margin-top: 12px;
+        color: var(--muted);
+      }
+
+      .hero code,
+      .table-wrap code {
+        background: #f7efdf;
+        padding: 2px 6px;
+        border-radius: 8px;
+        font-size: 0.92em;
+      }
+
+      .grid {
+        display: grid;
+        gap: 20px;
+      }
+
+      .upload-grid,
+      .summary-grid,
+      .breakdown-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+
+      .panel {
+        padding: 20px;
+      }
+
+      .upload-card {
+        display: grid;
+        gap: 12px;
+      }
+
+      .upload-card label {
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .upload-card input[type="file"] {
+        width: 100%;
+        border: 1px dashed var(--line);
+        border-radius: 14px;
+        padding: 14px;
+        background: #fcf9f1;
+      }
+
+      .file-state {
+        min-height: 22px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        font-size: 13px;
+        background: var(--panel-alt);
+        color: var(--text);
+      }
+
+      .status-pill.good {
+        background: rgba(28, 107, 60, 0.12);
+        color: var(--good);
+      }
+
+      .status-pill.warn {
+        background: rgba(162, 97, 0, 0.12);
+        color: var(--warn);
+      }
+
+      .headline {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 16px;
+      }
+
+      .summary-card {
+        display: grid;
+        gap: 8px;
+      }
+
+      .summary-label {
+        color: var(--muted);
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .summary-value {
+        font-size: clamp(28px, 3vw, 40px);
+        line-height: 1;
+      }
+
+      .summary-note {
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .section-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 12px 10px;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+      }
+
+      th {
+        color: var(--muted);
+        font-weight: 600;
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+
+      .breakdown-card {
+        display: grid;
+        gap: 12px;
+      }
+
+      .empty {
+        padding: 18px;
+        border: 1px dashed var(--line);
+        border-radius: 14px;
+        color: var(--muted);
+        background: #fcf9f1;
+      }
+
+      .footnote {
+        margin-top: 20px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .hero-note {
+        margin-top: 12px;
+        display: inline-flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      .trigger-note {
+        margin-top: 8px;
+        font-size: 13px;
+        color: var(--muted);
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .trigger-label {
+        font-size: 12px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .action-chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        line-height: 1;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        background: var(--panel-alt);
+        color: var(--text);
+      }
+
+      .action-chip.good {
+        background: rgba(28, 107, 60, 0.12);
+        color: var(--good);
+      }
+
+      .action-chip.warn {
+        background: rgba(162, 97, 0, 0.12);
+        color: var(--warn);
+      }
+
+      .action-chip.soft-warn {
+        background: rgba(162, 97, 0, 0.08);
+        color: #8b6a2f;
+      }
+
+      .hero-note.good {
+        color: var(--good);
+      }
+
+      .hero-note.warn {
+        color: var(--warn);
+      }
+
+      @media (max-width: 900px) {
+        .upload-grid,
+        .summary-grid,
+        .breakdown-grid {
+          grid-template-columns: 1fr;
+        }
+
+        main {
+          width: min(100vw - 20px, 1120px);
+          margin-top: 20px;
+        }
+
+        .hero,
+        .panel {
+          border-radius: 18px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <h1 id="report-title">Crypto Calibration Pipeline Report</h1>
+        <p id="report-subtitle">
+          Load the JSON summaries emitted by
+          <code>crypto_seed_labels</code>,
+          <code>crypto_autolabel_resolved</code>, and
+          <code>crypto_prepare_calibration</code>, and
+          <code>crypto_calibrate</code>. Everything renders locally in the
+          browser; no server is required.
+        </p>
+        <div class="headline">
+          <span class="status-pill" id="overall-status">Waiting for summary files</span>
+          <span class="status-pill">Expected inputs: <code>seed</code>, <code>autolabel</code>, <code>prepare</code>, <code>calibrate</code></span>
+          <span class="status-pill" id="generated-at-pill">Generated at: -</span>
+        </div>
+        <p class="hero-note" id="hero-explainer">
+          <span class="action-chip" id="hero-explainer-badge">0 top-up-now</span>
+          <span id="hero-explainer-text">Load summaries to compute near-threshold urgency.</span>
+        </p>
+        <p class="trigger-note" id="hero-trigger-note" hidden></p>
+        <div class="headline" id="tags-row" hidden></div>
+      </section>
+
+      <section class="grid upload-grid">
+        <div class="panel upload-card">
+          <label for="combined-input">Combined Pipeline Report JSON</label>
+          <input id="combined-input" type="file" accept=".json,application/json" />
+          <div class="file-state" id="combined-state">Optional; overrides the three files below.</div>
+        </div>
+        <div class="panel upload-card">
+          <label for="seed-input">Seed Summary JSON</label>
+          <input id="seed-input" type="file" accept=".json,application/json" />
+          <div class="file-state" id="seed-state">Not loaded</div>
+        </div>
+        <div class="panel upload-card">
+          <label for="autolabel-input">Autolabel Summary JSON</label>
+          <input id="autolabel-input" type="file" accept=".json,application/json" />
+          <div class="file-state" id="autolabel-state">Not loaded</div>
+        </div>
+        <div class="panel upload-card">
+          <label for="prepare-input">Prepare Summary JSON</label>
+          <input id="prepare-input" type="file" accept=".json,application/json" />
+          <div class="file-state" id="prepare-state">Not loaded</div>
+        </div>
+        <div class="panel upload-card">
+          <label for="calibrate-input">Calibrate Summary JSON</label>
+          <input id="calibrate-input" type="file" accept=".json,application/json" />
+          <div class="file-state" id="calibrate-state">Not loaded</div>
+        </div>
+      </section>
+
+      <section class="grid summary-grid" style="margin-top: 20px">
+        <div class="panel summary-card">
+          <div class="summary-label">Seeded Questions</div>
+          <div class="summary-value" id="seeded-questions">-</div>
+          <div class="summary-note" id="seeded-note">Load seed summary to see de-duplicated question count.</div>
+        </div>
+        <div class="panel summary-card">
+          <div class="summary-label">Autolabel Fill Rate</div>
+          <div class="summary-value" id="autolabel-fill-rate">-</div>
+          <div class="summary-note" id="autolabel-note">Load autolabel summary to see fill / unresolved split.</div>
+        </div>
+        <div class="panel summary-card">
+          <div class="summary-label">Prepare Yield</div>
+          <div class="summary-value" id="prepare-yield">-</div>
+          <div class="summary-note" id="prepare-note">Load prepare summary to see emitted sample coverage.</div>
+        </div>
+        <div class="panel summary-card">
+          <div class="summary-label">Calibrate Coverage</div>
+          <div class="summary-value" id="calibrate-coverage">-</div>
+          <div class="summary-note" id="calibrate-note">Load calibrate summary to see emitted vs skipped segment counts.</div>
+        </div>
+      </section>
+
+      <section class="panel" style="margin-top: 20px">
+        <div class="section-head">
+          <h2>Near-Threshold Buckets</h2>
+          <span class="status-pill" id="near-threshold-status">Waiting</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Bucket</th>
+                <th>Gap</th>
+                <th>Rows</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="near-threshold-body">
+              <tr>
+                <td colspan="4">Load <code>crypto_calibrate_summary.json</code>.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel" style="margin-top: 20px" id="notes-panel" hidden>
+        <div class="section-head">
+          <h2>Notes</h2>
+          <span class="status-pill">Batch Context</span>
+        </div>
+        <div class="empty" id="report-notes"></div>
+      </section>
+
+      <section class="panel" style="margin-top: 20px">
+        <div class="section-head">
+          <h2>Headline Ratios</h2>
+          <span class="status-pill" id="headline-status">Partial data</span>
+        </div>
+        <p class="footnote" id="headline-explainer">Load summaries to compute near-threshold urgency.</p>
+        <p class="trigger-note" id="headline-trigger-note" hidden></p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th>Value</th>
+                <th>How It Is Computed</th>
+              </tr>
+            </thead>
+            <tbody id="headline-body">
+              <tr>
+                <td>Emitted vs Seed</td>
+                <td>-</td>
+                <td><code>prepare.emitted_samples / seed.question_count</code></td>
+              </tr>
+              <tr>
+                <td>Matched vs Seed</td>
+                <td>-</td>
+                <td><code>prepare.matched_labels / seed.question_count</code></td>
+              </tr>
+              <tr>
+                <td>Filled vs Seed</td>
+                <td>-</td>
+                <td><code>(autolabel.filled + autolabel.already_labeled) / seed.question_count</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="grid breakdown-grid" style="margin-top: 20px">
+        <div class="panel breakdown-card">
+          <div class="section-head">
+            <h2>Seed Breakdown</h2>
+            <span class="status-pill" id="seed-breakdown-status">Waiting</span>
+          </div>
+          <div class="table-wrap" id="seed-breakdown"></div>
+        </div>
+        <div class="panel breakdown-card">
+          <div class="section-head">
+            <h2>Autolabel Breakdown</h2>
+            <span class="status-pill" id="autolabel-breakdown-status">Waiting</span>
+          </div>
+          <div class="table-wrap" id="autolabel-breakdown"></div>
+        </div>
+        <div class="panel breakdown-card">
+          <div class="section-head">
+            <h2>Prepare Breakdown</h2>
+            <span class="status-pill" id="prepare-breakdown-status">Waiting</span>
+          </div>
+          <div class="table-wrap" id="prepare-breakdown"></div>
+        </div>
+        <div class="panel breakdown-card">
+          <div class="section-head">
+            <h2>Calibrate Breakdown</h2>
+            <span class="status-pill" id="calibrate-breakdown-status">Waiting</span>
+          </div>
+          <div class="table-wrap" id="calibrate-breakdown"></div>
+        </div>
+      </section>
+
+      <p class="footnote">
+        Tip: generate the inputs with
+        <code>crypto_pipeline_report --json-output</code> or with
+        <code>crypto_seed_labels --summary-output</code>,
+        <code>crypto_autolabel_resolved --summary-output</code>, and
+        <code>crypto_prepare_calibration --summary-output</code>,
+        <code>crypto_calibrate --summary-output</code>.
+      </p>
+    </main>
+
+    <script id="pipeline-report-data" type="application/json"></script>
+    <script>
+      const state = { metadata: null, seed: null, autolabel: null, prepare: null, calibrate: null, uiPrioritySummary: null };
+
+      const combinedInput = document.getElementById("combined-input");
+      combinedInput.addEventListener("change", async (event) => {
+        const file = event.target.files && event.target.files[0];
+        if (!file) return;
+        try {
+          const parsed = JSON.parse(await file.text());
+          state.metadata = parsed.metadata || null;
+          state.seed = parsed.seed || null;
+          state.autolabel = parsed.autolabel || null;
+          state.prepare = parsed.prepare || null;
+          state.calibrate = parsed.calibrate || null;
+          state.uiPrioritySummary = parsed.ui_priority_summary || null;
+          document.getElementById("combined-state").textContent = "Loaded " + file.name;
+          document.getElementById("seed-state").textContent = parsed.seed ? "Loaded from combined JSON" : "Not present in combined JSON";
+          document.getElementById("autolabel-state").textContent = parsed.autolabel ? "Loaded from combined JSON" : "Not present in combined JSON";
+          document.getElementById("prepare-state").textContent = parsed.prepare ? "Loaded from combined JSON" : "Not present in combined JSON";
+          document.getElementById("calibrate-state").textContent = parsed.calibrate ? "Loaded from combined JSON" : "Not present in combined JSON";
+        } catch (error) {
+          document.getElementById("combined-state").textContent =
+            "Failed to parse JSON: " + (error && error.message ? error.message : String(error));
+        }
+        render();
+      });
+
+      const inputConfigs = [
+        { key: "seed", inputId: "seed-input", stateId: "seed-state" },
+        { key: "autolabel", inputId: "autolabel-input", stateId: "autolabel-state" },
+        { key: "prepare", inputId: "prepare-input", stateId: "prepare-state" },
+        { key: "calibrate", inputId: "calibrate-input", stateId: "calibrate-state" },
+      ];
+
+      for (const config of inputConfigs) {
+        const input = document.getElementById(config.inputId);
+        input.addEventListener("change", async (event) => {
+          const file = event.target.files && event.target.files[0];
+          if (!file) return;
+          try {
+            state[config.key] = JSON.parse(await file.text());
+            document.getElementById(config.stateId).textContent = "Loaded " + file.name;
+          } catch (error) {
+            state[config.key] = null;
+            document.getElementById(config.stateId).textContent =
+              "Failed to parse JSON: " + (error && error.message ? error.message : String(error));
+          }
+          render();
+        });
+      }
+
+      function formatNumber(value) {
+        return typeof value === "number" && Number.isFinite(value)
+          ? new Intl.NumberFormat("en-US").format(value)
+          : "-";
+      }
+
+      function formatPercent(numerator, denominator) {
+        if (
+          typeof numerator !== "number" ||
+          typeof denominator !== "number" ||
+          !Number.isFinite(numerator) ||
+          !Number.isFinite(denominator) ||
+          denominator <= 0
+        ) {
+          return "-";
+        }
+        return (numerator / denominator * 100).toFixed(1) + "%";
+      }
+
+      function escapeHtml(text) {
+        return text
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function setStatus(id, text, level) {
+        const el = document.getElementById(id);
+        el.textContent = text;
+        el.className = "status-pill" + (level ? " " + level : "");
+      }
+
+      function setStatusTitle(id, title) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        if (title) {
+          el.title = title;
+        } else {
+          el.removeAttribute("title");
+        }
+      }
+
+      function setTriggerNote(id, labels) {
+        const el = document.getElementById(id);
+        if (!el) return;
+        if (labels && labels.length) {
+          const visible = labels.slice(0, 3);
+          const more = labels.length - visible.length;
+          el.innerHTML =
+            '<span class="trigger-label">Triggered by</span>' +
+            visible
+              .map((label) => '<span class="action-chip">' + escapeHtml(label) + "</span>")
+              .join("") +
+            (more > 0
+              ? '<span class="action-chip">+' + escapeHtml(String(more)) + " more</span>"
+              : "");
+          el.hidden = false;
+        } else {
+          el.innerHTML = "";
+          el.hidden = true;
+        }
+      }
+
+      function sortEntries(objectValue) {
+        if (!objectValue || typeof objectValue !== "object") return [];
+        return Object.entries(objectValue).sort((a, b) => {
+          if ((b[1] || 0) !== (a[1] || 0)) return (b[1] || 0) - (a[1] || 0);
+          return String(a[0]).localeCompare(String(b[0]));
+        });
+      }
+
+      function renderKeyValueTable(entries, keyLabel, valueLabel) {
+        if (!entries.length) {
+          return '<div class="empty">No rows available.</div>';
+        }
+        return (
+          "<table><thead><tr><th>" +
+          escapeHtml(keyLabel) +
+          "</th><th>" +
+          escapeHtml(valueLabel) +
+          "</th></tr></thead><tbody>" +
+          entries
+            .map(
+              ([key, value]) =>
+                "<tr><td>" + escapeHtml(String(key)) + "</td><td>" + escapeHtml(formatNumber(value)) + "</td></tr>"
+            )
+            .join("") +
+          "</tbody></table>"
+        );
+      }
+
+      function renderKeyHtmlValueTable(entries, keyLabel, valueLabel) {
+        if (!entries.length) {
+          return '<div class="empty">No rows available.</div>';
+        }
+        return (
+          "<table><thead><tr><th>" +
+          escapeHtml(keyLabel) +
+          "</th><th>" +
+          escapeHtml(valueLabel) +
+          "</th></tr></thead><tbody>" +
+          entries
+            .map(
+              ([keyHtml, value]) =>
+                "<tr><td>" + keyHtml + "</td><td>" + escapeHtml(formatNumber(value)) + "</td></tr>"
+            )
+            .join("") +
+          "</tbody></table>"
+        );
+      }
+
+      function renderKeyValueHtmlTable(entries, keyLabel, valueLabel) {
+        if (!entries.length) {
+          return '<div class="empty">No rows available.</div>';
+        }
+        return (
+          "<table><thead><tr><th>" +
+          escapeHtml(keyLabel) +
+          "</th><th>" +
+          escapeHtml(valueLabel) +
+          "</th></tr></thead><tbody>" +
+          entries
+            .map(
+              ([key, valueHtml]) =>
+                "<tr><td>" + escapeHtml(String(key)) + "</td><td>" + valueHtml + "</td></tr>"
+            )
+            .join("") +
+          "</tbody></table>"
+        );
+      }
+
+      function calibrateReasonChipHtml(reason) {
+        const label = String(reason || "unknown");
+        const level = label === "insufficient_samples" ? "warn" : "";
+        return "<span class=\"action-chip " + level + "\">" + escapeHtml(label) + "</span>";
+      }
+
+      function thresholdBandChipHtml(band) {
+        const label = String(band || "unknown");
+        const level = label === "near-threshold" ? "soft-warn" : "good";
+        return "<span class=\"action-chip " + level + "\">" + escapeHtml(label) + "</span>";
+      }
+
+      function gapChipHtml(gap) {
+        const value = Number(gap || 0);
+        const level = value <= 1 ? "warn" : value <= 3 ? "soft-warn" : "";
+        return "<span class=\"action-chip " + level + "\">gap " + escapeHtml(String(value)) + "</span>";
+      }
+
+      function renderDualTables(leftHtml, rightHtml) {
+        return (
+          '<div class="grid" style="grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;">' +
+          "<div>" +
+          leftHtml +
+          "</div><div>" +
+          rightHtml +
+          "</div></div>"
+        );
+      }
+
+      function renderSummaryCards() {
+        const seed = state.seed;
+        const autolabel = state.autolabel;
+        const prepare = state.prepare;
+        const calibrate = state.calibrate;
+
+        document.getElementById("seeded-questions").textContent = seed ? formatNumber(seed.question_count) : "-";
+        document.getElementById("seeded-note").textContent = seed
+          ? "replace_only = " + String(Boolean(seed.replace_only))
+          : "Load seed summary to see de-duplicated question count.";
+
+        const autolabelTotal =
+          autolabel &&
+          ["already_labeled", "filled", "open_market", "missing_winner", "request_error"]
+            .map((key) => autolabel[key] || 0)
+            .reduce((sum, value) => sum + value, 0);
+
+        document.getElementById("autolabel-fill-rate").textContent =
+          autolabel && autolabelTotal
+            ? formatPercent((autolabel.filled || 0) + (autolabel.already_labeled || 0), autolabelTotal)
+            : "-";
+        document.getElementById("autolabel-note").textContent = autolabel
+          ? "filled=" +
+            formatNumber(autolabel.filled || 0) +
+            ", unresolved=" +
+            formatNumber((autolabel.open_market || 0) + (autolabel.missing_winner || 0) + (autolabel.request_error || 0))
+          : "Load autolabel summary to see fill / unresolved split.";
+
+        document.getElementById("prepare-yield").textContent =
+          seed && prepare ? formatPercent(prepare.emitted_samples || 0, seed.question_count || 0) : "-";
+        document.getElementById("prepare-note").textContent = prepare
+          ? "matched=" + formatNumber(prepare.matched_labels || 0) + ", emitted=" + formatNumber(prepare.emitted_samples || 0)
+          : "Load prepare summary to see emitted sample coverage.";
+
+        document.getElementById("calibrate-coverage").textContent =
+          calibrate
+            ? formatPercent(calibrate.emitted_segment_count || 0, (calibrate.emitted_segment_count || 0) + (calibrate.skipped_segment_count || 0))
+            : "-";
+        document.getElementById("calibrate-note").textContent = calibrate
+          ? "emitted=" +
+            formatNumber(calibrate.emitted_segment_count || 0) +
+            ", skipped=" +
+            formatNumber(calibrate.skipped_segment_count || 0)
+          : "Load calibrate summary to see emitted vs skipped segment counts.";
+      }
+
+      function renderMetadata() {
+        const titleEl = document.getElementById("report-title");
+        const subtitleEl = document.getElementById("report-subtitle");
+        const generatedAtEl = document.getElementById("generated-at-pill");
+        const tagsRowEl = document.getElementById("tags-row");
+        const notesPanel = document.getElementById("notes-panel");
+        const notesEl = document.getElementById("report-notes");
+        const metadata = state.metadata;
+
+        if (metadata && metadata.title) {
+          titleEl.textContent = metadata.title;
+        } else {
+          titleEl.textContent = "Crypto Calibration Pipeline Report";
+        }
+
+        if (metadata && metadata.subtitle) {
+          subtitleEl.textContent = metadata.subtitle;
+        } else {
+          subtitleEl.innerHTML =
+            'Load the JSON summaries emitted by <code>crypto_seed_labels</code>, <code>crypto_autolabel_resolved</code>, <code>crypto_prepare_calibration</code>, and <code>crypto_calibrate</code>. Everything renders locally in the browser; no server is required.';
+        }
+
+        if (metadata && metadata.generated_at_utc) {
+          generatedAtEl.textContent = "Generated at: " + metadata.generated_at_utc;
+        } else {
+          generatedAtEl.textContent = "Generated at: -";
+        }
+
+        if (metadata && Array.isArray(metadata.tags) && metadata.tags.length > 0) {
+          tagsRowEl.hidden = false;
+          tagsRowEl.innerHTML = metadata.tags
+            .map((tag) => '<span class="status-pill">' + escapeHtml(String(tag)) + "</span>")
+            .join("");
+        } else {
+          tagsRowEl.hidden = true;
+          tagsRowEl.innerHTML = "";
+        }
+
+        if (metadata && metadata.notes) {
+          notesEl.textContent = metadata.notes;
+          notesPanel.hidden = false;
+        } else {
+          notesEl.textContent = "";
+          notesPanel.hidden = true;
+        }
+      }
+
+      function renderHeadlineTable() {
+        const seedCount = state.seed && state.seed.question_count;
+        const prepare = state.prepare;
+        const autolabel = state.autolabel;
+        const uiPrioritySummary = state.uiPrioritySummary;
+        const heroExplainer = document.getElementById("hero-explainer");
+        const heroExplainerBadge = document.getElementById("hero-explainer-badge");
+        const heroExplainerText = document.getElementById("hero-explainer-text");
+        const activeTriggerLabels = uiPrioritySummary
+          ? ((uiPrioritySummary.top_up_now_labels || []).length
+              ? uiPrioritySummary.top_up_now_labels
+              : uiPrioritySummary.near_threshold_bucket_labels || [])
+          : [];
+        const classifyGapAction = (gap) => {
+          if ((gap || 0) <= 1) return "top-up-now";
+          if ((gap || 0) <= 3) return "ready-soon";
+          return "defer";
+        };
+        const actionChipClass = (action) => {
+          if (action === "top-up-now") return "warn";
+          if (action === "ready-soon") return "soft-warn";
+          if (action === "defer") return "good";
+          return "";
+        };
+        const actionChipHtml = (action, count) =>
+          "<span class=\"action-chip " +
+          actionChipClass(action) +
+          "\">" +
+          escapeHtml(String(count || 0) + " " + action) +
+          "</span>";
+        const nearThresholdBuckets = ((state.calibrate && state.calibrate.underfilled_buckets) || [])
+          .filter((bucket) => bucket.threshold_band === "near-threshold")
+          .slice()
+          .sort((a, b) => {
+            if ((a.gap_to_min_samples || 0) !== (b.gap_to_min_samples || 0)) {
+              return (a.gap_to_min_samples || 0) - (b.gap_to_min_samples || 0);
+            }
+            return (b.skipped_row_count || 0) - (a.skipped_row_count || 0);
+          })
+          .slice(0, 3);
+        const actionCounts = nearThresholdBuckets.reduce(
+          (acc, bucket) => {
+            const action = classifyGapAction(bucket.gap_to_min_samples || 0);
+            acc[action] = (acc[action] || 0) + 1;
+            return acc;
+          },
+          { "top-up-now": 0, "ready-soon": 0, "defer": 0 }
+        );
+        const rows = [
+          {
+            name: "Emitted vs Seed",
+            value: formatPercent(prepare && prepare.emitted_samples, seedCount),
+            formula: "<code>prepare.emitted_samples / seed.question_count</code>",
+          },
+          {
+            name: "Matched vs Seed",
+            value: formatPercent(prepare && prepare.matched_labels, seedCount),
+            formula: "<code>prepare.matched_labels / seed.question_count</code>",
+          },
+          {
+            name: "Filled vs Seed",
+            value: formatPercent(
+              autolabel && ((autolabel.filled || 0) + (autolabel.already_labeled || 0)),
+              seedCount
+            ),
+            formula: "<code>(autolabel.filled + autolabel.already_labeled) / seed.question_count</code>",
+          },
+          {
+            name: "Near-Threshold Actions",
+            value:
+              actionChipHtml("top-up-now", actionCounts["top-up-now"] || 0) +
+              " " +
+              actionChipHtml("ready-soon", actionCounts["ready-soon"] || 0) +
+              " " +
+              actionChipHtml("defer", actionCounts["defer"] || 0),
+            formula: "<code>top-3 near-threshold buckets only</code>",
+          },
+          ...nearThresholdBuckets.map((bucket, index) => ({
+            name:
+              "Near Threshold " +
+              String(index + 1) +
+              ": " +
+              [
+                bucket.key && bucket.key.asset_class || "any",
+                bucket.key && bucket.key.horizon || "any",
+                bucket.key && bucket.key.event_subtype || "any",
+              ].join(" / "),
+            value:
+              gapChipHtml(bucket.gap_to_min_samples || 0) +
+              " " +
+              actionChipHtml(classifyGapAction(bucket.gap_to_min_samples || 0), 1),
+            formula: String(bucket.skipped_row_count || 0) + " skipped rows",
+          })),
+        ];
+
+        document.getElementById("headline-body").innerHTML = rows
+          .map((row) => "<tr><td>" + row.name + "</td><td>" + row.value + "</td><td>" + row.formula + "</td></tr>")
+          .join("");
+
+        if (uiPrioritySummary) {
+          setStatus(
+            "headline-status",
+            uiPrioritySummary.headline_status || "Partial data",
+            uiPrioritySummary.headline_status_level || ""
+          );
+          setStatusTitle(
+            "headline-status",
+            [
+              uiPrioritySummary.headline_status_reason || uiPrioritySummary.priority_source || "",
+              ((uiPrioritySummary.top_up_now_labels || []).length
+                ? "buckets: " + uiPrioritySummary.top_up_now_labels.join(", ")
+                : ""),
+            ]
+              .filter(Boolean)
+              .join(" | ")
+          );
+          document.getElementById("headline-explainer").textContent =
+            uiPrioritySummary.headline_explainer || "Load summaries to compute near-threshold urgency.";
+          heroExplainerBadge.textContent = uiPrioritySummary.hero_badge_text || "0 top-up-now";
+          heroExplainerText.textContent =
+            uiPrioritySummary.headline_explainer || "Load summaries to compute near-threshold urgency.";
+          heroExplainer.className =
+            "hero-note" + (uiPrioritySummary.hero_badge_level ? " " + uiPrioritySummary.hero_badge_level : "");
+          heroExplainerBadge.className =
+            "action-chip" + (uiPrioritySummary.hero_badge_level ? " " + uiPrioritySummary.hero_badge_level : "");
+          setTriggerNote("hero-trigger-note", activeTriggerLabels);
+          setTriggerNote("headline-trigger-note", activeTriggerLabels);
+        } else if (actionCounts["top-up-now"] >= 2) {
+          setStatus("headline-status", "Urgent", "warn");
+          document.getElementById("headline-explainer").textContent =
+            String(actionCounts["top-up-now"] || 0) +
+            " buckets are one sample away from calibration readiness.";
+          heroExplainerBadge.textContent = String(actionCounts["top-up-now"] || 0) + " top-up-now";
+          heroExplainerText.textContent =
+            String(actionCounts["top-up-now"] || 0) +
+            " buckets are one sample away from calibration readiness.";
+          heroExplainer.className = "hero-note warn";
+          heroExplainerBadge.className = "action-chip warn";
+          setTriggerNote("hero-trigger-note", []);
+          setTriggerNote("headline-trigger-note", []);
+        } else if (actionCounts["top-up-now"] > 0) {
+          setStatus("headline-status", "Action Needed", "warn");
+          document.getElementById("headline-explainer").textContent =
+            "At least one bucket is one sample away from calibration readiness.";
+          heroExplainerBadge.textContent = "1 top-up-now";
+          heroExplainerText.textContent =
+            "At least one bucket is one sample away from calibration readiness.";
+          heroExplainer.className = "hero-note warn";
+          heroExplainerBadge.className = "action-chip warn";
+          setTriggerNote("hero-trigger-note", []);
+          setTriggerNote("headline-trigger-note", []);
+        } else if (state.seed || state.autolabel || state.prepare || state.calibrate) {
+          setStatus("headline-status", "Complete", "good");
+          document.getElementById("headline-explainer").textContent =
+            "No immediate top-up buckets in the visible top-three near-threshold set.";
+          heroExplainerBadge.textContent = "0 top-up-now";
+          heroExplainerText.textContent =
+            "No immediate top-up buckets in the visible top-three near-threshold set.";
+          heroExplainer.className = "hero-note good";
+          heroExplainerBadge.className = "action-chip good";
+          setTriggerNote("hero-trigger-note", []);
+          setTriggerNote("headline-trigger-note", []);
+        } else {
+          setStatus("headline-status", "Partial data", "");
+          document.getElementById("headline-explainer").textContent =
+            "Load summaries to compute near-threshold urgency.";
+          heroExplainerBadge.textContent = "0 top-up-now";
+          heroExplainerText.textContent = "Load summaries to compute near-threshold urgency.";
+          heroExplainer.className = "hero-note";
+          heroExplainerBadge.className = "action-chip";
+          setTriggerNote("hero-trigger-note", []);
+          setTriggerNote("headline-trigger-note", []);
+        }
+
+        const nearThresholdBody = document.getElementById("near-threshold-body");
+        if (!nearThresholdBuckets.length) {
+          nearThresholdBody.innerHTML = "<tr><td colspan=\"4\">No near-threshold buckets.</td></tr>";
+          setStatus("near-threshold-status", state.calibrate ? "None" : "Waiting", state.calibrate ? "warn" : "");
+        } else {
+          nearThresholdBody.innerHTML = nearThresholdBuckets
+            .map((bucket) => {
+              const label = [
+                bucket.key && bucket.key.asset_class || "any",
+                bucket.key && bucket.key.horizon || "any",
+                bucket.key && bucket.key.event_subtype || "any",
+              ].join(" / ");
+              const action = classifyGapAction(bucket.gap_to_min_samples || 0);
+              return (
+                "<tr><td>" +
+                escapeHtml(label) +
+                "</td><td>" +
+                escapeHtml(String(bucket.gap_to_min_samples || 0)) +
+                "</td><td>" +
+                escapeHtml(String(bucket.skipped_row_count || 0)) +
+                "</td><td>" +
+                actionChipHtml(action, 1) +
+                "</td></tr>"
+              );
+            })
+            .join("");
+          if (uiPrioritySummary) {
+            setStatus(
+              "near-threshold-status",
+              uiPrioritySummary.near_threshold_status || "Loaded",
+              uiPrioritySummary.near_threshold_status_level || ""
+            );
+            setStatusTitle(
+              "near-threshold-status",
+              [
+                uiPrioritySummary.priority_source || uiPrioritySummary.headline_status_reason || "",
+                ((uiPrioritySummary.near_threshold_bucket_labels || []).length
+                  ? "buckets: " + uiPrioritySummary.near_threshold_bucket_labels.join(", ")
+                  : ""),
+              ]
+                .filter(Boolean)
+                .join(" | ")
+            );
+          } else if (actionCounts["top-up-now"] >= 2) {
+            setStatus("near-threshold-status", "Urgent", "warn");
+            setStatusTitle("near-threshold-status", "");
+          } else if (actionCounts["top-up-now"] > 0) {
+            setStatus("near-threshold-status", "Action Needed", "warn");
+            setStatusTitle("near-threshold-status", "");
+          } else {
+            setStatus("near-threshold-status", "Loaded", "good");
+            setStatusTitle("near-threshold-status", "");
+          }
+        }
+      }
+
+      function renderBreakdowns() {
+        document.getElementById("seed-breakdown").innerHTML = state.seed
+          ? renderDualTables(
+              renderKeyValueTable(sortEntries(state.seed.by_asset), "Asset", "Questions") +
+                renderKeyValueTable(sortEntries(state.seed.by_asset_class || {}), "Asset Class", "Questions"),
+              renderKeyValueTable(sortEntries(state.seed.by_market_type), "Market Type", "Questions") +
+                renderKeyValueTable(sortEntries(state.seed.by_event_subtype || {}), "Event Subtype", "Questions")
+            )
+          : '<div class="empty">Load <code>crypto_seed_summary.json</code>.</div>';
+
+        document.getElementById("autolabel-breakdown").innerHTML = state.autolabel
+          ? renderDualTables(
+              renderKeyValueTable(
+                sortEntries({
+                  already_labeled: state.autolabel.already_labeled || 0,
+                  filled: state.autolabel.filled || 0,
+                  open_market: state.autolabel.open_market || 0,
+                  missing_winner: state.autolabel.missing_winner || 0,
+                  request_error: state.autolabel.request_error || 0,
+                }),
+                "Reason",
+                "Rows"
+              ),
+              renderKeyValueTable(sortEntries(state.autolabel.by_asset_class || {}), "Asset Class", "Rows") +
+                renderKeyValueTable(sortEntries(state.autolabel.by_event_subtype || {}), "Event Subtype", "Rows")
+            )
+          : '<div class="empty">Load <code>crypto_autolabel_summary.json</code>.</div>';
+
+        document.getElementById("prepare-breakdown").innerHTML = state.prepare
+          ? renderDualTables(
+              renderKeyValueTable(sortEntries(state.prepare.by_asset), "Asset", "Samples") +
+                renderKeyValueTable(sortEntries(state.prepare.by_asset_class || {}), "Asset Class", "Samples"),
+              renderKeyValueTable(sortEntries(state.prepare.by_market_type), "Market Type", "Samples") +
+                renderKeyValueTable(sortEntries(state.prepare.by_event_subtype || {}), "Event Subtype", "Samples")
+            )
+          : '<div class="empty">Load <code>crypto_prepare_summary.json</code>.</div>';
+
+        document.getElementById("calibrate-breakdown").innerHTML = state.calibrate
+          ? renderDualTables(
+              renderKeyHtmlValueTable(
+                sortEntries(
+                  (state.calibrate.skipped_segments || []).reduce((acc, segment) => {
+                    const reason = segment.reason || "unknown";
+                    acc[reason] = (acc[reason] || 0) + (segment.count || 0);
+                    return acc;
+                  }, {})
+                ).map(([reason, count]) => [calibrateReasonChipHtml(reason), count]),
+                "Skip Reason",
+                "Rows"
+              ),
+              renderKeyHtmlValueTable(
+                (state.calibrate.underfilled_buckets || [])
+                  .slice()
+                  .sort((a, b) => {
+                    if ((a.threshold_band === "near-threshold") !== (b.threshold_band === "near-threshold")) {
+                      return a.threshold_band === "near-threshold" ? -1 : 1;
+                    }
+                    if ((b.skipped_row_count || 0) !== (a.skipped_row_count || 0)) {
+                      return (b.skipped_row_count || 0) - (a.skipped_row_count || 0);
+                    }
+                    return String(a.key && a.key.asset_class || "").localeCompare(String(b.key && b.key.asset_class || ""));
+                  })
+                  .slice(0, 8)
+                  .map((bucket) => [
+                    [
+                      bucket.key && bucket.key.asset_class || "any",
+                      bucket.key && bucket.key.horizon || "any",
+                      bucket.key && bucket.key.event_subtype || "any",
+                    ].join(" / "),
+                    escapeHtml(String(bucket.skipped_row_count || 0) + " rows ") +
+                      gapChipHtml(bucket.gap_to_min_samples || 0) +
+                      " " +
+                      thresholdBandChipHtml(bucket.threshold_band || "unknown"),
+                  ]),
+                "Top Underfilled Bucket",
+                "Need"
+              ) +
+                renderKeyValueHtmlTable(
+                  [
+                    [
+                      "new_rows",
+                      '<span class="action-chip warn">' +
+                        escapeHtml(String((state.calibrate.merge_diff_summary && state.calibrate.merge_diff_summary.new_row_count) || 0)) +
+                        "</span>",
+                    ],
+                    [
+                      "updated_rows",
+                      '<span class="action-chip soft-warn">' +
+                        escapeHtml(String((state.calibrate.merge_diff_summary && state.calibrate.merge_diff_summary.updated_row_count) || 0)) +
+                        "</span>",
+                    ],
+                    [
+                      "unchanged_rows",
+                      '<span class="action-chip good">' +
+                        escapeHtml(String((state.calibrate.merge_diff_summary && state.calibrate.merge_diff_summary.unchanged_row_count) || 0)) +
+                        "</span>",
+                    ],
+                  ],
+                  "Merge Diff",
+                  "Rows"
+                ) +
+                renderKeyValueHtmlTable(
+                  ((state.calibrate.merge_diff_summary &&
+                    [
+                      ...((state.calibrate.merge_diff_summary.new_rows || []).map((row) => [
+                        row,
+                        '<span class="action-chip warn">new</span>',
+                      ])),
+                      ...((state.calibrate.merge_diff_summary.updated_rows || []).map((row) => [
+                        row,
+                        '<span class="action-chip soft-warn">updated</span>',
+                      ])),
+                      ...((state.calibrate.merge_diff_summary.unchanged_rows || []).map((row) => [
+                        row,
+                        '<span class="action-chip good">unchanged</span>',
+                      ])),
+                    ]) ||
+                    [])
+                    .slice(0, 8),
+                  "Merge Diff Row",
+                  "Status"
+                )
+            )
+          : '<div class="empty">Load <code>crypto_calibrate_summary.json</code>.</div>';
+
+        setStatus("seed-breakdown-status", state.seed ? "Loaded" : "Waiting", state.seed ? "good" : "");
+        setStatus(
+          "autolabel-breakdown-status",
+          state.autolabel ? "Loaded" : "Waiting",
+          state.autolabel ? "good" : ""
+        );
+        setStatus(
+          "prepare-breakdown-status",
+          state.prepare ? "Loaded" : "Waiting",
+          state.prepare ? "good" : ""
+        );
+        setStatus(
+          "calibrate-breakdown-status",
+          state.calibrate ? "Loaded" : "Waiting",
+          state.calibrate ? "good" : ""
+        );
+      }
+
+      function render() {
+        const loadedCount = ["seed", "autolabel", "prepare", "calibrate"].filter((key) => Boolean(state[key])).length;
+        if (loadedCount === 4) {
+          setStatus("overall-status", "All summaries loaded", "good");
+        } else if (loadedCount > 0) {
+          setStatus("overall-status", "Partial summaries loaded", "warn");
+        } else {
+          setStatus("overall-status", "Waiting for summary files", "");
+          setStatus("headline-status", "Partial data", "");
+        }
+
+        renderSummaryCards();
+        renderMetadata();
+        renderHeadlineTable();
+        renderBreakdowns();
+      }
+
+      const embeddedData = document.getElementById("pipeline-report-data");
+      if (embeddedData && embeddedData.textContent.trim()) {
+        try {
+          const parsed = JSON.parse(embeddedData.textContent);
+          state.metadata = parsed.metadata || null;
+          state.seed = parsed.seed || null;
+          state.autolabel = parsed.autolabel || null;
+          state.prepare = parsed.prepare || null;
+          state.calibrate = parsed.calibrate || null;
+          state.uiPrioritySummary = parsed.ui_priority_summary || null;
+          document.getElementById("combined-state").textContent = "Loaded from embedded report data";
+          document.getElementById("seed-state").textContent = parsed.seed ? "Loaded from embedded report data" : "Not present in embedded report data";
+          document.getElementById("autolabel-state").textContent = parsed.autolabel ? "Loaded from embedded report data" : "Not present in embedded report data";
+          document.getElementById("prepare-state").textContent = parsed.prepare ? "Loaded from embedded report data" : "Not present in embedded report data";
+          document.getElementById("calibrate-state").textContent = parsed.calibrate ? "Loaded from embedded report data" : "Not present in embedded report data";
+        } catch (error) {
+          document.getElementById("combined-state").textContent =
+            "Embedded report parse failed: " + (error && error.message ? error.message : String(error));
+        }
+      }
+
+      render();
+    </script>
+  </body>
+</html>

@@ -1,9 +1,10 @@
 use alloy::primitives::{B256, U256};
 use pa_core::config::Settings;
+use pa_core::crypto::{crypto_search_terms, is_crypto_price_market_text};
 use pa_core::types::{BinaryEventGroup, MarketInfo, NegRiskEvent, Outcome, TokenInfo};
 use polymarket_client_sdk::gamma::types::response::{Event, SearchResults};
 use rust_decimal::Decimal;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Discovers markets from the Polymarket Gamma API and filters candidates.
 ///
@@ -17,6 +18,13 @@ pub struct GammaFeed {
     min_volume_24h: Decimal,
     max_markets: usize,
     enabled_strategies: Vec<String>,
+    crypto_search_terms: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchTermSource {
+    Default,
+    Custom,
 }
 
 impl GammaFeed {
@@ -35,6 +43,7 @@ impl GammaFeed {
             min_volume_24h: settings.market_filter.min_volume_24h,
             max_markets: settings.market_filter.max_markets,
             enabled_strategies: settings.strategy.enabled.clone(),
+            crypto_search_terms: settings.crypto_alpha.discovery_search_terms.clone(),
         })
     }
 
@@ -55,6 +64,7 @@ impl GammaFeed {
             min_volume_24h: settings.market_filter.min_volume_24h,
             max_markets: settings.market_filter.max_markets,
             enabled_strategies: settings.strategy.enabled.clone(),
+            crypto_search_terms: settings.crypto_alpha.discovery_search_terms.clone(),
         }
     }
 
@@ -91,12 +101,33 @@ impl GammaFeed {
         let needs_general_markets = needs_full_scan;
         let mut strategy_markets = Vec::new();
         let mut general_markets = Vec::new();
+        let crypto_enabled = self.enabled_strategies.iter().any(|s| s == "crypto");
+        let mut crypto_relevance_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
 
         for m in all_markets {
             if !m.active {
                 continue;
             }
-            if Self::is_relevant_for_strategies(&m.question, &self.enabled_strategies) {
+            let relevance_reasons = Self::market_relevance_reasons(&m, &self.enabled_strategies);
+            if !relevance_reasons.is_empty() {
+                if crypto_enabled {
+                    for reason in &relevance_reasons {
+                        *crypto_relevance_counts.entry(*reason).or_default() += 1;
+                    }
+                }
+                if crypto_enabled
+                    && relevance_reasons
+                        .iter()
+                        .any(|reason| matches!(*reason, "event_title" | "category+crypto_text"))
+                {
+                    tracing::debug!(
+                        question = %m.question,
+                        event_title = ?m.event_title,
+                        category = ?m.category,
+                        reasons = ?relevance_reasons,
+                        "Crypto market discovery relevance matched"
+                    );
+                }
                 strategy_markets.push(m);
             } else if needs_general_markets {
                 general_markets.push(m);
@@ -130,6 +161,13 @@ impl GammaFeed {
             "Market discovery complete after filtering"
         );
 
+        if crypto_enabled {
+            tracing::info!(
+                crypto_relevance_counts = ?crypto_relevance_counts,
+                "Crypto market discovery relevance summary"
+            );
+        }
+
         Ok(filtered)
     }
 
@@ -141,18 +179,20 @@ impl GammaFeed {
         let check_weather = self.enabled_strategies.iter().any(|s| s == "weather");
         let check_crypto = self.enabled_strategies.iter().any(|s| s == "crypto");
 
-        let mut search_terms: Vec<&str> = Vec::new();
+        let mut search_terms: Vec<String> = Vec::new();
+        let mut crypto_term_sources: BTreeMap<String, SearchTermSource> = BTreeMap::new();
         if check_weather {
             // "weather" catches most weather markets; specific terms catch the rest
-            search_terms.extend_from_slice(&[
-                "weather",
-                "temperature",
-                "inches of snow",
-                "inches of rain",
-            ]);
+            search_terms.extend(
+                ["weather", "temperature", "inches of snow", "inches of rain"]
+                    .into_iter()
+                    .map(str::to_string),
+            );
         }
         if check_crypto {
-            search_terms.extend_from_slice(&["bitcoin price", "ethereum price", "crypto price"]);
+            let merged_terms = self.merged_crypto_search_terms_with_source();
+            search_terms.extend(merged_terms.iter().map(|(term, _)| term.clone()));
+            crypto_term_sources.extend(merged_terms);
         }
 
         tracing::info!(
@@ -177,6 +217,7 @@ impl GammaFeed {
         // Merge results with deduplication
         let mut all_markets = Vec::new();
         let mut seen_condition_ids: HashSet<B256> = HashSet::new();
+        let mut custom_term_new_market_counts: BTreeMap<String, usize> = BTreeMap::new();
 
         for (term, result) in results {
             match result {
@@ -205,10 +246,17 @@ impl GammaFeed {
                     }
                     tracing::debug!(
                         term,
+                        source = ?crypto_term_sources.get(&term),
                         new_markets = term_count,
                         total = all_markets.len(),
                         "Search term completed"
                     );
+                    if matches!(
+                        crypto_term_sources.get(&term),
+                        Some(SearchTermSource::Custom)
+                    ) {
+                        custom_term_new_market_counts.insert(term.clone(), term_count);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(term, error = %e, "Search query failed, skipping");
@@ -216,7 +264,28 @@ impl GammaFeed {
             }
         }
 
+        if check_crypto && !custom_term_new_market_counts.is_empty() {
+            tracing::info!(
+                custom_crypto_search_term_hits = ?custom_term_new_market_counts,
+                "Crypto custom search term discovery summary"
+            );
+        }
+
         Ok(all_markets)
+    }
+
+    fn merged_crypto_search_terms_with_source(&self) -> BTreeMap<String, SearchTermSource> {
+        let mut merged_terms: BTreeMap<String, SearchTermSource> = BTreeMap::new();
+        for term in crypto_search_terms() {
+            merged_terms.insert(term.to_string(), SearchTermSource::Default);
+        }
+        for term in &self.crypto_search_terms {
+            let trimmed = term.trim();
+            if !trimmed.is_empty() {
+                merged_terms.insert(trimmed.to_string(), SearchTermSource::Custom);
+            }
+        }
+        merged_terms
     }
 
     /// Search events by keyword using the `/public-search` endpoint.
@@ -473,13 +542,43 @@ impl GammaFeed {
         Self::is_relevant_for_strategies(question, &[])
     }
 
+    pub fn is_market_relevant_for_strategies(market: &MarketInfo, enabled: &[String]) -> bool {
+        !Self::market_relevance_reasons(market, enabled).is_empty()
+    }
+
+    pub fn market_relevance_reasons(market: &MarketInfo, enabled: &[String]) -> Vec<&'static str> {
+        let mut reasons = Vec::new();
+
+        if Self::is_relevant_for_strategies(&market.question, enabled) {
+            reasons.push("question");
+        }
+
+        if let Some(title) = market.event_title.as_deref()
+            && Self::is_relevant_for_strategies(title, enabled)
+        {
+            reasons.push("event_title");
+        }
+
+        let check_crypto = enabled.is_empty() || enabled.iter().any(|s| s == "crypto");
+        if check_crypto
+            && matches!(market.category.as_deref(), Some(category) if category.eq_ignore_ascii_case("crypto"))
+        {
+            let title = market.event_title.as_deref().unwrap_or_default();
+            let combined = format!("{} {}", market.question, title);
+            if is_crypto_price_market_text(&combined) {
+                reasons.push("category+crypto_text");
+            }
+        }
+
+        reasons
+    }
+
     /// Check if a market question is relevant to the given enabled strategies.
     /// Empty slice means check all strategies (backwards compatibility).
     pub fn is_relevant_for_strategies(question: &str, enabled: &[String]) -> bool {
-        let lower = question.to_lowercase();
-
         let check_weather = enabled.is_empty() || enabled.iter().any(|s| s == "weather");
         let check_crypto = enabled.is_empty() || enabled.iter().any(|s| s == "crypto");
+        let lower = question.to_lowercase();
 
         // Weather: only strong unambiguous keywords
         if check_weather {
@@ -499,30 +598,7 @@ impl GammaFeed {
 
         // Crypto price markets: asset keyword + price indicator
         if check_crypto {
-            let crypto_assets = [
-                "bitcoin", "btc", "ethereum", "eth", "solana", "bnb", "xrp", "ripple", "dogecoin",
-                "cardano", "avax", "polkadot", "polygon", "matic",
-            ];
-            let has_crypto_asset = crypto_assets.iter().any(|kw| {
-                if let Some(pos) = lower.find(kw) {
-                    let before_ok = pos == 0 || !lower.as_bytes()[pos - 1].is_ascii_alphabetic();
-                    let after = pos + kw.len();
-                    let after_ok =
-                        after >= lower.len() || !lower.as_bytes()[after].is_ascii_alphabetic();
-                    before_ok && after_ok
-                } else {
-                    false
-                }
-            });
-            let gas_price = lower.contains("gas price") || lower.contains("gas fee");
-            let has_price_indicator = lower.contains('$')
-                || lower.contains("price")
-                || lower.contains("reach")
-                || lower.contains("hit")
-                || lower.contains("exceed")
-                || lower.contains("dip");
-
-            if has_crypto_asset && has_price_indicator && !gas_price {
+            if is_crypto_price_market_text(&lower) {
                 return true;
             }
         }
@@ -575,7 +651,43 @@ impl GammaFeed {
         // intentionally low-liquidity and need providers).
         let liquidity = market.liquidity.unwrap_or(Decimal::ZERO);
         let volume_24h = market.volume_24hr.unwrap_or(Decimal::ZERO);
-        let strategy_relevant = Self::is_strategy_relevant(&question);
+        let strategy_relevant_preview = MarketInfo {
+            condition_id,
+            question_id,
+            question: question.clone(),
+            neg_risk,
+            neg_risk_market_id,
+            tokens: vec![
+                TokenInfo {
+                    token_id: yes_token_id,
+                    outcome: Outcome::Yes,
+                    complement_id: no_token_id,
+                },
+                TokenInfo {
+                    token_id: no_token_id,
+                    outcome: Outcome::No,
+                    complement_id: yes_token_id,
+                },
+            ],
+            tick_size,
+            fee_rate_bps,
+            active,
+            liquidity,
+            event_title: event_title.clone(),
+            end_date: market.end_date,
+            category: market.category.clone(),
+            outcome_prices: market.outcome_prices.clone(),
+            gamma_best_bid: market.best_bid,
+            gamma_best_ask: market.best_ask,
+            rewards_min_size: market.rewards_min_size,
+            rewards_max_spread: market.rewards_max_spread,
+            rewards_daily_rate: None,
+            holding_rewards_enabled: market.holding_rewards_enabled.unwrap_or(false),
+            fees_enabled: market.fees_enabled.unwrap_or(false),
+        };
+        let strategy_relevant =
+            !Self::market_relevance_reasons(&strategy_relevant_preview, &self.enabled_strategies)
+                .is_empty();
         let lr_enabled = self
             .enabled_strategies
             .iter()
@@ -892,6 +1004,7 @@ impl GammaFeed {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pa_core::crypto::crypto_search_terms;
     use rust_decimal_macros::dec;
 
     fn make_market(question: &str, event_title: Option<&str>, neg_risk: bool) -> MarketInfo {
@@ -987,5 +1100,63 @@ mod tests {
         let titles: Vec<&str> = groups.iter().map(|g| g.title.as_str()).collect();
         assert!(titles.contains(&"Bitcoin 2026"));
         assert!(titles.contains(&"Ethereum 2026"));
+    }
+
+    #[test]
+    fn test_crypto_search_terms_include_alt_assets() {
+        let terms = crypto_search_terms();
+        assert!(terms.contains(&"bitcoin price"));
+        assert!(terms.contains(&"ethereum price"));
+        assert!(terms.contains(&"solana price"));
+        assert!(terms.contains(&"doge price"));
+    }
+
+    #[test]
+    fn test_market_relevance_can_use_event_title_for_crypto() {
+        let market = make_market(
+            "Will it happen by June 30?",
+            Some("Solana price targets"),
+            false,
+        );
+        let enabled = vec!["crypto".to_string()];
+        assert!(GammaFeed::is_market_relevant_for_strategies(
+            &market, &enabled
+        ));
+        assert_eq!(
+            GammaFeed::market_relevance_reasons(&market, &enabled),
+            vec!["event_title"]
+        );
+    }
+
+    #[test]
+    fn test_market_relevance_reasons_can_include_multiple_sources() {
+        let market = make_market(
+            "Will Bitcoin reach $150k?",
+            Some("Bitcoin price targets"),
+            false,
+        );
+        let enabled = vec!["crypto".to_string()];
+        assert_eq!(
+            GammaFeed::market_relevance_reasons(&market, &enabled),
+            vec!["question", "event_title"]
+        );
+    }
+
+    #[test]
+    fn test_gamma_feed_merges_custom_crypto_search_terms() {
+        let feed = GammaFeed {
+            http_client: reqwest::Client::new(),
+            gamma_host: "https://gamma-api.polymarket.com".to_string(),
+            min_liquidity: dec!(0),
+            min_volume_24h: dec!(0),
+            max_markets: 100,
+            enabled_strategies: vec!["crypto".to_string()],
+            crypto_search_terms: vec!["litecoin price".to_string(), "doge price".to_string()],
+        };
+
+        let terms = feed.merged_crypto_search_terms_with_source();
+        assert_eq!(terms.get("litecoin price"), Some(&SearchTermSource::Custom));
+        assert_eq!(terms.get("doge price"), Some(&SearchTermSource::Custom));
+        assert_eq!(terms.get("bitcoin price"), Some(&SearchTermSource::Default));
     }
 }

@@ -10,8 +10,8 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use std::collections::HashSet;
 
-use pa_execution::clob_executor::ClobExecutor;
 use pa_core::weather::{SettlementValidationStatus, settlement_validation_status};
+use pa_execution::clob_executor::ClobExecutor;
 use pa_market_data::cache::OrderBookCache;
 use pa_market_data::gamma_feed::GammaFeed;
 
@@ -279,7 +279,10 @@ pub fn build_ws_token_list(
         ))
     }
 
-    fn general_priority(m: &pa_core::types::MarketInfo, price: Option<f64>) -> (u8, u8, u8, i64, i64) {
+    fn general_priority(
+        m: &pa_core::types::MarketInfo,
+        price: Option<f64>,
+    ) -> (u8, u8, u8, i64, i64) {
         let neg_risk_penalty = if m.neg_risk { 1 } else { 0 };
         let (price_rank, price_dist) = price_priority(price);
         let liquidity_rank = -(m.liquidity * dec!(100)).round().to_i64().unwrap_or(0);
@@ -495,7 +498,9 @@ mod tests {
         let mut markets = Vec::new();
         for i in 0..60u64 {
             let mut market = make_market(
-                &format!("Will the highest temperature in Atlanta be between {i}-{i}°F on March 19?"),
+                &format!(
+                    "Will the highest temperature in Atlanta be between {i}-{i}°F on March 19?"
+                ),
                 100 + i * 2,
                 101 + i * 2,
                 dec!(0.50),

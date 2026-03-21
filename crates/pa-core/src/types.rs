@@ -264,6 +264,18 @@ pub struct TradingOpportunity {
     pub estimated_profit: Decimal,
     /// Desired trade quantity.
     pub size: Decimal,
+    /// Optional strategy-local multiplier applied to the global buy-side
+    /// `min_profit_retention_ratio` during execution freshness checks.
+    #[serde(default)]
+    pub min_profit_retention_ratio_multiplier: Option<Decimal>,
+    /// Optional strategy-local multiplier applied to the global buy-side
+    /// `max_slippage_bps` during execution freshness checks.
+    #[serde(default)]
+    pub max_slippage_bps_multiplier: Option<Decimal>,
+    /// Optional strategy-local multiplier applied to the global buy-side
+    /// `min_size_retention_ratio` during execution freshness checks.
+    #[serde(default)]
+    pub min_size_retention_ratio_multiplier: Option<Decimal>,
     pub detected_at: DateTime<Utc>,
     pub execution_plan: ExecutionPlan,
 }

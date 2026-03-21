@@ -189,6 +189,9 @@ impl SmartMoneyStrategy {
             spread: Decimal::ZERO, // No model edge — following smart money
             estimated_profit: est.net_profit,
             size,
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: agg.token_id,
@@ -246,6 +249,9 @@ impl SmartMoneyStrategy {
             spread: Decimal::ZERO,
             estimated_profit: Decimal::ZERO,
             size: sell_size,
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: agg.token_id,
@@ -317,6 +323,9 @@ impl SmartMoneyStrategy {
                     spread: best_bid - *avg_cost,
                     estimated_profit: est.net_profit,
                     size: *size,
+                    min_profit_retention_ratio_multiplier: None,
+                    max_slippage_bps_multiplier: None,
+                    min_size_retention_ratio_multiplier: None,
                     detected_at: Utc::now(),
                     execution_plan: ExecutionPlan::DirectionalBuy {
                         token_id: *token_id,

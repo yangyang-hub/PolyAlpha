@@ -102,7 +102,6 @@ pub async fn spawn_account_runtime(
                     get_held_positions: Box::new(move || {
                         rm_held.positions_by_strategy(pa_core::types::StrategyType::Weather)
                     }),
-                    get_balance: make_balance_fn(Arc::clone(&ctx.usdc_balance)),
                     neg_risk_events: neg_risk_events.to_vec(),
                 },
             );
@@ -117,6 +116,13 @@ pub async fn spawn_account_runtime(
                 settings.crypto_alpha.clone(),
                 dec!(0.00),
                 pa_strategy::crypto_alpha::CryptoAlphaDeps {
+                    base_min_size_retention_ratio: settings.risk.min_size_retention_ratio,
+                    base_max_slippage_bps: settings.risk.max_slippage_bps,
+                    execution_quality_profit_weight: settings.risk.execution_quality_profit_weight,
+                    execution_quality_size_weight: settings.risk.execution_quality_size_weight,
+                    execution_quality_slippage_weight: settings
+                        .risk
+                        .execution_quality_slippage_weight,
                     get_orderbook: Box::new(move |token_id| crypto_cache.get(&token_id)),
                     get_available_capital: make_capital_fn(Arc::clone(&ctx.usdc_balance)),
                     get_position: Box::new(move |tid: alloy::primitives::U256| {
@@ -225,6 +231,14 @@ pub async fn spawn_account_runtime(
                     event_calendar,
                     min_order_usdc: settings.risk.min_order_usdc,
                     max_market_end_days: settings.strategy.max_market_end_days,
+                    max_slippage_bps: settings.risk.max_slippage_bps,
+                    min_profit_retention_ratio: settings.risk.min_profit_retention_ratio,
+                    min_size_retention_ratio: settings.risk.min_size_retention_ratio,
+                    execution_quality_profit_weight: settings.risk.execution_quality_profit_weight,
+                    execution_quality_size_weight: settings.risk.execution_quality_size_weight,
+                    execution_quality_slippage_weight: settings
+                        .risk
+                        .execution_quality_slippage_weight,
                 },
             );
 

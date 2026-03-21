@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use alloy::primitives::U256;
+use alloy::primitives::{B256, U256};
 use async_trait::async_trait;
 use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -13,10 +13,14 @@ use uuid::Uuid;
 use pa_core::config::CryptoAlphaConfig;
 use pa_core::traits::Strategy;
 use pa_core::types::{
-    BinaryEventGroup, EventImpact, ExecutionPlan, MarketInfo, NegRiskEvent, OrderBook,
-    StrategyType, TradeSide, TradingOpportunity,
+    BinaryEventGroup, EventCategory, EventImpact, ExecutionPlan, MarketInfo, NegRiskEvent,
+    OrderBook, StrategyType, TradeSide, TradingOpportunity,
 };
 use pa_market_data::event_calendar::EventCalendarService;
+use pa_monitor::diagnostics::{
+    CryptoCandidateDecision, CryptoExitDecision, recent_crypto_candidate_decisions,
+    record_crypto_candidate_decision, record_crypto_exit_decision,
+};
 
 use crate::profitability::ProfitCalculator;
 use crate::weather::{contains_word, normal_cdf, parse_target_date_server_local, with_retry};
@@ -147,6 +151,14 @@ enum CryptoMarketType {
     Range,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CryptoEventSubtype {
+    Unlock,
+    Upgrade,
+    Regulatory,
+    Other,
+}
+
 impl CryptoMarketType {
     fn as_str(self) -> &'static str {
         match self {
@@ -154,6 +166,80 @@ impl CryptoMarketType {
             CryptoMarketType::Range => "range",
         }
     }
+}
+
+impl CryptoEventSubtype {
+    fn from_decision_context(value: Option<&str>) -> Option<Self> {
+        match value {
+            Some("unlock") => Some(Self::Unlock),
+            Some("upgrade") => Some(Self::Upgrade),
+            Some("regulatory") => Some(Self::Regulatory),
+            Some("other") => Some(Self::Other),
+            _ => None,
+        }
+    }
+}
+
+fn specificity_score(
+    entry: &pa_core::config::CryptoCalibrationOverride,
+    asset_class: &str,
+    horizon: &str,
+    market_type: &str,
+    event_subtype: &str,
+) -> u32 {
+    let exact = |value: &str, target: &str| {
+        !(value.is_empty() || value == "*" || value.eq_ignore_ascii_case("any"))
+            && value.eq_ignore_ascii_case(target)
+    };
+    let asset_score = if !(entry.asset.is_empty() || entry.asset == "*") {
+        16
+    } else {
+        0
+    };
+    let asset_class_score = if exact(&entry.asset_class, asset_class) {
+        8
+    } else {
+        0
+    };
+    let horizon_score = if exact(&entry.horizon, horizon) { 4 } else { 0 };
+    let market_type_score = if exact(&entry.market_type, market_type) {
+        2
+    } else {
+        0
+    };
+    let event_subtype_score = if exact(&entry.event_subtype, event_subtype) {
+        1
+    } else {
+        0
+    };
+    asset_score + asset_class_score + horizon_score + market_type_score + event_subtype_score
+}
+
+#[derive(Debug, Clone)]
+struct CryptoEntryCandidate {
+    opportunity: TradingOpportunity,
+    market_type: CryptoMarketType,
+    modeled_prob: Decimal,
+    days_to_resolution: u32,
+    is_yes: bool,
+    event_context_source: Option<String>,
+    event_title: Option<String>,
+    event_category: Option<String>,
+    event_subtype: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GateRejectContext {
+    market_type: CryptoMarketType,
+    question: String,
+    days_to_resolution: u32,
+    modeled_prob: Decimal,
+    is_yes: bool,
+    condition_id: B256,
+    event_context_source: Option<String>,
+    event_title: Option<String>,
+    event_category: Option<String>,
+    event_subtype: Option<String>,
 }
 
 #[derive(Debug)]
@@ -813,6 +899,11 @@ struct EdgeDecayConfirmationState {
 
 pub struct CryptoAlphaStrategy {
     config: CryptoAlphaConfig,
+    base_min_size_retention_ratio: Decimal,
+    base_max_slippage_bps: u32,
+    execution_quality_profit_weight: Decimal,
+    execution_quality_size_weight: Decimal,
+    execution_quality_slippage_weight: Decimal,
     price_client: CryptoPriceClient,
     profit_calc: ProfitCalculator,
     get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
@@ -835,6 +926,11 @@ pub struct CryptoAlphaStrategy {
 }
 
 pub struct CryptoAlphaDeps {
+    pub base_min_size_retention_ratio: Decimal,
+    pub base_max_slippage_bps: u32,
+    pub execution_quality_profit_weight: Decimal,
+    pub execution_quality_size_weight: Decimal,
+    pub execution_quality_slippage_weight: Decimal,
     pub get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
     pub get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
     pub get_position: Box<dyn Fn(U256) -> Decimal + Send + Sync>,
@@ -846,6 +942,32 @@ pub struct CryptoAlphaDeps {
 }
 
 impl CryptoAlphaStrategy {
+    fn asset_class_selector(asset: &CryptoAsset) -> &'static str {
+        if Self::macro_event_applies_to_asset(asset) {
+            "major"
+        } else {
+            "alt"
+        }
+    }
+
+    fn event_subtype_selector(subtype: Option<CryptoEventSubtype>) -> &'static str {
+        match subtype {
+            Some(CryptoEventSubtype::Unlock) => "unlock",
+            Some(CryptoEventSubtype::Upgrade) => "upgrade",
+            Some(CryptoEventSubtype::Regulatory) => "regulatory",
+            _ => "any",
+        }
+    }
+
+    fn parse_event_subtype_label(subtype: Option<&str>) -> Option<CryptoEventSubtype> {
+        match subtype.map(|value| value.to_ascii_lowercase()) {
+            Some(value) if value == "unlock" => Some(CryptoEventSubtype::Unlock),
+            Some(value) if value == "upgrade" => Some(CryptoEventSubtype::Upgrade),
+            Some(value) if value == "regulatory" => Some(CryptoEventSubtype::Regulatory),
+            _ => None,
+        }
+    }
+
     fn binary_direction_bucket(direction: PriceDirection, is_yes: bool) -> CryptoDirectionBucket {
         match (direction, is_yes) {
             (PriceDirection::Above, true) | (PriceDirection::Below, false) => {
@@ -898,6 +1020,11 @@ impl CryptoAlphaStrategy {
 
     pub fn new(config: CryptoAlphaConfig, gas_cost_usd: Decimal, deps: CryptoAlphaDeps) -> Self {
         let CryptoAlphaDeps {
+            base_min_size_retention_ratio,
+            base_max_slippage_bps,
+            execution_quality_profit_weight,
+            execution_quality_size_weight,
+            execution_quality_slippage_weight,
             get_orderbook,
             get_available_capital,
             get_position,
@@ -915,6 +1042,11 @@ impl CryptoAlphaStrategy {
         };
         Self {
             config,
+            base_min_size_retention_ratio,
+            base_max_slippage_bps,
+            execution_quality_profit_weight,
+            execution_quality_size_weight,
+            execution_quality_slippage_weight,
             price_client: CryptoPriceClient::new(coingecko_key),
             profit_calc: ProfitCalculator::new(gas_cost_usd),
             get_orderbook,
@@ -933,8 +1065,26 @@ impl CryptoAlphaStrategy {
         }
     }
 
+    #[cfg(test)]
     async fn effective_entry_thresholds(
         &self,
+        market_text: &str,
+        days_to_resolution: u32,
+    ) -> (u32, u32) {
+        let asset = find_asset(market_text).unwrap_or(&CRYPTO_ASSETS[0]);
+        self.effective_entry_thresholds_for_context(
+            asset,
+            CryptoMarketType::Binary,
+            market_text,
+            days_to_resolution,
+        )
+        .await
+    }
+
+    async fn effective_entry_thresholds_for_context(
+        &self,
+        asset: &CryptoAsset,
+        market_type: CryptoMarketType,
         market_text: &str,
         days_to_resolution: u32,
     ) -> (u32, u32) {
@@ -969,14 +1119,11 @@ impl CryptoAlphaStrategy {
             return (min_edge_bps, max_spread_bps);
         };
 
-        let Some(impact) = event_calendar
-            .matching_impact(market_text, Utc::now())
-            .await
-        else {
+        let Some(event) = event_calendar.matching_event(market_text, Utc::now()).await else {
             return (min_edge_bps, max_spread_bps);
         };
 
-        let (edge_multiplier, spread_multiplier) = match impact {
+        let (mut edge_multiplier, mut spread_multiplier) = match event.impact {
             EventImpact::Low => (
                 self.config.low_event_min_edge_multiplier,
                 self.config.low_event_max_spread_multiplier,
@@ -991,6 +1138,36 @@ impl CryptoAlphaStrategy {
             ),
         };
 
+        let mut event_subtype = None;
+        if event.category == EventCategory::Crypto {
+            event_subtype = Some(Self::classify_crypto_event_subtype(&event.title));
+        }
+
+        if let Some(multiplier) = self
+            .calibration_override_value(
+                asset,
+                days_to_resolution,
+                market_type,
+                event_subtype,
+                |entry| entry.min_edge_multiplier,
+            )
+            .map(|v| v.max(Decimal::ZERO))
+        {
+            edge_multiplier *= multiplier;
+        }
+        if let Some(multiplier) = self
+            .calibration_override_value(
+                asset,
+                days_to_resolution,
+                market_type,
+                event_subtype,
+                |entry| entry.max_spread_multiplier,
+            )
+            .map(|v| v.max(Decimal::ZERO))
+        {
+            spread_multiplier *= multiplier;
+        }
+
         min_edge_bps = (Decimal::from(min_edge_bps) * edge_multiplier)
             .ceil()
             .to_u32()
@@ -1003,46 +1180,185 @@ impl CryptoAlphaStrategy {
         (min_edge_bps, max_spread_bps)
     }
 
-    async fn effective_event_sigma_multiplier(&self, market_text: &str) -> f64 {
+    fn macro_event_applies_to_asset(asset: &CryptoAsset) -> bool {
+        matches!(asset.binance_symbol, "BTCUSDT" | "ETHUSDT")
+    }
+
+    fn infer_decision_event_context(
+        market_text: &str,
+    ) -> (Option<&'static str>, Option<&'static str>) {
+        let lower = market_text.to_lowercase();
+        if lower.contains("fomc")
+            || lower.contains("cpi")
+            || lower.contains("fed")
+            || lower.contains("inflation")
+            || lower.contains("nonfarm")
+            || lower.contains("gdp")
+        {
+            return (Some("Macro"), None);
+        }
+
+        let subtype = match Self::classify_crypto_event_subtype(market_text) {
+            CryptoEventSubtype::Unlock => Some("unlock"),
+            CryptoEventSubtype::Upgrade => Some("upgrade"),
+            CryptoEventSubtype::Regulatory => Some("regulatory"),
+            CryptoEventSubtype::Other => None,
+        };
+
+        if subtype.is_some() {
+            (Some("Crypto"), subtype)
+        } else {
+            (None, None)
+        }
+    }
+
+    async fn decision_event_context(
+        &self,
+        market_text: &str,
+    ) -> (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) {
+        if let Some(event_calendar) = &self.event_calendar
+            && let Some(event) = event_calendar.matching_event(market_text, Utc::now()).await
+        {
+            let category = match event.category {
+                EventCategory::Macro => Some("Macro".to_string()),
+                EventCategory::Crypto => Some("Crypto".to_string()),
+                _ => None,
+            };
+            let subtype = if event.category == EventCategory::Crypto {
+                match Self::classify_crypto_event_subtype(&event.title) {
+                    CryptoEventSubtype::Unlock => Some("unlock".to_string()),
+                    CryptoEventSubtype::Upgrade => Some("upgrade".to_string()),
+                    CryptoEventSubtype::Regulatory => Some("regulatory".to_string()),
+                    CryptoEventSubtype::Other => None,
+                }
+            } else {
+                None
+            };
+            return (
+                Some("calendar".to_string()),
+                Some(event.title.clone()),
+                category,
+                subtype,
+            );
+        }
+
+        let (category, subtype) = Self::infer_decision_event_context(market_text);
+        if category.is_some() || subtype.is_some() {
+            (
+                Some("heuristic".to_string()),
+                None,
+                category.map(str::to_string),
+                subtype.map(str::to_string),
+            )
+        } else {
+            (None, None, None, None)
+        }
+    }
+
+    fn classify_crypto_event_subtype(title: &str) -> CryptoEventSubtype {
+        let lower = title.to_lowercase();
+        if lower.contains("unlock") || lower.contains("vesting") || lower.contains("cliff") {
+            CryptoEventSubtype::Unlock
+        } else if lower.contains("mainnet")
+            || lower.contains("upgrade")
+            || lower.contains("fork")
+            || lower.contains("hard fork")
+        {
+            CryptoEventSubtype::Upgrade
+        } else if lower.contains("etf")
+            || lower.contains("listing")
+            || lower.contains("sec")
+            || lower.contains("approval")
+            || lower.contains("regulat")
+        {
+            CryptoEventSubtype::Regulatory
+        } else {
+            CryptoEventSubtype::Other
+        }
+    }
+
+    async fn effective_event_sigma_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        market_text: &str,
+    ) -> (f64, Option<CryptoEventSubtype>) {
         let Some(event_calendar) = &self.event_calendar else {
-            return 1.0;
+            return (1.0, None);
         };
 
-        let Some(impact) = event_calendar
-            .matching_impact(market_text, Utc::now())
-            .await
-        else {
-            return 1.0;
+        let Some(event) = event_calendar.matching_event(market_text, Utc::now()).await else {
+            return (1.0, None);
         };
 
-        let multiplier = match impact {
+        let impact_multiplier = match event.impact {
             EventImpact::Low => self.config.low_event_sigma_multiplier,
             EventImpact::Medium => self.config.medium_event_sigma_multiplier,
             EventImpact::High => self.config.high_event_sigma_multiplier,
         };
+        let mut matched_subtype = None;
+        let category_multiplier = match event.category {
+            EventCategory::Macro if Self::macro_event_applies_to_asset(asset) => {
+                self.config.macro_event_sigma_multiplier
+            }
+            EventCategory::Crypto => {
+                let subtype = Self::classify_crypto_event_subtype(&event.title);
+                matched_subtype = Some(subtype);
+                self.config.crypto_event_sigma_multiplier
+            }
+            _ => Decimal::ONE,
+        };
 
-        multiplier.to_f64().unwrap_or(1.0).max(1.0)
+        (
+            (impact_multiplier * category_multiplier)
+                .to_f64()
+                .unwrap_or(1.0)
+                .max(1.0),
+            matched_subtype,
+        )
     }
 
-    async fn effective_event_size_multiplier(&self, market_text: &str) -> Decimal {
+    async fn effective_event_size_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        market_text: &str,
+    ) -> (Decimal, Option<CryptoEventSubtype>) {
         let Some(event_calendar) = &self.event_calendar else {
-            return Decimal::ONE;
+            return (Decimal::ONE, None);
         };
 
-        let Some(impact) = event_calendar
-            .matching_impact(market_text, Utc::now())
-            .await
-        else {
-            return Decimal::ONE;
+        let Some(event) = event_calendar.matching_event(market_text, Utc::now()).await else {
+            return (Decimal::ONE, None);
         };
 
-        match impact {
+        let impact_multiplier = match event.impact {
             EventImpact::Low => self.config.low_event_size_multiplier,
             EventImpact::Medium => self.config.medium_event_size_multiplier,
             EventImpact::High => self.config.high_event_size_multiplier,
-        }
-        .min(Decimal::ONE)
-        .max(Decimal::ZERO)
+        };
+        let mut matched_subtype = None;
+        let category_multiplier = match event.category {
+            EventCategory::Macro if Self::macro_event_applies_to_asset(asset) => {
+                self.config.macro_event_size_multiplier
+            }
+            EventCategory::Crypto => {
+                let subtype = Self::classify_crypto_event_subtype(&event.title);
+                matched_subtype = Some(subtype);
+                self.config.crypto_event_size_multiplier
+            }
+            _ => Decimal::ONE,
+        };
+
+        (
+            (impact_multiplier * category_multiplier)
+                .min(Decimal::ONE)
+                .max(Decimal::ZERO),
+            matched_subtype,
+        )
     }
 
     async fn effective_sigma_multiplier(
@@ -1052,9 +1368,16 @@ impl CryptoAlphaStrategy {
         market_type: CryptoMarketType,
         market_text: &str,
     ) -> f64 {
-        let event_multiplier = self.effective_event_sigma_multiplier(market_text).await;
+        let (event_multiplier, event_subtype) = self
+            .effective_event_sigma_multiplier(asset, market_text)
+            .await;
         let override_multiplier = self
-            .calibration_override_sigma_multiplier(asset, days_to_resolution, market_type)
+            .calibration_override_sigma_multiplier(
+                asset,
+                days_to_resolution,
+                market_type,
+                event_subtype,
+            )
             .unwrap_or(Decimal::ONE)
             .to_f64()
             .unwrap_or(1.0);
@@ -1068,10 +1391,17 @@ impl CryptoAlphaStrategy {
         market_type: CryptoMarketType,
         market_text: &str,
     ) -> Decimal {
-        let event_multiplier = self.effective_event_size_multiplier(market_text).await;
+        let (event_multiplier, event_subtype) = self
+            .effective_event_size_multiplier(asset, market_text)
+            .await;
         let horizon_multiplier = self.effective_horizon_size_multiplier(days_to_resolution);
         let override_multiplier = self
-            .calibration_override_size_multiplier(asset, days_to_resolution, market_type)
+            .calibration_override_size_multiplier(
+                asset,
+                days_to_resolution,
+                market_type,
+                event_subtype,
+            )
             .unwrap_or(Decimal::ONE);
         (event_multiplier * horizon_multiplier * override_multiplier)
             .min(Decimal::ONE)
@@ -1100,25 +1430,58 @@ impl CryptoAlphaStrategy {
         }
     }
 
-    fn calibration_override_entry(
+    fn calibration_override_value(
         &self,
         asset: &CryptoAsset,
         days_to_resolution: u32,
         market_type: CryptoMarketType,
-    ) -> Option<&pa_core::config::CryptoCalibrationOverride> {
+        event_subtype: Option<CryptoEventSubtype>,
+        select: impl Fn(&pa_core::config::CryptoCalibrationOverride) -> Option<Decimal>,
+    ) -> Option<Decimal> {
         let horizon = self.horizon_bucket(days_to_resolution);
-        self.config.calibration_overrides.iter().find(|entry| {
-            let asset_match = entry.asset.is_empty()
-                || entry.asset == "*"
-                || entry.asset.eq_ignore_ascii_case(asset.binance_symbol);
-            let horizon_match = entry.horizon.is_empty()
-                || entry.horizon.eq_ignore_ascii_case("any")
-                || entry.horizon.eq_ignore_ascii_case(horizon);
-            let market_type_match = entry.market_type.is_empty()
-                || entry.market_type.eq_ignore_ascii_case("any")
-                || entry.market_type.eq_ignore_ascii_case(market_type.as_str());
-            asset_match && horizon_match && market_type_match
-        })
+        let asset_class = Self::asset_class_selector(asset);
+        let event_subtype = Self::event_subtype_selector(event_subtype);
+        self.config
+            .calibration_overrides
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let asset_match = entry.asset.is_empty()
+                    || entry.asset == "*"
+                    || entry.asset.eq_ignore_ascii_case(asset.binance_symbol);
+                let asset_class_match = entry.asset_class.is_empty()
+                    || entry.asset_class.eq_ignore_ascii_case("any")
+                    || entry.asset_class.eq_ignore_ascii_case(asset_class);
+                let horizon_match = entry.horizon.is_empty()
+                    || entry.horizon.eq_ignore_ascii_case("any")
+                    || entry.horizon.eq_ignore_ascii_case(horizon);
+                let market_type_match = entry.market_type.is_empty()
+                    || entry.market_type.eq_ignore_ascii_case("any")
+                    || entry.market_type.eq_ignore_ascii_case(market_type.as_str());
+                let event_subtype_match = entry.event_subtype.is_empty()
+                    || entry.event_subtype.eq_ignore_ascii_case("any")
+                    || entry.event_subtype.eq_ignore_ascii_case(event_subtype);
+                if !(asset_match
+                    && asset_class_match
+                    && horizon_match
+                    && market_type_match
+                    && event_subtype_match)
+                {
+                    return None;
+                }
+                let value = select(entry)?;
+
+                let score = specificity_score(
+                    entry,
+                    asset_class,
+                    horizon,
+                    market_type.as_str(),
+                    event_subtype,
+                );
+                Some((score, std::cmp::Reverse(index), value))
+            })
+            .max_by_key(|(score, reverse_index, _)| (*score, *reverse_index))
+            .map(|(_, _, value)| value)
     }
 
     fn calibration_override_probability(
@@ -1127,44 +1490,18 @@ impl CryptoAlphaStrategy {
         days_to_resolution: u32,
         market_type: CryptoMarketType,
     ) -> Option<Decimal> {
-        self.calibration_override_entry(asset, days_to_resolution, market_type)
-            .and_then(|entry| entry.probability_calibration)
-            .map(|v| v.min(Decimal::ONE).max(Decimal::ZERO))
+        self.calibration_override_value(asset, days_to_resolution, market_type, None, |entry| {
+            entry.probability_calibration
+        })
+        .map(|v| v.min(Decimal::ONE).max(Decimal::ZERO))
     }
 
-    fn calibration_override_sigma_multiplier(
-        &self,
-        asset: &CryptoAsset,
-        days_to_resolution: u32,
-        market_type: CryptoMarketType,
-    ) -> Option<Decimal> {
-        self.calibration_override_entry(asset, days_to_resolution, market_type)
-            .and_then(|entry| entry.sigma_multiplier)
-            .map(|v| v.max(Decimal::ZERO))
-    }
-
-    fn calibration_override_size_multiplier(
-        &self,
-        asset: &CryptoAsset,
-        days_to_resolution: u32,
-        market_type: CryptoMarketType,
-    ) -> Option<Decimal> {
-        self.calibration_override_entry(asset, days_to_resolution, market_type)
-            .and_then(|entry| entry.size_multiplier)
-            .map(|v| v.min(Decimal::ONE).max(Decimal::ZERO))
-    }
-
-    fn effective_probability_calibration_factor(
+    fn baseline_probability_calibration_factor(
         &self,
         asset: &CryptoAsset,
         days_to_resolution: u32,
         market_type: CryptoMarketType,
     ) -> Decimal {
-        if let Some(override_factor) =
-            self.calibration_override_probability(asset, days_to_resolution, market_type)
-        {
-            return override_factor;
-        }
         let asset_factor = match asset.binance_symbol {
             "BTCUSDT" => self.config.btc_probability_calibration,
             "ETHUSDT" => self.config.eth_probability_calibration,
@@ -1187,6 +1524,281 @@ impl CryptoAlphaStrategy {
             .max(Decimal::ZERO)
     }
 
+    fn calibration_override_sigma_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
+    ) -> Option<Decimal> {
+        self.calibration_override_value(
+            asset,
+            days_to_resolution,
+            market_type,
+            event_subtype,
+            |entry| entry.sigma_multiplier,
+        )
+        .map(|v| self.guard_multiplier_override(v).max(Decimal::ZERO))
+    }
+
+    fn calibration_override_size_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
+    ) -> Option<Decimal> {
+        self.calibration_override_value(
+            asset,
+            days_to_resolution,
+            market_type,
+            event_subtype,
+            |entry| entry.size_multiplier,
+        )
+        .map(|v| {
+            self.guard_multiplier_override(v)
+                .min(Decimal::ONE)
+                .max(Decimal::ZERO)
+        })
+    }
+
+    fn calibration_override_depth_ratio_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
+    ) -> Option<Decimal> {
+        self.calibration_override_value(
+            asset,
+            days_to_resolution,
+            market_type,
+            event_subtype,
+            |entry| entry.depth_ratio_multiplier,
+        )
+        .map(|v| self.guard_multiplier_override(v).max(Decimal::ZERO))
+    }
+
+    fn calibration_override_hold_edge_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
+    ) -> Option<Decimal> {
+        self.calibration_override_value(
+            asset,
+            days_to_resolution,
+            market_type,
+            event_subtype,
+            |entry| entry.hold_edge_multiplier,
+        )
+        .map(|v| self.guard_multiplier_override(v).max(Decimal::ZERO))
+    }
+
+    fn calibration_override_edge_decay_exit_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
+    ) -> Option<Decimal> {
+        self.calibration_override_value(
+            asset,
+            days_to_resolution,
+            market_type,
+            event_subtype,
+            |entry| entry.edge_decay_exit_multiplier,
+        )
+        .map(|v| self.guard_multiplier_override(v).max(Decimal::ZERO))
+    }
+
+    fn calibration_override_edge_decay_confirmation_scan_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
+    ) -> Option<Decimal> {
+        self.calibration_override_value(
+            asset,
+            days_to_resolution,
+            market_type,
+            event_subtype,
+            |entry| entry.edge_decay_confirmation_scan_multiplier,
+        )
+        .map(|v| self.guard_multiplier_override(v).max(Decimal::ZERO))
+    }
+
+    fn calibration_override_edge_decay_confirmation_window_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
+    ) -> Option<Decimal> {
+        self.calibration_override_value(
+            asset,
+            days_to_resolution,
+            market_type,
+            event_subtype,
+            |entry| entry.edge_decay_confirmation_window_multiplier,
+        )
+        .map(|v| self.guard_multiplier_override(v).max(Decimal::ZERO))
+    }
+
+    fn max_calibration_override_edge_decay_confirmation_window_multiplier(&self) -> Decimal {
+        self.config
+            .calibration_overrides
+            .iter()
+            .filter_map(|entry| entry.edge_decay_confirmation_window_multiplier)
+            .map(|value| self.guard_multiplier_override(value).max(Decimal::ZERO))
+            .max()
+            .unwrap_or(Decimal::ONE)
+    }
+
+    fn calibration_override_edge_decay_cooldown_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
+    ) -> Option<Decimal> {
+        self.calibration_override_value(
+            asset,
+            days_to_resolution,
+            market_type,
+            event_subtype,
+            |entry| entry.edge_decay_cooldown_multiplier,
+        )
+        .map(|v| self.guard_multiplier_override(v).max(Decimal::ZERO))
+    }
+
+    fn calibration_override_capital_efficiency_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
+    ) -> Option<Decimal> {
+        self.calibration_override_value(
+            asset,
+            days_to_resolution,
+            market_type,
+            event_subtype,
+            |entry| entry.capital_efficiency_multiplier,
+        )
+        .map(|v| self.guard_multiplier_override(v).max(Decimal::ZERO))
+    }
+
+    fn calibration_override_model_reversal_buffer_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
+    ) -> Option<Decimal> {
+        self.calibration_override_value(
+            asset,
+            days_to_resolution,
+            market_type,
+            event_subtype,
+            |entry| entry.model_reversal_buffer_multiplier,
+        )
+        .map(|v| self.guard_multiplier_override(v).max(Decimal::ZERO))
+    }
+
+    fn calibration_override_profit_retention_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
+    ) -> Option<Decimal> {
+        self.calibration_override_value(
+            asset,
+            days_to_resolution,
+            market_type,
+            event_subtype,
+            |entry| entry.profit_retention_multiplier,
+        )
+        .map(|v| self.guard_multiplier_override(v).max(Decimal::ZERO))
+    }
+
+    fn calibration_override_slippage_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
+    ) -> Option<Decimal> {
+        self.calibration_override_value(
+            asset,
+            days_to_resolution,
+            market_type,
+            event_subtype,
+            |entry| entry.slippage_multiplier,
+        )
+        .map(|v| self.guard_multiplier_override(v).max(Decimal::ZERO))
+    }
+
+    fn calibration_override_size_retention_multiplier(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
+    ) -> Option<Decimal> {
+        self.calibration_override_value(
+            asset,
+            days_to_resolution,
+            market_type,
+            event_subtype,
+            |entry| entry.size_retention_multiplier,
+        )
+        .map(|v| self.guard_multiplier_override(v).max(Decimal::ZERO))
+    }
+
+    fn guard_multiplier_override(&self, override_value: Decimal) -> Decimal {
+        let baseline = Decimal::ONE;
+        let blend = self
+            .config
+            .override_multiplier_blend
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO);
+        let blended = baseline + ((override_value - baseline) * blend);
+        let max_delta = Decimal::from(self.config.override_multiplier_max_delta_bps) / dec!(10000);
+        let lower = baseline - max_delta;
+        let upper = baseline + max_delta;
+        blended.max(lower).min(upper)
+    }
+
+    fn effective_probability_calibration_factor(
+        &self,
+        asset: &CryptoAsset,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+    ) -> Decimal {
+        let baseline =
+            self.baseline_probability_calibration_factor(asset, days_to_resolution, market_type);
+        if let Some(override_factor) =
+            self.calibration_override_probability(asset, days_to_resolution, market_type)
+        {
+            let blend = self
+                .config
+                .override_probability_blend
+                .min(Decimal::ONE)
+                .max(Decimal::ZERO);
+            let blended = baseline + ((override_factor - baseline) * blend);
+            let max_delta =
+                Decimal::from(self.config.override_probability_max_delta_bps) / dec!(10000);
+            let lower = (baseline - max_delta).max(Decimal::ZERO);
+            let upper = (baseline + max_delta).min(Decimal::ONE);
+            return blended.min(upper).max(lower);
+        }
+        baseline
+    }
+
     fn calibrate_probability(
         &self,
         asset: &CryptoAsset,
@@ -1201,47 +1813,110 @@ impl CryptoAlphaStrategy {
             .max(Decimal::ZERO)
     }
 
-    fn effective_exit_thresholds(&self, days_to_resolution: u32) -> (Decimal, Decimal) {
-        if days_to_resolution <= self.config.short_horizon_max_days {
-            (
-                self.config.short_horizon_capital_efficiency_threshold,
-                (Decimal::from(self.config.exit_buffer_bps) / dec!(10000))
-                    * self.config.short_horizon_exit_buffer_multiplier,
-            )
-        } else if days_to_resolution <= self.config.medium_horizon_max_days {
-            (
-                self.config.medium_horizon_capital_efficiency_threshold,
-                (Decimal::from(self.config.exit_buffer_bps) / dec!(10000))
-                    * self.config.medium_horizon_exit_buffer_multiplier,
-            )
-        } else {
-            (
-                self.config.capital_efficiency_threshold,
-                Decimal::from(self.config.exit_buffer_bps) / dec!(10000),
-            )
-        }
-    }
+    fn effective_exit_thresholds_for_context(
+        &self,
+        days_to_resolution: u32,
+        asset: Option<&CryptoAsset>,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
+    ) -> (Decimal, Decimal) {
+        let (mut capital_efficiency_threshold, mut exit_buffer) =
+            if days_to_resolution <= self.config.short_horizon_max_days {
+                (
+                    self.config.short_horizon_capital_efficiency_threshold,
+                    (Decimal::from(self.config.exit_buffer_bps) / dec!(10000))
+                        * self.config.short_horizon_exit_buffer_multiplier,
+                )
+            } else if days_to_resolution <= self.config.medium_horizon_max_days {
+                (
+                    self.config.medium_horizon_capital_efficiency_threshold,
+                    (Decimal::from(self.config.exit_buffer_bps) / dec!(10000))
+                        * self.config.medium_horizon_exit_buffer_multiplier,
+                )
+            } else {
+                (
+                    self.config.capital_efficiency_threshold,
+                    Decimal::from(self.config.exit_buffer_bps) / dec!(10000),
+                )
+            };
 
-    fn effective_hold_edge_threshold(&self, days_to_resolution: u32) -> Decimal {
-        let multiplier = if days_to_resolution <= self.config.short_horizon_max_days {
+        if let Some(asset) = asset {
+            if let Some(multiplier) = self.calibration_override_capital_efficiency_multiplier(
+                asset,
+                days_to_resolution,
+                market_type,
+                event_subtype,
+            ) {
+                capital_efficiency_threshold = (capital_efficiency_threshold * multiplier)
+                    .min(Decimal::ONE)
+                    .max(Decimal::ZERO);
+            }
+            if let Some(multiplier) = self.calibration_override_model_reversal_buffer_multiplier(
+                asset,
+                days_to_resolution,
+                market_type,
+                event_subtype,
+            ) {
+                exit_buffer = (exit_buffer * multiplier)
+                    .min(Decimal::ONE)
+                    .max(Decimal::ZERO);
+            }
+        }
+
+        (capital_efficiency_threshold, exit_buffer)
+    }
+    fn effective_hold_edge_threshold_for_context(
+        &self,
+        days_to_resolution: u32,
+        asset: Option<&CryptoAsset>,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
+    ) -> Decimal {
+        let mut multiplier = if days_to_resolution <= self.config.short_horizon_max_days {
             self.config.short_horizon_hold_edge_multiplier
         } else if days_to_resolution <= self.config.medium_horizon_max_days {
             self.config.medium_horizon_hold_edge_multiplier
         } else {
             Decimal::ONE
         };
+        if let Some(asset) = asset
+            && let Some(override_multiplier) = self.calibration_override_hold_edge_multiplier(
+                asset,
+                days_to_resolution,
+                market_type,
+                event_subtype,
+            )
+        {
+            multiplier *= override_multiplier;
+        }
 
         (Decimal::from(self.config.hold_min_edge_bps) / dec!(10000)) * multiplier
     }
 
-    fn effective_edge_decay_exit_fraction(&self, days_to_resolution: u32) -> Decimal {
-        let multiplier = if days_to_resolution <= self.config.short_horizon_max_days {
+    fn effective_edge_decay_exit_fraction_for_context(
+        &self,
+        days_to_resolution: u32,
+        asset: Option<&CryptoAsset>,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
+    ) -> Decimal {
+        let mut multiplier = if days_to_resolution <= self.config.short_horizon_max_days {
             self.config.short_horizon_edge_decay_exit_multiplier
         } else if days_to_resolution <= self.config.medium_horizon_max_days {
             self.config.medium_horizon_edge_decay_exit_multiplier
         } else {
             Decimal::ONE
         };
+        if let Some(asset) = asset
+            && let Some(override_multiplier) = self.calibration_override_edge_decay_exit_multiplier(
+                asset,
+                days_to_resolution,
+                market_type,
+                event_subtype,
+            )
+        {
+            multiplier *= override_multiplier;
+        }
 
         (self.config.edge_decay_exit_fraction * multiplier)
             .min(Decimal::ONE)
@@ -1269,20 +1944,33 @@ impl CryptoAlphaStrategy {
         &self,
         position_size: Decimal,
         best_bid: Decimal,
+        asset: Option<&CryptoAsset>,
+        market_type: CryptoMarketType,
         days_to_resolution: u32,
+        event_subtype: Option<CryptoEventSubtype>,
         confirmations: u32,
         edge_shortfall: Decimal,
     ) -> Decimal {
-        let required_confirmations =
-            self.effective_edge_decay_confirmation_scans(days_to_resolution, edge_shortfall);
+        let required_confirmations = self.effective_edge_decay_confirmation_scans_for_context(
+            days_to_resolution,
+            edge_shortfall,
+            asset,
+            market_type,
+            event_subtype,
+        );
         let extra_confirmations = confirmations.saturating_sub(required_confirmations);
         let severity_multiplier = self.edge_decay_severity_multiplier(
             edge_shortfall,
             self.config.edge_decay_moderate_exit_multiplier,
             self.config.edge_decay_severe_exit_multiplier,
         );
-        let fraction = ((self.effective_edge_decay_exit_fraction(days_to_resolution)
-            + (self.config.edge_decay_exit_fraction_step * Decimal::from(extra_confirmations)))
+        let fraction = ((self.effective_edge_decay_exit_fraction_for_context(
+            days_to_resolution,
+            asset,
+            market_type,
+            event_subtype,
+        ) + (self.config.edge_decay_exit_fraction_step
+            * Decimal::from(extra_confirmations)))
             * severity_multiplier)
             .min(Decimal::ONE)
             .max(Decimal::ZERO);
@@ -1303,10 +1991,28 @@ impl CryptoAlphaStrategy {
             .is_some_and(|until| *until > Instant::now())
     }
 
+    #[cfg(test)]
     fn effective_edge_decay_cooldown_secs(
         &self,
         days_to_resolution: u32,
         edge_shortfall: Decimal,
+    ) -> u64 {
+        self.effective_edge_decay_cooldown_secs_for_context(
+            days_to_resolution,
+            edge_shortfall,
+            None,
+            CryptoMarketType::Binary,
+            None,
+        )
+    }
+
+    fn effective_edge_decay_cooldown_secs_for_context(
+        &self,
+        days_to_resolution: u32,
+        edge_shortfall: Decimal,
+        asset: Option<&CryptoAsset>,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
     ) -> u64 {
         let horizon_multiplier = if days_to_resolution <= self.config.short_horizon_max_days {
             self.config.short_horizon_edge_decay_cooldown_multiplier
@@ -1315,11 +2021,22 @@ impl CryptoAlphaStrategy {
         } else {
             Decimal::ONE
         };
-        let severity_multiplier = self.edge_decay_severity_multiplier(
+        let mut severity_multiplier = self.edge_decay_severity_multiplier(
             edge_shortfall,
             self.config.edge_decay_moderate_cooldown_multiplier,
             self.config.edge_decay_severe_cooldown_multiplier,
         );
+        if let Some(asset) = asset
+            && let Some(override_multiplier) = self
+                .calibration_override_edge_decay_cooldown_multiplier(
+                    asset,
+                    days_to_resolution,
+                    market_type,
+                    event_subtype,
+                )
+        {
+            severity_multiplier *= override_multiplier;
+        }
 
         (Decimal::from(self.config.edge_decay_cooldown_secs)
             * horizon_multiplier
@@ -1330,10 +2047,28 @@ impl CryptoAlphaStrategy {
             .max(1)
     }
 
+    #[cfg(test)]
     fn effective_edge_decay_confirmation_scans(
         &self,
         days_to_resolution: u32,
         edge_shortfall: Decimal,
+    ) -> u32 {
+        self.effective_edge_decay_confirmation_scans_for_context(
+            days_to_resolution,
+            edge_shortfall,
+            None,
+            CryptoMarketType::Binary,
+            None,
+        )
+    }
+
+    fn effective_edge_decay_confirmation_scans_for_context(
+        &self,
+        days_to_resolution: u32,
+        edge_shortfall: Decimal,
+        asset: Option<&CryptoAsset>,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
     ) -> u32 {
         let base = if days_to_resolution <= self.config.short_horizon_max_days {
             self.config.short_horizon_edge_decay_confirmation_scans
@@ -1342,11 +2077,22 @@ impl CryptoAlphaStrategy {
         } else {
             self.config.edge_decay_confirmation_scans
         };
-        let severity_multiplier = self.edge_decay_severity_multiplier(
+        let mut severity_multiplier = self.edge_decay_severity_multiplier(
             edge_shortfall,
             self.config.edge_decay_moderate_confirmation_scan_multiplier,
             self.config.edge_decay_severe_confirmation_scan_multiplier,
         );
+        if let Some(asset) = asset
+            && let Some(override_multiplier) = self
+                .calibration_override_edge_decay_confirmation_scan_multiplier(
+                    asset,
+                    days_to_resolution,
+                    market_type,
+                    event_subtype,
+                )
+        {
+            severity_multiplier *= override_multiplier;
+        }
 
         (Decimal::from(base) * severity_multiplier)
             .ceil()
@@ -1355,10 +2101,28 @@ impl CryptoAlphaStrategy {
             .max(1)
     }
 
+    #[cfg(test)]
     fn effective_edge_decay_confirmation_window_secs(
         &self,
         days_to_resolution: u32,
         edge_shortfall: Decimal,
+    ) -> u64 {
+        self.effective_edge_decay_confirmation_window_secs_for_context(
+            days_to_resolution,
+            edge_shortfall,
+            None,
+            CryptoMarketType::Binary,
+            None,
+        )
+    }
+
+    fn effective_edge_decay_confirmation_window_secs_for_context(
+        &self,
+        days_to_resolution: u32,
+        edge_shortfall: Decimal,
+        asset: Option<&CryptoAsset>,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
     ) -> u64 {
         let horizon_multiplier = if days_to_resolution <= self.config.short_horizon_max_days {
             self.config
@@ -1369,16 +2133,56 @@ impl CryptoAlphaStrategy {
         } else {
             Decimal::ONE
         };
-        let severity_multiplier = self.edge_decay_severity_multiplier(
+        let mut severity_multiplier = self.edge_decay_severity_multiplier(
             edge_shortfall,
             self.config
                 .edge_decay_moderate_confirmation_window_multiplier,
             self.config.edge_decay_severe_confirmation_window_multiplier,
         );
+        if let Some(asset) = asset
+            && let Some(override_multiplier) = self
+                .calibration_override_edge_decay_confirmation_window_multiplier(
+                    asset,
+                    days_to_resolution,
+                    market_type,
+                    event_subtype,
+                )
+        {
+            severity_multiplier *= override_multiplier;
+        }
 
         (Decimal::from(self.config.edge_decay_confirmation_window_secs)
             * horizon_multiplier
             * severity_multiplier)
+            .round()
+            .to_u64()
+            .unwrap_or(self.config.edge_decay_confirmation_window_secs)
+            .max(1)
+    }
+
+    fn max_edge_decay_confirmation_window_secs(&self) -> u64 {
+        let max_horizon_multiplier = Decimal::ONE
+            .max(
+                self.config
+                    .medium_horizon_edge_decay_confirmation_window_multiplier,
+            )
+            .max(
+                self.config
+                    .short_horizon_edge_decay_confirmation_window_multiplier,
+            );
+        let max_severity_multiplier = Decimal::ONE
+            .max(
+                self.config
+                    .edge_decay_moderate_confirmation_window_multiplier,
+            )
+            .max(self.config.edge_decay_severe_confirmation_window_multiplier);
+        let max_override_multiplier =
+            self.max_calibration_override_edge_decay_confirmation_window_multiplier();
+
+        (Decimal::from(self.config.edge_decay_confirmation_window_secs)
+            * max_horizon_multiplier
+            * max_severity_multiplier
+            * max_override_multiplier)
             .round()
             .to_u64()
             .unwrap_or(self.config.edge_decay_confirmation_window_secs)
@@ -1390,14 +2194,21 @@ impl CryptoAlphaStrategy {
         token_id: U256,
         days_to_resolution: u32,
         edge_shortfall: Decimal,
+        asset: Option<&CryptoAsset>,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
     ) {
         let mut cooldowns = self.edge_decay_cooldowns.lock().unwrap();
         cooldowns.insert(
             token_id,
             Instant::now()
-                + Duration::from_secs(
-                    self.effective_edge_decay_cooldown_secs(days_to_resolution, edge_shortfall),
-                ),
+                + Duration::from_secs(self.effective_edge_decay_cooldown_secs_for_context(
+                    days_to_resolution,
+                    edge_shortfall,
+                    asset,
+                    market_type,
+                    event_subtype,
+                )),
         );
         if cooldowns.len() > 512 {
             let now = Instant::now();
@@ -1410,11 +2221,20 @@ impl CryptoAlphaStrategy {
         token_id: U256,
         days_to_resolution: u32,
         edge_shortfall: Decimal,
+        asset: Option<&CryptoAsset>,
+        market_type: CryptoMarketType,
+        event_subtype: Option<CryptoEventSubtype>,
     ) -> u32 {
         let mut confirmations = self.edge_decay_confirmations.lock().unwrap();
         let now = Instant::now();
         let window = Duration::from_secs(
-            self.effective_edge_decay_confirmation_window_secs(days_to_resolution, edge_shortfall),
+            self.effective_edge_decay_confirmation_window_secs_for_context(
+                days_to_resolution,
+                edge_shortfall,
+                asset,
+                market_type,
+                event_subtype,
+            ),
         );
         let count = {
             let state = confirmations
@@ -1432,18 +2252,7 @@ impl CryptoAlphaStrategy {
             state.count
         };
         if confirmations.len() > 512 {
-            let max_window_secs = self
-                .config
-                .edge_decay_confirmation_window_secs
-                .max(self.effective_edge_decay_confirmation_window_secs(
-                    self.config.medium_horizon_max_days,
-                    Decimal::ZERO,
-                ))
-                .max(self.effective_edge_decay_confirmation_window_secs(
-                    self.config.short_horizon_max_days,
-                    Decimal::ZERO,
-                ));
-            let max_window = Duration::from_secs(max_window_secs);
+            let max_window = Duration::from_secs(self.max_edge_decay_confirmation_window_secs());
             confirmations
                 .retain(|_, existing| now.duration_since(existing.last_seen) <= max_window);
         }
@@ -1759,13 +2568,16 @@ impl CryptoAlphaStrategy {
 
     fn size_entry(
         &self,
-        asset: &CryptoAsset,
+        asset: &'static CryptoAsset,
         direction: CryptoDirectionBucket,
+        gate_context: Option<&GateRejectContext>,
         token_id: U256,
         ask_price: Decimal,
         edge: Decimal,
         days_to_resolution: u32,
         event_size_multiplier: Decimal,
+        effective_min_entry_size_retention_ratio: Decimal,
+        effective_min_entry_depth_ratio: Decimal,
         current_asset_exposure: Decimal,
         current_asset_direction_exposure: Decimal,
     ) -> Option<Decimal> {
@@ -1785,6 +2597,23 @@ impl CryptoAlphaStrategy {
             .min(remaining_asset_direction);
         if effective_max <= Decimal::ZERO {
             Self::record_rejection(asset, "asset_exposure_cap");
+            if let Some(gate_context) = gate_context {
+                self.record_gate_reject_decision(
+                    asset,
+                    Some(direction),
+                    gate_context.market_type,
+                    &gate_context.question,
+                    gate_context.days_to_resolution,
+                    gate_context.modeled_prob,
+                    gate_context.is_yes,
+                    gate_context.condition_id,
+                    "asset_exposure_cap",
+                    gate_context.event_context_source.clone(),
+                    gate_context.event_title.clone(),
+                    gate_context.event_category.clone(),
+                    gate_context.event_subtype.clone(),
+                );
+            }
             tracing::debug!(
                 asset = asset.name,
                 direction = ?direction,
@@ -1810,7 +2639,15 @@ impl CryptoAlphaStrategy {
             * event_size_multiplier
             * horizon_size_multiplier
             * effective_max;
-        let size = kelly_size.min(effective_max).min(available);
+        let adaptive_gate_scale_multiplier = self.adaptive_gate_scale_size_multiplier(
+            asset,
+            gate_context.and_then(|context| {
+                Self::parse_event_subtype_label(context.event_subtype.as_deref())
+            }),
+        );
+        let size = (kelly_size * adaptive_gate_scale_multiplier)
+            .min(effective_max)
+            .min(available);
 
         let size = if size > Decimal::ZERO && ask_price > Decimal::ZERO && kelly_raw >= dec!(0.04) {
             let min_cost_size = (Decimal::ONE / ask_price).ceil();
@@ -1822,10 +2659,238 @@ impl CryptoAlphaStrategy {
 
         if size <= Decimal::ZERO || (ask_price > Decimal::ZERO && size * ask_price < Decimal::ONE) {
             Self::record_rejection(asset, "min_order_or_budget");
+            if let Some(gate_context) = gate_context {
+                self.record_gate_reject_decision(
+                    asset,
+                    Some(direction),
+                    gate_context.market_type,
+                    &gate_context.question,
+                    gate_context.days_to_resolution,
+                    gate_context.modeled_prob,
+                    gate_context.is_yes,
+                    gate_context.condition_id,
+                    "min_order_or_budget",
+                    gate_context.event_context_source.clone(),
+                    gate_context.event_title.clone(),
+                    gate_context.event_category.clone(),
+                    gate_context.event_subtype.clone(),
+                );
+            }
+            return None;
+        }
+
+        let book = (self.get_orderbook)(token_id)?;
+        let depth = book.available_depth(TradeSide::Buy, ask_price);
+        let unconstrained_size = size;
+        let size_retention_limited_size =
+            if effective_min_entry_size_retention_ratio > Decimal::ZERO {
+                (depth / effective_min_entry_size_retention_ratio).round_dp(2)
+            } else {
+                size
+            };
+        let depth_limited_size = if effective_min_entry_depth_ratio > Decimal::ZERO {
+            (depth / effective_min_entry_depth_ratio).round_dp(2)
+        } else {
+            size
+        };
+        let size = size
+            .min(size_retention_limited_size)
+            .min(depth_limited_size);
+
+        if let Some(gate_context) = gate_context
+            && size < unconstrained_size
+        {
+            let scale_reason = if size == size_retention_limited_size
+                && size_retention_limited_size <= depth_limited_size
+            {
+                Some("scaled_for_size_retention")
+            } else if size == depth_limited_size && depth_limited_size < size_retention_limited_size
+            {
+                Some("scaled_for_depth_buffer")
+            } else {
+                None
+            };
+            if let Some(scale_reason) = scale_reason {
+                self.record_gate_scale_decision(
+                    asset,
+                    Some(direction),
+                    gate_context.market_type,
+                    &gate_context.question,
+                    gate_context.days_to_resolution,
+                    gate_context.modeled_prob,
+                    gate_context.is_yes,
+                    gate_context.condition_id,
+                    scale_reason,
+                    gate_context.event_context_source.clone(),
+                    gate_context.event_title.clone(),
+                    gate_context.event_category.clone(),
+                    gate_context.event_subtype.clone(),
+                );
+            }
+        }
+
+        if size <= Decimal::ZERO || (ask_price > Decimal::ZERO && size * ask_price < Decimal::ONE) {
+            Self::record_rejection(asset, "min_order_or_budget");
+            if let Some(gate_context) = gate_context {
+                self.record_gate_reject_decision(
+                    asset,
+                    Some(direction),
+                    gate_context.market_type,
+                    &gate_context.question,
+                    gate_context.days_to_resolution,
+                    gate_context.modeled_prob,
+                    gate_context.is_yes,
+                    gate_context.condition_id,
+                    "min_order_or_budget",
+                    gate_context.event_context_source.clone(),
+                    gate_context.event_title.clone(),
+                    gate_context.event_category.clone(),
+                    gate_context.event_subtype.clone(),
+                );
+            }
+            return None;
+        }
+
+        let depth_ratio = if size > Decimal::ZERO {
+            depth / size
+        } else {
+            Decimal::ZERO
+        };
+        let size_retention_ratio = if size > Decimal::ZERO {
+            depth / size
+        } else {
+            Decimal::ZERO
+        };
+        if size_retention_ratio < effective_min_entry_size_retention_ratio {
+            Self::record_rejection(asset, "insufficient_size_retention");
+            if let Some(gate_context) = gate_context {
+                self.record_gate_reject_decision(
+                    asset,
+                    Some(direction),
+                    gate_context.market_type,
+                    &gate_context.question,
+                    gate_context.days_to_resolution,
+                    gate_context.modeled_prob,
+                    gate_context.is_yes,
+                    gate_context.condition_id,
+                    "insufficient_size_retention",
+                    gate_context.event_context_source.clone(),
+                    gate_context.event_title.clone(),
+                    gate_context.event_category.clone(),
+                    gate_context.event_subtype.clone(),
+                );
+            }
+            tracing::debug!(
+                asset = asset.name,
+                direction = ?direction,
+                token_id = %token_id,
+                ask_price = %ask_price,
+                size = %size,
+                depth = %depth,
+                size_retention_ratio = %size_retention_ratio,
+                min_size_retention_ratio = %effective_min_entry_size_retention_ratio,
+                "[CryptoAlpha] Rejecting: insufficient size retention buffer"
+            );
+            return None;
+        }
+        if depth_ratio < effective_min_entry_depth_ratio {
+            Self::record_rejection(asset, "insufficient_depth_buffer");
+            if let Some(gate_context) = gate_context {
+                self.record_gate_reject_decision(
+                    asset,
+                    Some(direction),
+                    gate_context.market_type,
+                    &gate_context.question,
+                    gate_context.days_to_resolution,
+                    gate_context.modeled_prob,
+                    gate_context.is_yes,
+                    gate_context.condition_id,
+                    "insufficient_depth_buffer",
+                    gate_context.event_context_source.clone(),
+                    gate_context.event_title.clone(),
+                    gate_context.event_category.clone(),
+                    gate_context.event_subtype.clone(),
+                );
+            }
+            tracing::debug!(
+                asset = asset.name,
+                direction = ?direction,
+                token_id = %token_id,
+                ask_price = %ask_price,
+                size = %size,
+                depth = %depth,
+                depth_ratio = %depth_ratio,
+                min_depth_ratio = %effective_min_entry_depth_ratio,
+                "[CryptoAlpha] Rejecting: entry depth buffer too thin"
+            );
             return None;
         }
 
         Some(size)
+    }
+
+    fn adaptive_gate_scale_size_multiplier(
+        &self,
+        asset: &'static CryptoAsset,
+        event_subtype: Option<CryptoEventSubtype>,
+    ) -> Decimal {
+        let lookback = self.config.gate_scale_feedback_lookback;
+        let trigger_count = self.config.gate_scale_feedback_trigger_count;
+        let max_steps = self.config.gate_scale_feedback_max_steps;
+        let step_multiplier = self
+            .config
+            .gate_scale_feedback_step_multiplier
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO);
+
+        if lookback == 0 || trigger_count == 0 || max_steps == 0 || step_multiplier >= Decimal::ONE
+        {
+            return Decimal::ONE;
+        }
+
+        let target_asset_class = Self::asset_class_selector(asset);
+        let target_subtype = Self::event_subtype_selector(event_subtype);
+        let matching_count = recent_crypto_candidate_decisions()
+            .into_iter()
+            .take(lookback)
+            .filter(|decision| {
+                if decision.action != "gate_scale" {
+                    return false;
+                }
+                if decision.reason != "scaled_for_depth_buffer"
+                    && decision.reason != "scaled_for_size_retention"
+                {
+                    return false;
+                }
+
+                let decision_asset = CRYPTO_ASSETS
+                    .iter()
+                    .find(|candidate| candidate.name.eq_ignore_ascii_case(&decision.asset));
+                let Some(decision_asset) = decision_asset else {
+                    return false;
+                };
+                if Self::asset_class_selector(decision_asset) != target_asset_class {
+                    return false;
+                }
+
+                Self::event_subtype_selector(Self::parse_event_subtype_label(
+                    decision.event_subtype.as_deref(),
+                )) == target_subtype
+            })
+            .count() as u32;
+
+        if matching_count < trigger_count {
+            return Decimal::ONE;
+        }
+
+        let mut steps = 1 + ((matching_count - trigger_count) / trigger_count);
+        steps = steps.min(max_steps);
+
+        let mut multiplier = Decimal::ONE;
+        for _ in 0..steps {
+            multiplier *= step_multiplier;
+        }
+        multiplier
     }
 
     fn entry_depth_buffer(&self, opp: &TradingOpportunity) -> Decimal {
@@ -1846,17 +2911,214 @@ impl CryptoAlphaStrategy {
         depth / *size
     }
 
+    fn entry_executable_profit_efficiency(&self, opp: &TradingOpportunity) -> Decimal {
+        let ExecutionPlan::DirectionalBuy {
+            token_id,
+            side,
+            price,
+            size,
+            ..
+        } = &opp.execution_plan;
+        let Some(book) = (self.get_orderbook)(*token_id) else {
+            return Decimal::ZERO;
+        };
+        if *side != TradeSide::Buy || *size <= Decimal::ZERO || *price <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+
+        let Some(walk) = book.walk_book(*side, *size) else {
+            return Decimal::ZERO;
+        };
+        if walk.worst_price > *price {
+            return Decimal::ZERO;
+        }
+
+        let executable_size = walk.filled.min(*size).round_dp(2);
+        if executable_size <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+
+        let fill_ratio = executable_size / *size;
+        let slippage_cost = (walk.worst_price - *price).max(Decimal::ZERO) * executable_size;
+        let executable_profit = (opp.estimated_profit * fill_ratio) - slippage_cost;
+        let executable_cost = walk.worst_price * executable_size;
+
+        if executable_profit > Decimal::ZERO && executable_cost > Decimal::ZERO {
+            executable_profit / executable_cost
+        } else {
+            Decimal::ZERO
+        }
+    }
+
+    fn entry_executable_profit_retention(&self, opp: &TradingOpportunity) -> Decimal {
+        let ExecutionPlan::DirectionalBuy {
+            token_id,
+            side,
+            price,
+            size,
+            ..
+        } = &opp.execution_plan;
+        let Some(book) = (self.get_orderbook)(*token_id) else {
+            return Decimal::ZERO;
+        };
+        if *side != TradeSide::Buy
+            || *size <= Decimal::ZERO
+            || *price <= Decimal::ZERO
+            || opp.estimated_profit <= Decimal::ZERO
+        {
+            return Decimal::ZERO;
+        }
+
+        let Some(walk) = book.walk_book(*side, *size) else {
+            return Decimal::ZERO;
+        };
+        if walk.worst_price > *price {
+            return Decimal::ZERO;
+        }
+
+        let executable_size = walk.filled.min(*size).round_dp(2);
+        if executable_size <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+
+        let fill_ratio = executable_size / *size;
+        let slippage_cost = (walk.worst_price - *price).max(Decimal::ZERO) * executable_size;
+        let executable_profit = (opp.estimated_profit * fill_ratio) - slippage_cost;
+        if executable_profit <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+
+        (executable_profit / opp.estimated_profit)
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO)
+    }
+
+    fn entry_executable_size_retention(&self, opp: &TradingOpportunity) -> Decimal {
+        let ExecutionPlan::DirectionalBuy {
+            token_id,
+            side,
+            price,
+            size,
+            ..
+        } = &opp.execution_plan;
+        let Some(book) = (self.get_orderbook)(*token_id) else {
+            return Decimal::ZERO;
+        };
+        if *side != TradeSide::Buy || *size <= Decimal::ZERO || *price <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+
+        let Some(walk) = book.walk_book(*side, *size) else {
+            return Decimal::ZERO;
+        };
+        if walk.worst_price > *price {
+            return Decimal::ZERO;
+        }
+
+        (walk.filled.min(*size) / *size)
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO)
+    }
+
+    fn entry_executable_slippage_bps(&self, opp: &TradingOpportunity) -> Decimal {
+        let ExecutionPlan::DirectionalBuy {
+            token_id,
+            side,
+            price,
+            size,
+            ..
+        } = &opp.execution_plan;
+        let Some(book) = (self.get_orderbook)(*token_id) else {
+            return Decimal::MAX;
+        };
+        if *side != TradeSide::Buy || *size <= Decimal::ZERO || *price <= Decimal::ZERO {
+            return Decimal::MAX;
+        }
+        let Some(best_ask) = book.best_ask().map(|level| level.price) else {
+            return Decimal::MAX;
+        };
+
+        let Some(walk) = book.walk_book(*side, *size) else {
+            return Decimal::MAX;
+        };
+        if walk.filled <= Decimal::ZERO || walk.worst_price > *price {
+            return Decimal::MAX;
+        }
+
+        (((walk.avg_price - best_ask).max(Decimal::ZERO)) / best_ask) * dec!(10000)
+    }
+
+    fn entry_effective_max_slippage_bps(&self, opp: &TradingOpportunity) -> Decimal {
+        (Decimal::from(self.base_max_slippage_bps)
+            * opp
+                .max_slippage_bps_multiplier
+                .unwrap_or(Decimal::ONE)
+                .max(Decimal::ZERO))
+        .round_dp(0)
+        .max(Decimal::ZERO)
+    }
+
+    fn entry_executable_slippage_quality(&self, opp: &TradingOpportunity) -> Decimal {
+        let effective_max_slippage_bps = self.entry_effective_max_slippage_bps(opp);
+        if effective_max_slippage_bps <= Decimal::ZERO {
+            return if self.entry_executable_slippage_bps(opp) <= Decimal::ZERO {
+                Decimal::ONE
+            } else {
+                Decimal::ZERO
+            };
+        }
+
+        (Decimal::ONE - (self.entry_executable_slippage_bps(opp) / effective_max_slippage_bps))
+            .min(Decimal::ONE)
+            .max(Decimal::ZERO)
+    }
+
+    fn entry_execution_quality_score(&self, opp: &TradingOpportunity) -> Decimal {
+        let profit_weight = self.execution_quality_profit_weight.max(Decimal::ZERO);
+        let size_weight = self.execution_quality_size_weight.max(Decimal::ZERO);
+        let slippage_weight = self.execution_quality_slippage_weight.max(Decimal::ZERO);
+        let weight_sum = profit_weight + size_weight + slippage_weight;
+        if weight_sum <= Decimal::ZERO {
+            return Decimal::ONE;
+        }
+
+        let normalized_profit_weight = (profit_weight / weight_sum).to_f64().unwrap_or(0.0);
+        let normalized_size_weight = (size_weight / weight_sum).to_f64().unwrap_or(0.0);
+        let normalized_slippage_weight = (slippage_weight / weight_sum).to_f64().unwrap_or(0.0);
+        let profit_value = self
+            .entry_executable_profit_retention(opp)
+            .to_f64()
+            .unwrap_or(0.0);
+        let size_value = self
+            .entry_executable_size_retention(opp)
+            .to_f64()
+            .unwrap_or(0.0);
+        let slippage_value = self
+            .entry_executable_slippage_quality(opp)
+            .to_f64()
+            .unwrap_or(0.0);
+
+        Decimal::from_f64_retain(
+            profit_value.powf(normalized_profit_weight)
+                * size_value.powf(normalized_size_weight)
+                * slippage_value.powf(normalized_slippage_weight),
+        )
+        .unwrap_or(Decimal::ZERO)
+        .min(Decimal::ONE)
+        .max(Decimal::ZERO)
+    }
+
     fn keep_better_entry(
         &self,
-        best_by_asset: &mut HashMap<(&'static str, CryptoDirectionBucket), TradingOpportunity>,
+        best_by_asset: &mut HashMap<(&'static str, CryptoDirectionBucket), CryptoEntryCandidate>,
         asset: &'static CryptoAsset,
         direction: CryptoDirectionBucket,
-        candidate: TradingOpportunity,
+        candidate: CryptoEntryCandidate,
     ) {
-        fn profit_efficiency(opp: &TradingOpportunity) -> Decimal {
-            let cost = opp.execution_plan.estimated_cost();
+        fn profit_efficiency(candidate: &CryptoEntryCandidate) -> Decimal {
+            let cost = candidate.opportunity.execution_plan.estimated_cost();
             if cost > Decimal::ZERO {
-                opp.estimated_profit / cost
+                candidate.opportunity.estimated_profit / cost
             } else {
                 Decimal::ZERO
             }
@@ -1864,41 +3126,494 @@ impl CryptoAlphaStrategy {
 
         match best_by_asset.get_mut(&(asset.binance_symbol, direction)) {
             Some(existing) => {
-                let candidate_cost = candidate.execution_plan.estimated_cost();
-                let existing_cost = existing.execution_plan.estimated_cost();
+                let candidate_cost = candidate.opportunity.execution_plan.estimated_cost();
+                let existing_cost = existing.opportunity.execution_plan.estimated_cost();
                 let candidate_efficiency = profit_efficiency(&candidate);
                 let existing_efficiency = profit_efficiency(existing);
-                let candidate_depth_buffer = self.entry_depth_buffer(&candidate);
-                let existing_depth_buffer = self.entry_depth_buffer(existing);
-                let candidate_better = candidate.estimated_profit > existing.estimated_profit
-                    || (candidate.estimated_profit == existing.estimated_profit
-                        && candidate_efficiency > existing_efficiency)
-                    || (candidate.estimated_profit == existing.estimated_profit
-                        && candidate_efficiency == existing_efficiency
-                        && candidate_depth_buffer > existing_depth_buffer)
-                    || (candidate.estimated_profit == existing.estimated_profit
-                        && candidate_efficiency == existing_efficiency
-                        && candidate_depth_buffer == existing_depth_buffer
-                        && candidate_cost < existing_cost)
-                    || (candidate.estimated_profit == existing.estimated_profit
-                        && candidate_efficiency == existing_efficiency
-                        && candidate_depth_buffer == existing_depth_buffer
-                        && candidate_cost == existing_cost
-                        && candidate.spread > existing.spread)
-                    || (candidate.estimated_profit == existing.estimated_profit
-                        && candidate_efficiency == existing_efficiency
-                        && candidate_depth_buffer == existing_depth_buffer
-                        && candidate_cost == existing_cost
-                        && candidate.spread == existing.spread
-                        && candidate.size > existing.size);
-                if candidate_better {
+                let candidate_exec_retention =
+                    self.entry_executable_profit_retention(&candidate.opportunity);
+                let existing_exec_retention =
+                    self.entry_executable_profit_retention(&existing.opportunity);
+                let candidate_exec_size_retention =
+                    self.entry_executable_size_retention(&candidate.opportunity);
+                let existing_exec_size_retention =
+                    self.entry_executable_size_retention(&existing.opportunity);
+                let candidate_exec_quality_score =
+                    self.entry_execution_quality_score(&candidate.opportunity);
+                let existing_exec_quality_score =
+                    self.entry_execution_quality_score(&existing.opportunity);
+                let candidate_exec_slippage_bps =
+                    self.entry_executable_slippage_bps(&candidate.opportunity);
+                let existing_exec_slippage_bps =
+                    self.entry_executable_slippage_bps(&existing.opportunity);
+                let candidate_exec_efficiency =
+                    self.entry_executable_profit_efficiency(&candidate.opportunity);
+                let existing_exec_efficiency =
+                    self.entry_executable_profit_efficiency(&existing.opportunity);
+                let candidate_depth_buffer = self.entry_depth_buffer(&candidate.opportunity);
+                let existing_depth_buffer = self.entry_depth_buffer(&existing.opportunity);
+                let better_reason = |lhs_exec_quality_score: Decimal,
+                                     rhs_exec_quality_score: Decimal,
+                                     lhs_exec_retention: Decimal,
+                                     rhs_exec_retention: Decimal,
+                                     lhs_exec_size_retention: Decimal,
+                                     rhs_exec_size_retention: Decimal,
+                                     lhs_exec_slippage_bps: Decimal,
+                                     rhs_exec_slippage_bps: Decimal,
+                                     lhs_depth_buffer: Decimal,
+                                     rhs_depth_buffer: Decimal,
+                                     lhs_exec_efficiency: Decimal,
+                                     rhs_exec_efficiency: Decimal,
+                                     lhs_estimated_profit: Decimal,
+                                     rhs_estimated_profit: Decimal,
+                                     lhs_efficiency: Decimal,
+                                     rhs_efficiency: Decimal,
+                                     lhs_cost: Decimal,
+                                     rhs_cost: Decimal,
+                                     lhs_spread: Decimal,
+                                     rhs_spread: Decimal,
+                                     lhs_size: Decimal,
+                                     rhs_size: Decimal| {
+                    if lhs_exec_quality_score > rhs_exec_quality_score {
+                        Some("execution_quality")
+                    } else if lhs_exec_quality_score == rhs_exec_quality_score
+                        && lhs_exec_retention > rhs_exec_retention
+                    {
+                        Some("profit_retention")
+                    } else if lhs_exec_quality_score == rhs_exec_quality_score
+                        && lhs_exec_retention == rhs_exec_retention
+                        && lhs_exec_size_retention > rhs_exec_size_retention
+                    {
+                        Some("size_retention")
+                    } else if lhs_exec_quality_score == rhs_exec_quality_score
+                        && lhs_exec_retention == rhs_exec_retention
+                        && lhs_exec_size_retention == rhs_exec_size_retention
+                        && lhs_exec_slippage_bps < rhs_exec_slippage_bps
+                    {
+                        Some("slippage")
+                    } else if lhs_exec_quality_score == rhs_exec_quality_score
+                        && lhs_exec_retention == rhs_exec_retention
+                        && lhs_exec_size_retention == rhs_exec_size_retention
+                        && lhs_exec_slippage_bps == rhs_exec_slippage_bps
+                        && lhs_depth_buffer > rhs_depth_buffer
+                    {
+                        Some("depth_buffer")
+                    } else if lhs_exec_quality_score == rhs_exec_quality_score
+                        && lhs_exec_retention == rhs_exec_retention
+                        && lhs_exec_size_retention == rhs_exec_size_retention
+                        && lhs_exec_slippage_bps == rhs_exec_slippage_bps
+                        && lhs_depth_buffer == rhs_depth_buffer
+                        && lhs_exec_efficiency > rhs_exec_efficiency
+                    {
+                        Some("executable_efficiency")
+                    } else if lhs_exec_quality_score == rhs_exec_quality_score
+                        && lhs_exec_retention == rhs_exec_retention
+                        && lhs_exec_size_retention == rhs_exec_size_retention
+                        && lhs_exec_slippage_bps == rhs_exec_slippage_bps
+                        && lhs_depth_buffer == rhs_depth_buffer
+                        && lhs_exec_efficiency == rhs_exec_efficiency
+                        && lhs_estimated_profit > rhs_estimated_profit
+                    {
+                        Some("estimated_profit")
+                    } else if lhs_exec_quality_score == rhs_exec_quality_score
+                        && lhs_exec_retention == rhs_exec_retention
+                        && lhs_exec_size_retention == rhs_exec_size_retention
+                        && lhs_exec_slippage_bps == rhs_exec_slippage_bps
+                        && lhs_depth_buffer == rhs_depth_buffer
+                        && lhs_exec_efficiency == rhs_exec_efficiency
+                        && lhs_estimated_profit == rhs_estimated_profit
+                        && lhs_efficiency > rhs_efficiency
+                    {
+                        Some("static_efficiency")
+                    } else if lhs_exec_quality_score == rhs_exec_quality_score
+                        && lhs_exec_retention == rhs_exec_retention
+                        && lhs_exec_size_retention == rhs_exec_size_retention
+                        && lhs_exec_slippage_bps == rhs_exec_slippage_bps
+                        && lhs_depth_buffer == rhs_depth_buffer
+                        && lhs_exec_efficiency == rhs_exec_efficiency
+                        && lhs_estimated_profit == rhs_estimated_profit
+                        && lhs_efficiency == rhs_efficiency
+                        && lhs_cost < rhs_cost
+                    {
+                        Some("cost")
+                    } else if lhs_exec_quality_score == rhs_exec_quality_score
+                        && lhs_exec_retention == rhs_exec_retention
+                        && lhs_exec_size_retention == rhs_exec_size_retention
+                        && lhs_exec_slippage_bps == rhs_exec_slippage_bps
+                        && lhs_depth_buffer == rhs_depth_buffer
+                        && lhs_exec_efficiency == rhs_exec_efficiency
+                        && lhs_estimated_profit == rhs_estimated_profit
+                        && lhs_efficiency == rhs_efficiency
+                        && lhs_cost == rhs_cost
+                        && lhs_spread > rhs_spread
+                    {
+                        Some("spread")
+                    } else if lhs_exec_quality_score == rhs_exec_quality_score
+                        && lhs_exec_retention == rhs_exec_retention
+                        && lhs_exec_size_retention == rhs_exec_size_retention
+                        && lhs_exec_slippage_bps == rhs_exec_slippage_bps
+                        && lhs_depth_buffer == rhs_depth_buffer
+                        && lhs_exec_efficiency == rhs_exec_efficiency
+                        && lhs_estimated_profit == rhs_estimated_profit
+                        && lhs_efficiency == rhs_efficiency
+                        && lhs_cost == rhs_cost
+                        && lhs_spread == rhs_spread
+                        && lhs_size > rhs_size
+                    {
+                        Some("size")
+                    } else {
+                        None
+                    }
+                };
+                let candidate_better_reason = better_reason(
+                    candidate_exec_quality_score,
+                    existing_exec_quality_score,
+                    candidate_exec_retention,
+                    existing_exec_retention,
+                    candidate_exec_size_retention,
+                    existing_exec_size_retention,
+                    candidate_exec_slippage_bps,
+                    existing_exec_slippage_bps,
+                    candidate_depth_buffer,
+                    existing_depth_buffer,
+                    candidate_exec_efficiency,
+                    existing_exec_efficiency,
+                    candidate.opportunity.estimated_profit,
+                    existing.opportunity.estimated_profit,
+                    candidate_efficiency,
+                    existing_efficiency,
+                    candidate_cost,
+                    existing_cost,
+                    candidate.opportunity.spread,
+                    existing.opportunity.spread,
+                    candidate.opportunity.size,
+                    existing.opportunity.size,
+                );
+                if let Some(candidate_better_reason) = candidate_better_reason {
+                    record_crypto_candidate_decision(CryptoCandidateDecision {
+                        recorded_at: Utc::now(),
+                        asset: asset.name.to_string(),
+                        direction: format!("{direction:?}"),
+                        action: "replace".into(),
+                        reason: candidate_better_reason.into(),
+                        event_context_source: candidate.event_context_source.clone(),
+                        event_title: candidate.event_title.clone(),
+                        event_category: candidate.event_category.clone(),
+                        event_subtype: candidate.event_subtype.clone(),
+                        selected_question: candidate.opportunity.question.clone(),
+                        selected_condition_id: candidate.opportunity.condition_id,
+                        selected_market_type: candidate.market_type.as_str().to_string(),
+                        selected_modeled_prob: candidate.modeled_prob,
+                        selected_is_yes: candidate.is_yes,
+                        selected_days_to_resolution: candidate.days_to_resolution,
+                        replaced_question: Some(existing.opportunity.question.clone()),
+                        replaced_condition_id: Some(existing.opportunity.condition_id),
+                        replaced_market_type: Some(existing.market_type.as_str().to_string()),
+                        replaced_modeled_prob: Some(existing.modeled_prob),
+                        replaced_is_yes: Some(existing.is_yes),
+                        replaced_days_to_resolution: Some(existing.days_to_resolution),
+                        selected_estimated_profit: candidate.opportunity.estimated_profit,
+                        replaced_estimated_profit: Some(existing.opportunity.estimated_profit),
+                        selected_efficiency: candidate_efficiency,
+                        replaced_efficiency: Some(existing_efficiency),
+                        selected_executable_profit_retention: candidate_exec_retention,
+                        replaced_executable_profit_retention: Some(existing_exec_retention),
+                        selected_executable_size_retention: candidate_exec_size_retention,
+                        replaced_executable_size_retention: Some(existing_exec_size_retention),
+                        selected_executable_quality_score: candidate_exec_quality_score,
+                        replaced_executable_quality_score: Some(existing_exec_quality_score),
+                        selected_executable_efficiency: candidate_exec_efficiency,
+                        replaced_executable_efficiency: Some(existing_exec_efficiency),
+                        selected_depth_buffer: candidate_depth_buffer,
+                        replaced_depth_buffer: Some(existing_depth_buffer),
+                    });
+                    tracing::debug!(
+                        asset = asset.name,
+                        direction = ?direction,
+                        existing_question = %existing.opportunity.question,
+                        candidate_question = %candidate.opportunity.question,
+                        existing_profit = %existing.opportunity.estimated_profit,
+                        candidate_profit = %candidate.opportunity.estimated_profit,
+                        existing_exec_retention = %existing_exec_retention,
+                        candidate_exec_retention = %candidate_exec_retention,
+                        existing_exec_size_retention = %existing_exec_size_retention,
+                        candidate_exec_size_retention = %candidate_exec_size_retention,
+                        existing_exec_quality_score = %existing_exec_quality_score,
+                        candidate_exec_quality_score = %candidate_exec_quality_score,
+                        existing_exec_slippage_bps = %existing_exec_slippage_bps,
+                        candidate_exec_slippage_bps = %candidate_exec_slippage_bps,
+                        replace_reason = candidate_better_reason,
+                        existing_efficiency = %existing_efficiency,
+                        candidate_efficiency = %candidate_efficiency,
+                        existing_exec_efficiency = %existing_exec_efficiency,
+                        candidate_exec_efficiency = %candidate_exec_efficiency,
+                        existing_depth_buffer = %existing_depth_buffer,
+                        candidate_depth_buffer = %candidate_depth_buffer,
+                        "[CryptoAlpha] replacing same-asset candidate after execution-quality comparison"
+                    );
                     *existing = candidate;
+                } else if let Some(existing_better_reason) = better_reason(
+                    existing_exec_quality_score,
+                    candidate_exec_quality_score,
+                    existing_exec_retention,
+                    candidate_exec_retention,
+                    existing_exec_size_retention,
+                    candidate_exec_size_retention,
+                    existing_exec_slippage_bps,
+                    candidate_exec_slippage_bps,
+                    existing_depth_buffer,
+                    candidate_depth_buffer,
+                    existing_exec_efficiency,
+                    candidate_exec_efficiency,
+                    existing.opportunity.estimated_profit,
+                    candidate.opportunity.estimated_profit,
+                    existing_efficiency,
+                    candidate_efficiency,
+                    existing_cost,
+                    candidate_cost,
+                    existing.opportunity.spread,
+                    candidate.opportunity.spread,
+                    existing.opportunity.size,
+                    candidate.opportunity.size,
+                ) {
+                    record_crypto_candidate_decision(CryptoCandidateDecision {
+                        recorded_at: Utc::now(),
+                        asset: asset.name.to_string(),
+                        direction: format!("{direction:?}"),
+                        action: "reject".into(),
+                        reason: existing_better_reason.into(),
+                        event_context_source: existing.event_context_source.clone(),
+                        event_title: existing.event_title.clone(),
+                        event_category: existing.event_category.clone(),
+                        event_subtype: existing.event_subtype.clone(),
+                        selected_question: existing.opportunity.question.clone(),
+                        selected_condition_id: existing.opportunity.condition_id,
+                        selected_market_type: existing.market_type.as_str().to_string(),
+                        selected_modeled_prob: existing.modeled_prob,
+                        selected_is_yes: existing.is_yes,
+                        selected_days_to_resolution: existing.days_to_resolution,
+                        replaced_question: Some(candidate.opportunity.question.clone()),
+                        replaced_condition_id: Some(candidate.opportunity.condition_id),
+                        replaced_market_type: Some(candidate.market_type.as_str().to_string()),
+                        replaced_modeled_prob: Some(candidate.modeled_prob),
+                        replaced_is_yes: Some(candidate.is_yes),
+                        replaced_days_to_resolution: Some(candidate.days_to_resolution),
+                        selected_estimated_profit: existing.opportunity.estimated_profit,
+                        replaced_estimated_profit: Some(candidate.opportunity.estimated_profit),
+                        selected_efficiency: existing_efficiency,
+                        replaced_efficiency: Some(candidate_efficiency),
+                        selected_executable_profit_retention: existing_exec_retention,
+                        replaced_executable_profit_retention: Some(candidate_exec_retention),
+                        selected_executable_size_retention: existing_exec_size_retention,
+                        replaced_executable_size_retention: Some(candidate_exec_size_retention),
+                        selected_executable_quality_score: existing_exec_quality_score,
+                        replaced_executable_quality_score: Some(candidate_exec_quality_score),
+                        selected_executable_efficiency: existing_exec_efficiency,
+                        replaced_executable_efficiency: Some(candidate_exec_efficiency),
+                        selected_depth_buffer: existing_depth_buffer,
+                        replaced_depth_buffer: Some(candidate_depth_buffer),
+                    });
+                    tracing::debug!(
+                        asset = asset.name,
+                        direction = ?direction,
+                        kept_question = %existing.opportunity.question,
+                        rejected_question = %candidate.opportunity.question,
+                        reject_reason = existing_better_reason,
+                        kept_exec_quality_score = %existing_exec_quality_score,
+                        rejected_exec_quality_score = %candidate_exec_quality_score,
+                        kept_exec_retention = %existing_exec_retention,
+                        rejected_exec_retention = %candidate_exec_retention,
+                        kept_exec_size_retention = %existing_exec_size_retention,
+                        rejected_exec_size_retention = %candidate_exec_size_retention,
+                        kept_exec_slippage_bps = %existing_exec_slippage_bps,
+                        rejected_exec_slippage_bps = %candidate_exec_slippage_bps,
+                        "[CryptoAlpha] rejecting same-asset candidate after execution-quality comparison"
+                    );
                 }
             }
             None => {
+                let executable_efficiency =
+                    self.entry_executable_profit_efficiency(&candidate.opportunity);
+                let depth_buffer = self.entry_depth_buffer(&candidate.opportunity);
+                record_crypto_candidate_decision(CryptoCandidateDecision {
+                    recorded_at: Utc::now(),
+                    asset: asset.name.to_string(),
+                    direction: format!("{direction:?}"),
+                    action: "seed".into(),
+                    reason: "seed".into(),
+                    event_context_source: candidate.event_context_source.clone(),
+                    event_title: candidate.event_title.clone(),
+                    event_category: candidate.event_category.clone(),
+                    event_subtype: candidate.event_subtype.clone(),
+                    selected_question: candidate.opportunity.question.clone(),
+                    selected_condition_id: candidate.opportunity.condition_id,
+                    selected_market_type: candidate.market_type.as_str().to_string(),
+                    selected_modeled_prob: candidate.modeled_prob,
+                    selected_is_yes: candidate.is_yes,
+                    selected_days_to_resolution: candidate.days_to_resolution,
+                    replaced_question: None,
+                    replaced_condition_id: None,
+                    replaced_market_type: None,
+                    replaced_modeled_prob: None,
+                    replaced_is_yes: None,
+                    replaced_days_to_resolution: None,
+                    selected_estimated_profit: candidate.opportunity.estimated_profit,
+                    replaced_estimated_profit: None,
+                    selected_efficiency: profit_efficiency(&candidate),
+                    replaced_efficiency: None,
+                    selected_executable_profit_retention: self
+                        .entry_executable_profit_retention(&candidate.opportunity),
+                    replaced_executable_profit_retention: None,
+                    selected_executable_size_retention: self
+                        .entry_executable_size_retention(&candidate.opportunity),
+                    replaced_executable_size_retention: None,
+                    selected_executable_quality_score: self
+                        .entry_execution_quality_score(&candidate.opportunity),
+                    replaced_executable_quality_score: None,
+                    selected_executable_efficiency: executable_efficiency,
+                    replaced_executable_efficiency: None,
+                    selected_depth_buffer: depth_buffer,
+                    replaced_depth_buffer: None,
+                });
+                tracing::debug!(
+                    asset = asset.name,
+                    direction = ?direction,
+                    question = %candidate.opportunity.question,
+                    estimated_profit = %candidate.opportunity.estimated_profit,
+                    executable_quality_score = %self.entry_execution_quality_score(&candidate.opportunity),
+                    executable_efficiency = %executable_efficiency,
+                    depth_buffer = %depth_buffer,
+                    "[CryptoAlpha] seeding same-asset candidate bucket"
+                );
                 best_by_asset.insert((asset.binance_symbol, direction), candidate);
             }
         }
+    }
+
+    fn record_gate_reject_decision(
+        &self,
+        asset: &'static CryptoAsset,
+        direction: Option<CryptoDirectionBucket>,
+        market_type: CryptoMarketType,
+        question: &str,
+        days_to_resolution: u32,
+        modeled_prob: Decimal,
+        is_yes: bool,
+        condition_id: B256,
+        reason: &'static str,
+        event_context_source: Option<String>,
+        event_title: Option<String>,
+        event_category: Option<String>,
+        event_subtype: Option<String>,
+    ) {
+        self.record_gate_decision(
+            "gate_reject",
+            asset,
+            direction,
+            market_type,
+            question,
+            days_to_resolution,
+            modeled_prob,
+            is_yes,
+            condition_id,
+            reason,
+            event_context_source,
+            event_title,
+            event_category,
+            event_subtype,
+        );
+    }
+
+    fn record_gate_scale_decision(
+        &self,
+        asset: &'static CryptoAsset,
+        direction: Option<CryptoDirectionBucket>,
+        market_type: CryptoMarketType,
+        question: &str,
+        days_to_resolution: u32,
+        modeled_prob: Decimal,
+        is_yes: bool,
+        condition_id: B256,
+        reason: &'static str,
+        event_context_source: Option<String>,
+        event_title: Option<String>,
+        event_category: Option<String>,
+        event_subtype: Option<String>,
+    ) {
+        self.record_gate_decision(
+            "gate_scale",
+            asset,
+            direction,
+            market_type,
+            question,
+            days_to_resolution,
+            modeled_prob,
+            is_yes,
+            condition_id,
+            reason,
+            event_context_source,
+            event_title,
+            event_category,
+            event_subtype,
+        );
+    }
+
+    fn record_gate_decision(
+        &self,
+        action: &str,
+        asset: &'static CryptoAsset,
+        direction: Option<CryptoDirectionBucket>,
+        market_type: CryptoMarketType,
+        question: &str,
+        days_to_resolution: u32,
+        modeled_prob: Decimal,
+        is_yes: bool,
+        condition_id: B256,
+        reason: &'static str,
+        event_context_source: Option<String>,
+        event_title: Option<String>,
+        event_category: Option<String>,
+        event_subtype: Option<String>,
+    ) {
+        record_crypto_candidate_decision(CryptoCandidateDecision {
+            recorded_at: Utc::now(),
+            asset: asset.name.to_string(),
+            direction: direction
+                .map(|value| format!("{value:?}"))
+                .unwrap_or_else(|| "Unknown".into()),
+            action: action.into(),
+            reason: reason.into(),
+            event_context_source,
+            event_title,
+            event_category,
+            event_subtype,
+            selected_question: question.into(),
+            selected_condition_id: condition_id,
+            selected_market_type: market_type.as_str().to_string(),
+            selected_modeled_prob: modeled_prob,
+            selected_is_yes: is_yes,
+            selected_days_to_resolution: days_to_resolution,
+            replaced_question: None,
+            replaced_condition_id: None,
+            replaced_market_type: None,
+            replaced_modeled_prob: None,
+            replaced_is_yes: None,
+            replaced_days_to_resolution: None,
+            selected_estimated_profit: Decimal::ZERO,
+            replaced_estimated_profit: None,
+            selected_efficiency: Decimal::ZERO,
+            replaced_efficiency: None,
+            selected_executable_profit_retention: Decimal::ZERO,
+            replaced_executable_profit_retention: None,
+            selected_executable_size_retention: Decimal::ZERO,
+            replaced_executable_size_retention: None,
+            selected_executable_quality_score: Decimal::ZERO,
+            replaced_executable_quality_score: None,
+            selected_executable_efficiency: Decimal::ZERO,
+            replaced_executable_efficiency: None,
+            selected_depth_buffer: Decimal::ZERO,
+            replaced_depth_buffer: None,
+        });
     }
 
     /// Detect a crypto alpha opportunity on a single market.
@@ -1907,7 +3622,7 @@ impl CryptoAlphaStrategy {
         market: &MarketInfo,
         current_asset_exposure: Decimal,
         asset_direction_exposure: &HashMap<(&'static str, CryptoDirectionBucket), Decimal>,
-    ) -> Option<TradingOpportunity> {
+    ) -> Option<CryptoEntryCandidate> {
         let question = parse_crypto_question(&market.question)?;
         // Require a target date
         let target_date = question.target_date?;
@@ -1916,8 +3631,20 @@ impl CryptoAlphaStrategy {
         if days <= 0 {
             return None;
         }
+        let market_text = market
+            .event_title
+            .as_deref()
+            .map(|title| format!("{} {}", title, market.question))
+            .unwrap_or_else(|| market.question.clone());
+        let (event_context_source, event_title, event_category, event_subtype) =
+            self.decision_event_context(&market_text).await;
         let (effective_min_edge_bps, effective_max_spread_bps) = self
-            .effective_entry_thresholds(&market.question, days as u32)
+            .effective_entry_thresholds_for_context(
+                question.asset,
+                CryptoMarketType::Binary,
+                &market_text,
+                days as u32,
+            )
             .await;
 
         // Fetch price data
@@ -1942,7 +3669,7 @@ impl CryptoAlphaStrategy {
                     question.asset,
                     days as u32,
                     CryptoMarketType::Binary,
-                    &market.question,
+                    &market_text,
                 )
                 .await;
         self.update_cache_sigma(question.asset.binance_symbol, sigma);
@@ -1998,6 +3725,21 @@ impl CryptoAlphaStrategy {
         };
         if spread_bps > effective_max_spread_bps {
             Self::record_rejection(question.asset, "spread_too_wide");
+            self.record_gate_reject_decision(
+                question.asset,
+                None,
+                CryptoMarketType::Binary,
+                &market.question,
+                days as u32,
+                Decimal::ZERO,
+                false,
+                market.condition_id,
+                "spread_too_wide",
+                event_context_source.clone(),
+                event_title.clone(),
+                event_category.clone(),
+                event_subtype.clone(),
+            );
             tracing::debug!(
                 question = %market.question,
                 yes_spread_bps = %((yes_spread * dec!(10000)).round()),
@@ -2048,6 +3790,21 @@ impl CryptoAlphaStrategy {
         };
         if edge_bps < effective_min_edge_bps {
             Self::record_rejection(question.asset, "edge_below_threshold");
+            self.record_gate_reject_decision(
+                question.asset,
+                Some(direction_bucket),
+                CryptoMarketType::Binary,
+                &market.question,
+                days as u32,
+                prob_for_sizing,
+                token_id == yes_token.token_id,
+                market.condition_id,
+                "edge_below_threshold",
+                event_context_source.clone(),
+                event_title.clone(),
+                event_category.clone(),
+                event_subtype.clone(),
+            );
             self.near_miss_edge_bps
                 .fetch_max(edge_bps, std::sync::atomic::Ordering::Relaxed);
             tracing::debug!(
@@ -2063,9 +3820,45 @@ impl CryptoAlphaStrategy {
             return None;
         }
 
+        let event_subtype_enum =
+            CryptoEventSubtype::from_decision_context(event_subtype.as_deref());
+        let gate_context = GateRejectContext {
+            market_type: CryptoMarketType::Binary,
+            question: market.question.clone(),
+            days_to_resolution: days as u32,
+            modeled_prob: prob_for_sizing,
+            is_yes: token_id == yes_token.token_id,
+            condition_id: market.condition_id,
+            event_context_source: event_context_source.clone(),
+            event_title: event_title.clone(),
+            event_category: event_category.clone(),
+            event_subtype: event_subtype.clone(),
+        };
+        let effective_min_entry_depth_ratio = self.config.min_entry_depth_ratio
+            * self
+                .calibration_override_depth_ratio_multiplier(
+                    question.asset,
+                    days as u32,
+                    CryptoMarketType::Binary,
+                    event_subtype_enum,
+                )
+                .unwrap_or(Decimal::ONE);
+        let effective_min_entry_size_retention_ratio = (self.base_min_size_retention_ratio
+            * self
+                .calibration_override_size_retention_multiplier(
+                    question.asset,
+                    days as u32,
+                    CryptoMarketType::Binary,
+                    event_subtype_enum,
+                )
+                .unwrap_or(Decimal::ONE))
+        .min(Decimal::ONE)
+        .max(Decimal::ZERO);
+
         let size = self.size_entry(
             question.asset,
             direction_bucket,
+            Some(&gate_context),
             token_id,
             ask_price,
             edge,
@@ -2074,9 +3867,11 @@ impl CryptoAlphaStrategy {
                 question.asset,
                 days as u32,
                 CryptoMarketType::Binary,
-                &market.question,
+                &market_text,
             )
             .await,
+            effective_min_entry_size_retention_ratio,
+            effective_min_entry_depth_ratio,
             current_asset_exposure,
             *asset_direction_exposure
                 .get(&(question.asset.binance_symbol, direction_bucket))
@@ -2110,22 +3905,60 @@ impl CryptoAlphaStrategy {
             "Crypto alpha opportunity detected"
         );
 
-        Some(TradingOpportunity {
-            id: Uuid::now_v7(),
-            strategy_type: StrategyType::CryptoAlpha,
-            condition_id: market.condition_id,
-            question: market.question.clone(),
-            spread: edge,
-            estimated_profit: est.net_profit,
-            size,
-            detected_at: Utc::now(),
-            execution_plan: ExecutionPlan::DirectionalBuy {
-                token_id,
-                side: TradeSide::Buy,
-                price: ask_price,
-                size,
+        let profit_retention_multiplier = self
+            .calibration_override_profit_retention_multiplier(
+                question.asset,
+                days as u32,
+                CryptoMarketType::Binary,
+                event_subtype_enum,
+            )
+            .unwrap_or(Decimal::ONE);
+        let slippage_multiplier = self
+            .calibration_override_slippage_multiplier(
+                question.asset,
+                days as u32,
+                CryptoMarketType::Binary,
+                event_subtype_enum,
+            )
+            .unwrap_or(Decimal::ONE);
+        let size_retention_multiplier = self
+            .calibration_override_size_retention_multiplier(
+                question.asset,
+                days as u32,
+                CryptoMarketType::Binary,
+                event_subtype_enum,
+            )
+            .unwrap_or(Decimal::ONE);
+
+        Some(CryptoEntryCandidate {
+            opportunity: TradingOpportunity {
+                id: Uuid::now_v7(),
+                strategy_type: StrategyType::CryptoAlpha,
                 condition_id: market.condition_id,
+                question: market.question.clone(),
+                spread: edge,
+                estimated_profit: est.net_profit,
+                size,
+                min_profit_retention_ratio_multiplier: Some(profit_retention_multiplier),
+                max_slippage_bps_multiplier: Some(slippage_multiplier),
+                min_size_retention_ratio_multiplier: Some(size_retention_multiplier),
+                detected_at: Utc::now(),
+                execution_plan: ExecutionPlan::DirectionalBuy {
+                    token_id,
+                    side: TradeSide::Buy,
+                    price: ask_price,
+                    size,
+                    condition_id: market.condition_id,
+                },
             },
+            market_type: CryptoMarketType::Binary,
+            modeled_prob: prob_for_sizing,
+            days_to_resolution: days as u32,
+            is_yes: token_id == yes_token.token_id,
+            event_context_source,
+            event_title,
+            event_category,
+            event_subtype,
         })
     }
 
@@ -2139,10 +3972,17 @@ impl CryptoAlphaStrategy {
         days: f64,
         current_asset_exposure: Decimal,
         asset_direction_exposure: &HashMap<(&'static str, CryptoDirectionBucket), Decimal>,
-    ) -> Option<TradingOpportunity> {
+    ) -> Option<CryptoEntryCandidate> {
         let event_market_text = format!("{} {}", event.title, asset.name);
+        let (event_context_source, event_title, event_category, event_subtype) =
+            self.decision_event_context(&event_market_text).await;
         let (effective_min_edge_bps, effective_max_spread_bps) = self
-            .effective_entry_thresholds(&event_market_text, days.ceil() as u32)
+            .effective_entry_thresholds_for_context(
+                asset,
+                CryptoMarketType::Range,
+                &event_market_text,
+                days.ceil() as u32,
+            )
             .await;
         // Fetch price data
         let price_data = match self.get_price_data(asset).await {
@@ -2219,6 +4059,23 @@ impl CryptoAlphaStrategy {
                 };
                 if spread_bps > effective_max_spread_bps {
                     Self::record_rejection(asset, "spread_too_wide");
+                    let (event_context_source, event_title, event_category, event_subtype) =
+                        self.decision_event_context(&event_market_text).await;
+                    self.record_gate_reject_decision(
+                        asset,
+                        None,
+                        CryptoMarketType::Range,
+                        &format!("{} → {}", event.title, market.question),
+                        days.ceil() as u32,
+                        model_prob,
+                        true,
+                        market.condition_id,
+                        "spread_too_wide",
+                        event_context_source.clone(),
+                        event_title.clone(),
+                        event_category.clone(),
+                        event_subtype.clone(),
+                    );
                     skip_outcome = true;
                 }
             }
@@ -2236,6 +4093,23 @@ impl CryptoAlphaStrategy {
                 };
                 if spread_bps > effective_max_spread_bps {
                     Self::record_rejection(asset, "spread_too_wide");
+                    let (event_context_source, event_title, event_category, event_subtype) =
+                        self.decision_event_context(&event_market_text).await;
+                    self.record_gate_reject_decision(
+                        asset,
+                        None,
+                        CryptoMarketType::Range,
+                        &format!("{} → {}", event.title, market.question),
+                        days.ceil() as u32,
+                        model_prob,
+                        false,
+                        market.condition_id,
+                        "spread_too_wide",
+                        event_context_source,
+                        event_title,
+                        event_category,
+                        event_subtype,
+                    );
                     skip_outcome = true;
                 }
             }
@@ -2301,6 +4175,25 @@ impl CryptoAlphaStrategy {
         };
         if edge_bps < effective_min_edge_bps {
             Self::record_rejection(asset, "edge_below_threshold");
+            self.record_gate_reject_decision(
+                asset,
+                Some(direction_bucket),
+                CryptoMarketType::Range,
+                &format!("{} → {}", event.title, market.question),
+                days.ceil() as u32,
+                effective_prob,
+                market
+                    .tokens
+                    .first()
+                    .map(|token| token.token_id == token_id)
+                    .unwrap_or(false),
+                market.condition_id,
+                "edge_below_threshold",
+                event_context_source.clone(),
+                event_title.clone(),
+                event_category.clone(),
+                event_subtype.clone(),
+            );
             self.near_miss_edge_bps
                 .fetch_max(edge_bps, std::sync::atomic::Ordering::Relaxed);
             tracing::debug!(
@@ -2315,9 +4208,49 @@ impl CryptoAlphaStrategy {
             return None;
         }
 
+        let event_subtype_enum =
+            CryptoEventSubtype::from_decision_context(event_subtype.as_deref());
+        let gate_context = GateRejectContext {
+            market_type: CryptoMarketType::Range,
+            question: format!("{} → {}", event.title, market.question),
+            days_to_resolution: days.ceil() as u32,
+            modeled_prob: effective_prob,
+            is_yes: market
+                .tokens
+                .first()
+                .map(|token| token.token_id == token_id)
+                .unwrap_or(false),
+            condition_id: market.condition_id,
+            event_context_source: event_context_source.clone(),
+            event_title: event_title.clone(),
+            event_category: event_category.clone(),
+            event_subtype: event_subtype.clone(),
+        };
+        let effective_min_entry_depth_ratio = self.config.min_entry_depth_ratio
+            * self
+                .calibration_override_depth_ratio_multiplier(
+                    asset,
+                    days.ceil() as u32,
+                    CryptoMarketType::Range,
+                    event_subtype_enum,
+                )
+                .unwrap_or(Decimal::ONE);
+        let effective_min_entry_size_retention_ratio = (self.base_min_size_retention_ratio
+            * self
+                .calibration_override_size_retention_multiplier(
+                    asset,
+                    days.ceil() as u32,
+                    CryptoMarketType::Range,
+                    event_subtype_enum,
+                )
+                .unwrap_or(Decimal::ONE))
+        .min(Decimal::ONE)
+        .max(Decimal::ZERO);
+
         let size = self.size_entry(
             asset,
             direction_bucket,
+            Some(&gate_context),
             token_id,
             ask_price,
             edge,
@@ -2329,6 +4262,8 @@ impl CryptoAlphaStrategy {
                 &event_market_text,
             )
             .await,
+            effective_min_entry_size_retention_ratio,
+            effective_min_entry_depth_ratio,
             current_asset_exposure,
             *asset_direction_exposure
                 .get(&(asset.binance_symbol, direction_bucket))
@@ -2360,22 +4295,64 @@ impl CryptoAlphaStrategy {
             "NegRisk crypto alpha opportunity detected"
         );
 
-        Some(TradingOpportunity {
-            id: Uuid::now_v7(),
-            strategy_type: StrategyType::CryptoAlpha,
-            condition_id: market.condition_id,
-            question: format!("{} → {}", event.title, market.question),
-            spread: edge,
-            estimated_profit: est.net_profit,
-            size,
-            detected_at: Utc::now(),
-            execution_plan: ExecutionPlan::DirectionalBuy {
-                token_id,
-                side: TradeSide::Buy,
-                price: ask_price,
-                size,
+        let profit_retention_multiplier = self
+            .calibration_override_profit_retention_multiplier(
+                asset,
+                days.ceil() as u32,
+                CryptoMarketType::Range,
+                event_subtype_enum,
+            )
+            .unwrap_or(Decimal::ONE);
+        let slippage_multiplier = self
+            .calibration_override_slippage_multiplier(
+                asset,
+                days.ceil() as u32,
+                CryptoMarketType::Range,
+                event_subtype_enum,
+            )
+            .unwrap_or(Decimal::ONE);
+        let size_retention_multiplier = self
+            .calibration_override_size_retention_multiplier(
+                asset,
+                days.ceil() as u32,
+                CryptoMarketType::Range,
+                event_subtype_enum,
+            )
+            .unwrap_or(Decimal::ONE);
+
+        Some(CryptoEntryCandidate {
+            opportunity: TradingOpportunity {
+                id: Uuid::now_v7(),
+                strategy_type: StrategyType::CryptoAlpha,
                 condition_id: market.condition_id,
+                question: format!("{} → {}", event.title, market.question),
+                spread: edge,
+                estimated_profit: est.net_profit,
+                size,
+                min_profit_retention_ratio_multiplier: Some(profit_retention_multiplier),
+                max_slippage_bps_multiplier: Some(slippage_multiplier),
+                min_size_retention_ratio_multiplier: Some(size_retention_multiplier),
+                detected_at: Utc::now(),
+                execution_plan: ExecutionPlan::DirectionalBuy {
+                    token_id,
+                    side: TradeSide::Buy,
+                    price: ask_price,
+                    size,
+                    condition_id: market.condition_id,
+                },
             },
+            market_type: CryptoMarketType::Range,
+            modeled_prob: effective_prob,
+            days_to_resolution: days.ceil() as u32,
+            is_yes: market
+                .tokens
+                .first()
+                .map(|token| token.token_id == token_id)
+                .unwrap_or(false),
+            event_context_source,
+            event_title,
+            event_category,
+            event_subtype,
         })
     }
 
@@ -2390,7 +4367,7 @@ impl CryptoAlphaStrategy {
         group: &BinaryEventGroup,
         current_asset_exposure: Decimal,
         asset_direction_exposure: &HashMap<(&'static str, CryptoDirectionBucket), Decimal>,
-    ) -> Option<TradingOpportunity> {
+    ) -> Option<CryptoEntryCandidate> {
         // Try to identify crypto asset from the group title first, then from individual markets
         let asset = find_asset(&group.title).or_else(|| {
             group
@@ -2454,7 +4431,12 @@ impl CryptoAlphaStrategy {
                 format!("{} {}", group.title, market.question)
             };
             let (_, effective_max_spread_bps) = self
-                .effective_entry_thresholds(&group_market_text, days as u32)
+                .effective_entry_thresholds_for_context(
+                    asset,
+                    CryptoMarketType::Binary,
+                    &group_market_text,
+                    days as u32,
+                )
                 .await;
             let sigma = base_effective_sigma
                 * self
@@ -2506,6 +4488,23 @@ impl CryptoAlphaStrategy {
                 };
                 if spread_bps > effective_max_spread_bps {
                     Self::record_rejection(asset, "spread_too_wide");
+                    let (event_context_source, event_title, event_category, event_subtype) =
+                        self.decision_event_context(&group_market_text).await;
+                    self.record_gate_reject_decision(
+                        asset,
+                        None,
+                        CryptoMarketType::Binary,
+                        &market.question,
+                        days as u32,
+                        model_prob,
+                        true,
+                        market.condition_id,
+                        "spread_too_wide",
+                        event_context_source.clone(),
+                        event_title.clone(),
+                        event_category.clone(),
+                        event_subtype.clone(),
+                    );
                     skip_market = true;
                 }
             }
@@ -2523,6 +4522,23 @@ impl CryptoAlphaStrategy {
                 };
                 if spread_bps > effective_max_spread_bps {
                     Self::record_rejection(asset, "spread_too_wide");
+                    let (event_context_source, event_title, event_category, event_subtype) =
+                        self.decision_event_context(&group_market_text).await;
+                    self.record_gate_reject_decision(
+                        asset,
+                        None,
+                        CryptoMarketType::Binary,
+                        &market.question,
+                        days as u32,
+                        model_prob,
+                        false,
+                        market.condition_id,
+                        "spread_too_wide",
+                        event_context_source,
+                        event_title,
+                        event_category,
+                        event_subtype,
+                    );
                     skip_market = true;
                 }
             }
@@ -2602,12 +4618,38 @@ impl CryptoAlphaStrategy {
             format!("{} {}", group.title, market.question)
         };
         let (effective_min_edge_bps, _) = self
-            .effective_entry_thresholds(&winner_market_text, winner_days as u32)
+            .effective_entry_thresholds_for_context(
+                asset,
+                CryptoMarketType::Binary,
+                &winner_market_text,
+                winner_days as u32,
+            )
             .await;
 
         // Check minimum edge threshold
         if edge_bps < effective_min_edge_bps {
             Self::record_rejection(asset, "edge_below_threshold");
+            let (event_context_source, event_title, event_category, event_subtype) =
+                self.decision_event_context(&winner_market_text).await;
+            self.record_gate_reject_decision(
+                asset,
+                Some(direction_bucket),
+                CryptoMarketType::Binary,
+                &market.question,
+                winner_days as u32,
+                effective_prob,
+                market
+                    .tokens
+                    .first()
+                    .map(|token| token.token_id == token_id)
+                    .unwrap_or(false),
+                market.condition_id,
+                "edge_below_threshold",
+                event_context_source,
+                event_title,
+                event_category,
+                event_subtype,
+            );
             self.near_miss_edge_bps
                 .fetch_max(edge_bps, std::sync::atomic::Ordering::Relaxed);
             tracing::debug!(
@@ -2622,9 +4664,52 @@ impl CryptoAlphaStrategy {
             return None;
         }
 
+        let market_text = format!("{} {}", group.title, market.question);
+        let (event_context_source, event_title, event_category, event_subtype) =
+            self.decision_event_context(&market_text).await;
+        let event_subtype_enum =
+            CryptoEventSubtype::from_decision_context(event_subtype.as_deref());
+        let gate_context = GateRejectContext {
+            market_type: CryptoMarketType::Binary,
+            question: market.question.clone(),
+            days_to_resolution: winner_days as u32,
+            modeled_prob: effective_prob,
+            is_yes: market
+                .tokens
+                .first()
+                .map(|token| token.token_id == token_id)
+                .unwrap_or(false),
+            condition_id: market.condition_id,
+            event_context_source: event_context_source.clone(),
+            event_title: event_title.clone(),
+            event_category: event_category.clone(),
+            event_subtype: event_subtype.clone(),
+        };
+        let effective_min_entry_depth_ratio = self.config.min_entry_depth_ratio
+            * self
+                .calibration_override_depth_ratio_multiplier(
+                    asset,
+                    winner_days as u32,
+                    CryptoMarketType::Binary,
+                    event_subtype_enum,
+                )
+                .unwrap_or(Decimal::ONE);
+        let effective_min_entry_size_retention_ratio = (self.base_min_size_retention_ratio
+            * self
+                .calibration_override_size_retention_multiplier(
+                    asset,
+                    winner_days as u32,
+                    CryptoMarketType::Binary,
+                    event_subtype_enum,
+                )
+                .unwrap_or(Decimal::ONE))
+        .min(Decimal::ONE)
+        .max(Decimal::ZERO);
+
         let size = self.size_entry(
             asset,
             direction_bucket,
+            Some(&gate_context),
             token_id,
             ask_price,
             edge,
@@ -2633,9 +4718,11 @@ impl CryptoAlphaStrategy {
                 asset,
                 winner_days as u32,
                 CryptoMarketType::Binary,
-                &group.title,
+                &market_text,
             )
             .await,
+            effective_min_entry_size_retention_ratio,
+            effective_min_entry_depth_ratio,
             current_asset_exposure,
             *asset_direction_exposure
                 .get(&(asset.binance_symbol, direction_bucket))
@@ -2668,22 +4755,64 @@ impl CryptoAlphaStrategy {
             "Binary group crypto alpha opportunity detected"
         );
 
-        Some(TradingOpportunity {
-            id: Uuid::now_v7(),
-            strategy_type: StrategyType::CryptoAlpha,
-            condition_id: market.condition_id,
-            question: format!("[Group] {} → {}", group.title, market.question),
-            spread: edge,
-            estimated_profit: est.net_profit,
-            size,
-            detected_at: Utc::now(),
-            execution_plan: ExecutionPlan::DirectionalBuy {
-                token_id,
-                side: TradeSide::Buy,
-                price: ask_price,
-                size,
+        let profit_retention_multiplier = self
+            .calibration_override_profit_retention_multiplier(
+                asset,
+                winner_days as u32,
+                CryptoMarketType::Binary,
+                event_subtype_enum,
+            )
+            .unwrap_or(Decimal::ONE);
+        let slippage_multiplier = self
+            .calibration_override_slippage_multiplier(
+                asset,
+                winner_days as u32,
+                CryptoMarketType::Binary,
+                event_subtype_enum,
+            )
+            .unwrap_or(Decimal::ONE);
+        let size_retention_multiplier = self
+            .calibration_override_size_retention_multiplier(
+                asset,
+                winner_days as u32,
+                CryptoMarketType::Binary,
+                event_subtype_enum,
+            )
+            .unwrap_or(Decimal::ONE);
+
+        Some(CryptoEntryCandidate {
+            opportunity: TradingOpportunity {
+                id: Uuid::now_v7(),
+                strategy_type: StrategyType::CryptoAlpha,
                 condition_id: market.condition_id,
+                question: format!("[Group] {} → {}", group.title, market.question),
+                spread: edge,
+                estimated_profit: est.net_profit,
+                size,
+                min_profit_retention_ratio_multiplier: Some(profit_retention_multiplier),
+                max_slippage_bps_multiplier: Some(slippage_multiplier),
+                min_size_retention_ratio_multiplier: Some(size_retention_multiplier),
+                detected_at: Utc::now(),
+                execution_plan: ExecutionPlan::DirectionalBuy {
+                    token_id,
+                    side: TradeSide::Buy,
+                    price: ask_price,
+                    size,
+                    condition_id: market.condition_id,
+                },
             },
+            market_type: CryptoMarketType::Binary,
+            modeled_prob: effective_prob,
+            days_to_resolution: winner_days as u32,
+            is_yes: market
+                .tokens
+                .first()
+                .map(|token| token.token_id == token_id)
+                .unwrap_or(false),
+            event_context_source,
+            event_title,
+            event_category,
+            event_subtype,
         })
     }
 }
@@ -2750,12 +4879,76 @@ impl CryptoAlphaStrategy {
             } else {
                 30
             };
-            let (capital_efficiency_threshold, exit_buffer) =
-                self.effective_exit_thresholds(days_to_resolution);
+            let exit_market_text = market
+                .event_title
+                .as_deref()
+                .map(|title| format!("{} {}", title, market.question))
+                .unwrap_or_else(|| market.question.clone());
+            let (event_context_source, event_title, event_category, event_subtype) =
+                self.decision_event_context(&exit_market_text).await;
+            let exit_event_subtype = Self::parse_event_subtype_label(event_subtype.as_deref());
+            let exit_asset_ref = parse_crypto_question(&market.question)
+                .map(|q| q.asset)
+                .or_else(|| {
+                    market
+                        .event_title
+                        .as_deref()
+                        .and_then(parse_crypto_event_title)
+                        .map(|(asset, _)| asset)
+                });
+            let exit_asset = parse_crypto_question(&market.question)
+                .map(|q| q.asset.name.to_string())
+                .or_else(|| {
+                    market
+                        .event_title
+                        .as_deref()
+                        .and_then(parse_crypto_event_title)
+                        .map(|(asset, _)| asset.name.to_string())
+                });
+            let held_is_yes = market
+                .tokens
+                .first()
+                .map(|token| token.token_id == *token_id);
+            let market_type = if parse_crypto_question(&market.question).is_some() {
+                Some(CryptoMarketType::Binary.as_str().to_string())
+            } else if parse_crypto_outcome_range(&market.question).is_some() {
+                Some(CryptoMarketType::Range.as_str().to_string())
+            } else {
+                None
+            };
+            let market_type_enum = if parse_crypto_question(&market.question).is_some() {
+                CryptoMarketType::Binary
+            } else {
+                CryptoMarketType::Range
+            };
+            let (capital_efficiency_threshold, exit_buffer) = self
+                .effective_exit_thresholds_for_context(
+                    days_to_resolution,
+                    exit_asset_ref,
+                    market_type_enum,
+                    exit_event_subtype,
+                );
 
             // Capital efficiency exit: bid >= threshold
             if best_bid >= capital_efficiency_threshold {
                 self.reset_edge_decay_confirmation(*token_id);
+                record_crypto_exit_decision(CryptoExitDecision {
+                    recorded_at: Utc::now(),
+                    asset: exit_asset.clone(),
+                    reason: "capital_efficiency".into(),
+                    event_context_source: event_context_source.clone(),
+                    event_title: event_title.clone(),
+                    event_category: event_category.clone(),
+                    event_subtype: event_subtype.clone(),
+                    question: market.question.clone(),
+                    market_type: market_type.clone(),
+                    held_is_yes,
+                    modeled_prob: None,
+                    days_to_resolution: Some(days_to_resolution),
+                    best_bid,
+                    avg_cost: *avg_cost,
+                    size: *size,
+                });
                 pa_monitor::metrics::CRYPTO_ALPHA_EXITS
                     .with_label_values(&["capital_efficiency"])
                     .inc();
@@ -2783,6 +4976,23 @@ impl CryptoAlphaStrategy {
                 && best_bid < *avg_cost * self.config.relative_stop_loss_ratio
             {
                 self.reset_edge_decay_confirmation(*token_id);
+                record_crypto_exit_decision(CryptoExitDecision {
+                    recorded_at: Utc::now(),
+                    asset: exit_asset.clone(),
+                    reason: "relative_stop_loss".into(),
+                    event_context_source: event_context_source.clone(),
+                    event_title: event_title.clone(),
+                    event_category: event_category.clone(),
+                    event_subtype: event_subtype.clone(),
+                    question: market.question.clone(),
+                    market_type: market_type.clone(),
+                    held_is_yes,
+                    modeled_prob: None,
+                    days_to_resolution: Some(days_to_resolution),
+                    best_bid,
+                    avg_cost: *avg_cost,
+                    size: *size,
+                });
                 pa_monitor::metrics::CRYPTO_ALPHA_EXITS
                     .with_label_values(&["relative_stop_loss"])
                     .inc();
@@ -2827,8 +5037,9 @@ impl CryptoAlphaStrategy {
                 let mu = mu * self.config.drift_decay;
                 let sigma = effective_volatility(sigma, price_data.implied_vol)
                     * self
-                        .effective_event_sigma_multiplier(&market.question)
-                        .await;
+                        .effective_event_sigma_multiplier(parsed.asset, &market.question)
+                        .await
+                        .0;
                 self.update_cache_sigma(parsed.asset.binance_symbol, sigma);
                 if sigma <= 0.0 {
                     continue;
@@ -2917,8 +5128,9 @@ impl CryptoAlphaStrategy {
                 };
                 let sigma = effective_volatility(sigma, price_data.implied_vol)
                     * self
-                        .effective_event_sigma_multiplier(&event_market_text)
-                        .await;
+                        .effective_event_sigma_multiplier(asset, &event_market_text)
+                        .await
+                        .0;
                 self.update_cache_sigma(asset.binance_symbol, sigma);
                 if sigma <= 0.0 {
                     continue;
@@ -2968,10 +5180,32 @@ impl CryptoAlphaStrategy {
                 Some(d) => d,
                 None => continue,
             };
-            let hold_edge_threshold = self.effective_hold_edge_threshold(days_to_resolution);
+            let hold_edge_threshold = self.effective_hold_edge_threshold_for_context(
+                days_to_resolution,
+                exit_asset_ref,
+                market_type_enum,
+                exit_event_subtype,
+            );
 
             if model_prob_dec < best_bid - exit_buffer {
                 self.reset_edge_decay_confirmation(*token_id);
+                record_crypto_exit_decision(CryptoExitDecision {
+                    recorded_at: Utc::now(),
+                    asset: exit_asset.clone(),
+                    reason: "model_reversal".into(),
+                    event_context_source: event_context_source.clone(),
+                    event_title: event_title.clone(),
+                    event_category: event_category.clone(),
+                    event_subtype: event_subtype.clone(),
+                    question: market.question.clone(),
+                    market_type: market_type.clone(),
+                    held_is_yes,
+                    modeled_prob: Some(model_prob_dec),
+                    days_to_resolution: Some(days_to_resolution),
+                    best_bid,
+                    avg_cost: *avg_cost,
+                    size: *size,
+                });
                 pa_monitor::metrics::CRYPTO_ALPHA_EXITS
                     .with_label_values(&["model_reversal"])
                     .inc();
@@ -2996,11 +5230,17 @@ impl CryptoAlphaStrategy {
                     *token_id,
                     days_to_resolution,
                     edge_shortfall,
+                    exit_asset_ref,
+                    market_type_enum,
+                    exit_event_subtype,
                 );
                 let edge_decay_exit_size = self.planned_edge_decay_exit_size(
                     *size,
                     best_bid,
+                    exit_asset_ref,
+                    market_type_enum,
                     days_to_resolution,
+                    exit_event_subtype,
                     confirmations,
                     edge_shortfall,
                 );
@@ -3016,7 +5256,13 @@ impl CryptoAlphaStrategy {
                     continue;
                 }
                 let required_confirmations = self
-                    .effective_edge_decay_confirmation_scans(days_to_resolution, edge_shortfall);
+                    .effective_edge_decay_confirmation_scans_for_context(
+                        days_to_resolution,
+                        edge_shortfall,
+                        exit_asset_ref,
+                        market_type_enum,
+                        exit_event_subtype,
+                    );
                 if confirmations < required_confirmations {
                     tracing::debug!(
                         token_id = %token_id,
@@ -3026,6 +5272,23 @@ impl CryptoAlphaStrategy {
                     );
                     continue;
                 }
+                record_crypto_exit_decision(CryptoExitDecision {
+                    recorded_at: Utc::now(),
+                    asset: exit_asset.clone(),
+                    reason: "edge_decay".into(),
+                    event_context_source: event_context_source.clone(),
+                    event_title: event_title.clone(),
+                    event_category: event_category.clone(),
+                    event_subtype: event_subtype.clone(),
+                    question: market.question.clone(),
+                    market_type: market_type.clone(),
+                    held_is_yes,
+                    modeled_prob: Some(model_prob_dec),
+                    days_to_resolution: Some(days_to_resolution),
+                    best_bid,
+                    avg_cost: *avg_cost,
+                    size: edge_decay_exit_size,
+                });
                 pa_monitor::metrics::CRYPTO_ALPHA_EXITS
                     .with_label_values(&["edge_decay"])
                     .inc();
@@ -3047,7 +5310,14 @@ impl CryptoAlphaStrategy {
                     best_bid,
                     &token_to_market,
                 ));
-                self.set_edge_decay_cooldown(*token_id, days_to_resolution, edge_shortfall);
+                self.set_edge_decay_cooldown(
+                    *token_id,
+                    days_to_resolution,
+                    edge_shortfall,
+                    exit_asset_ref,
+                    market_type_enum,
+                    exit_event_subtype,
+                );
             } else {
                 self.reset_edge_decay_confirmation(*token_id);
                 tracing::debug!(
@@ -3092,6 +5362,9 @@ impl CryptoAlphaStrategy {
             spread: best_bid - avg_cost,
             estimated_profit: est.net_profit,
             size,
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id,
@@ -3118,7 +5391,7 @@ impl Strategy for CryptoAlphaStrategy {
         let mut opportunities = Vec::new();
         let mut best_entries_by_asset: HashMap<
             (&'static str, CryptoDirectionBucket),
-            TradingOpportunity,
+            CryptoEntryCandidate,
         > = HashMap::new();
         let count = self
             .scan_count
@@ -3206,6 +5479,7 @@ impl Strategy for CryptoAlphaStrategy {
                 .await
             {
                 let direction = opp
+                    .opportunity
                     .execution_plan
                     .token_id()
                     .and_then(|token_id| token_directions.get(&token_id).copied())
@@ -3248,6 +5522,7 @@ impl Strategy for CryptoAlphaStrategy {
                 .await
             {
                 let direction = opp
+                    .opportunity
                     .execution_plan
                     .token_id()
                     .and_then(|token_id| token_directions.get(&token_id).copied())
@@ -3280,6 +5555,7 @@ impl Strategy for CryptoAlphaStrategy {
                     .await
                 {
                     let direction = opp
+                        .opportunity
                         .execution_plan
                         .token_id()
                         .and_then(|token_id| token_directions.get(&token_id).copied())
@@ -3289,8 +5565,8 @@ impl Strategy for CryptoAlphaStrategy {
             }
         }
 
-        for ((asset_symbol, direction), opp) in best_entries_by_asset {
-            let cost = opp.execution_plan.estimated_cost();
+        for ((asset_symbol, direction), candidate) in best_entries_by_asset {
+            let cost = candidate.opportunity.execution_plan.estimated_cost();
             asset_exposure
                 .entry(asset_symbol)
                 .and_modify(|exposure| *exposure += cost)
@@ -3299,13 +5575,81 @@ impl Strategy for CryptoAlphaStrategy {
                 .entry((asset_symbol, direction))
                 .and_modify(|exposure| *exposure += cost)
                 .or_insert(cost);
-            opportunities.push(opp);
+            opportunities.push(candidate.opportunity);
         }
 
         if log_diag {
+            fn top_label_with_count(counts: &HashMap<String, usize>) -> String {
+                counts
+                    .iter()
+                    .max_by(|(label_a, count_a), (label_b, count_b)| {
+                        count_a.cmp(count_b).then_with(|| label_b.cmp(label_a))
+                    })
+                    .map(|(label, count)| format!("{label}:{count}"))
+                    .unwrap_or_else(|| "none".into())
+            }
+
             let best_near_miss = self
                 .near_miss_edge_bps
                 .swap(0, std::sync::atomic::Ordering::Relaxed);
+            let recent_gate_rejects: Vec<_> = recent_crypto_candidate_decisions()
+                .into_iter()
+                .filter(|decision| decision.action == "gate_reject")
+                .take(24)
+                .collect();
+            let mut gate_reason_counts: HashMap<String, usize> = HashMap::new();
+            let mut gate_asset_counts: HashMap<String, usize> = HashMap::new();
+            let mut gate_subtype_counts: HashMap<String, usize> = HashMap::new();
+            for decision in &recent_gate_rejects {
+                *gate_reason_counts
+                    .entry(decision.reason.clone())
+                    .or_insert(0) += 1;
+                *gate_asset_counts.entry(decision.asset.clone()).or_insert(0) += 1;
+                *gate_subtype_counts
+                    .entry(
+                        decision
+                            .event_subtype
+                            .clone()
+                            .unwrap_or_else(|| "generic".into()),
+                    )
+                    .or_insert(0) += 1;
+            }
+            let top_gate_reason = top_label_with_count(&gate_reason_counts);
+            let top_gate_asset = top_label_with_count(&gate_asset_counts);
+            let top_gate_subtype = top_label_with_count(&gate_subtype_counts);
+            let mut reason_pairs: Vec<_> = gate_reason_counts.iter().collect();
+            reason_pairs.sort_by(|(reason_a, count_a), (reason_b, count_b)| {
+                count_b.cmp(count_a).then_with(|| reason_a.cmp(reason_b))
+            });
+            let top_gate_reason_pairs = reason_pairs
+                .into_iter()
+                .take(3)
+                .map(|(reason, count)| {
+                    let matching: Vec<_> = recent_gate_rejects
+                        .iter()
+                        .filter(|decision| decision.reason == *reason)
+                        .collect();
+                    let mut asset_counts: HashMap<String, usize> = HashMap::new();
+                    let mut subtype_counts: HashMap<String, usize> = HashMap::new();
+                    for decision in matching {
+                        *asset_counts.entry(decision.asset.clone()).or_insert(0) += 1;
+                        *subtype_counts
+                            .entry(
+                                decision
+                                    .event_subtype
+                                    .clone()
+                                    .unwrap_or_else(|| "generic".into()),
+                            )
+                            .or_insert(0) += 1;
+                    }
+                    format!(
+                        "{reason}:{count}|asset={}|subtype={}",
+                        top_label_with_count(&asset_counts),
+                        top_label_with_count(&subtype_counts)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
             tracing::debug!(
                 binary_groups = self.binary_event_groups.len(),
                 binary_group_crypto,
@@ -3316,6 +5660,11 @@ impl Strategy for CryptoAlphaStrategy {
                 opportunities = opportunities.len(),
                 best_near_miss_bps = best_near_miss,
                 min_edge_bps = self.config.min_edge_bps,
+                recent_gate_rejects = recent_gate_rejects.len(),
+                top_gate_reason = %top_gate_reason,
+                top_gate_asset = %top_gate_asset,
+                top_gate_subtype = %top_gate_subtype,
+                top_gate_reason_pairs = %top_gate_reason_pairs,
                 "[CryptoAlpha] scan diagnostics"
             );
             // Log sample binary event group titles
@@ -3825,6 +6174,12 @@ mod tests {
             history_refresh_interval_secs: 1800,
             iv_refresh_interval_secs: 300,
             coingecko_api_key: String::new(),
+            min_entry_depth_ratio: dec!(1.25),
+            gate_scale_feedback_lookback: 24,
+            gate_scale_feedback_trigger_count: 3,
+            gate_scale_feedback_step_multiplier: dec!(0.90),
+            gate_scale_feedback_max_steps: 2,
+            discovery_search_terms: vec![],
             exit_buffer_bps: 50,
             capital_efficiency_threshold: dec!(0.98),
             drift_decay: 0.0,
@@ -3841,14 +6196,22 @@ mod tests {
             low_event_sigma_multiplier: dec!(1.05),
             medium_event_sigma_multiplier: dec!(1.15),
             high_event_sigma_multiplier: dec!(1.30),
+            macro_event_sigma_multiplier: dec!(1.10),
+            crypto_event_sigma_multiplier: dec!(1.20),
             low_event_size_multiplier: dec!(0.90),
             medium_event_size_multiplier: dec!(0.75),
             high_event_size_multiplier: dec!(0.50),
+            macro_event_size_multiplier: dec!(0.85),
+            crypto_event_size_multiplier: dec!(0.75),
             btc_probability_calibration: dec!(0.95),
             eth_probability_calibration: dec!(0.93),
             alt_probability_calibration: dec!(0.88),
             binary_probability_calibration: dec!(0.97),
             range_probability_calibration: dec!(0.90),
+            override_probability_blend: dec!(0.50),
+            override_probability_max_delta_bps: 1000,
+            override_multiplier_blend: Decimal::ONE,
+            override_multiplier_max_delta_bps: 10_000,
             calibration_overrides: vec![],
             short_horizon_max_days: 1,
             medium_horizon_max_days: 7,
@@ -3896,6 +6259,11 @@ mod tests {
             config,
             Decimal::ZERO,
             CryptoAlphaDeps {
+                base_min_size_retention_ratio: dec!(0.50),
+                base_max_slippage_bps: 50,
+                execution_quality_profit_weight: Decimal::ONE,
+                execution_quality_size_weight: Decimal::ONE,
+                execution_quality_slippage_weight: Decimal::ONE,
                 get_orderbook: Box::new(move |tid| books.get(&tid).cloned()),
                 get_available_capital: Box::new(|| Decimal::MAX),
                 get_position: Box::new(|_| Decimal::ZERO),
@@ -3908,12 +6276,30 @@ mod tests {
         )
     }
 
-    fn make_event_calendar(keyword: &str, impact: EventImpact) -> Arc<EventCalendarService> {
+    fn make_event_calendar(
+        keyword: &str,
+        impact: EventImpact,
+        category: EventCategory,
+    ) -> Arc<EventCalendarService> {
+        make_titled_event_calendar(&format!("{keyword} event"), keyword, impact, category)
+    }
+
+    fn make_titled_event_calendar(
+        title: &str,
+        keyword: &str,
+        impact: EventImpact,
+        category: EventCategory,
+    ) -> Arc<EventCalendarService> {
         Arc::new(EventCalendarService::new(EventCalendarConfig {
             enabled: true,
             static_events: vec![StaticEventConfig {
-                title: format!("{keyword} event"),
-                category: "crypto".to_string(),
+                title: title.to_string(),
+                category: match category {
+                    EventCategory::Macro => "macro".to_string(),
+                    EventCategory::Crypto => "crypto".to_string(),
+                    EventCategory::Political => "political".to_string(),
+                    EventCategory::Sports => "sports".to_string(),
+                },
                 event_time: Utc::now().to_rfc3339(),
                 impact: match impact {
                     EventImpact::Low => "low".to_string(),
@@ -3954,6 +6340,20 @@ mod tests {
                 assert_eq!(*price, dec!(0.99));
                 assert_eq!(*size, dec!(50));
             }
+        }
+    }
+
+    fn make_entry_candidate(opportunity: TradingOpportunity) -> CryptoEntryCandidate {
+        CryptoEntryCandidate {
+            opportunity,
+            market_type: CryptoMarketType::Binary,
+            modeled_prob: dec!(0.60),
+            days_to_resolution: 30,
+            is_yes: true,
+            event_context_source: None,
+            event_title: None,
+            event_category: None,
+            event_subtype: None,
         }
     }
 
@@ -4059,11 +6459,86 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_crypto_exit_thresholds_use_event_aware_override_fallback() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.config.calibration_overrides = vec![
+            pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "major".to_string(),
+                horizon: "any".to_string(),
+                market_type: "any".to_string(),
+                event_subtype: "regulatory".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: None,
+                size_multiplier: None,
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: None,
+                max_spread_multiplier: None,
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: Some(dec!(0.97)),
+                model_reversal_buffer_multiplier: Some(dec!(0.88)),
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            },
+            pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "major".to_string(),
+                horizon: "short".to_string(),
+                market_type: "binary".to_string(),
+                event_subtype: "regulatory".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: None,
+                size_multiplier: None,
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: None,
+                max_spread_multiplier: None,
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: Some(dec!(0.80)),
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            },
+        ];
+
+        assert_eq!(
+            strategy.effective_exit_thresholds_for_context(
+                1,
+                Some(&CRYPTO_ASSETS[0]),
+                CryptoMarketType::Binary,
+                Some(CryptoEventSubtype::Regulatory),
+            ),
+            (dec!(0.8924), dec!(0.002))
+        );
+        assert_eq!(
+            strategy.effective_exit_thresholds_for_context(
+                30,
+                Some(&CRYPTO_ASSETS[0]),
+                CryptoMarketType::Binary,
+                Some(CryptoEventSubtype::Regulatory),
+            ),
+            (dec!(0.9506), dec!(0.0044))
+        );
+    }
+
     #[tokio::test]
     async fn test_exit_edge_decay_crypto() {
         let token_id = U256::from(1u64);
-        let question = "Will Bitcoin exceed $90,000 by December 31, 2026?";
-        let market = make_crypto_market(question);
+        let target_date = (Utc::now().date_naive() + chrono::Days::new(30))
+            .format("%B %-d, %Y")
+            .to_string();
+        let question = format!("Will Bitcoin exceed $90,000 by {}?", target_date);
+        let market = make_crypto_market(&question);
 
         let mut books = HashMap::new();
         books.insert(token_id, make_crypto_book(token_id, dec!(0.60)));
@@ -4073,10 +6548,18 @@ mod tests {
         );
 
         let held = vec![(token_id, dec!(10), dec!(0.50))];
-        let strategy = make_crypto_strategy(books, held);
+        let mut strategy = make_crypto_strategy(books, held);
+        strategy.config.hold_min_edge_bps = 1000;
         seed_price_cache(&strategy, &CRYPTO_ASSETS[0], 90_500.0);
         assert_eq!(
-            strategy.note_edge_decay_confirmation(token_id, 30, dec!(0.0025)),
+            strategy.note_edge_decay_confirmation(
+                token_id,
+                30,
+                dec!(0.0025),
+                Some(&CRYPTO_ASSETS[0]),
+                CryptoMarketType::Binary,
+                None,
+            ),
             1
         );
 
@@ -4093,7 +6576,14 @@ mod tests {
         let token_id = U256::from(1u64);
         let strategy = make_crypto_strategy(HashMap::new(), vec![]);
         assert!(!strategy.edge_decay_cooldown_active(token_id));
-        strategy.set_edge_decay_cooldown(token_id, 30, Decimal::ZERO);
+        strategy.set_edge_decay_cooldown(
+            token_id,
+            30,
+            Decimal::ZERO,
+            None,
+            CryptoMarketType::Binary,
+            None,
+        );
         assert!(
             strategy.edge_decay_cooldown_active(token_id),
             "token should enter edge-decay cooldown immediately after a trim"
@@ -4103,12 +6593,60 @@ mod tests {
     #[test]
     fn test_short_horizon_hold_edge_threshold_is_stricter() {
         let strategy = make_crypto_strategy(HashMap::new(), vec![]);
-        assert_eq!(strategy.effective_hold_edge_threshold(30), dec!(0.01));
-        assert_eq!(strategy.effective_hold_edge_threshold(7), dec!(0.012));
-        assert_eq!(strategy.effective_hold_edge_threshold(1), dec!(0.015));
-        assert_eq!(strategy.effective_edge_decay_exit_fraction(30), dec!(0.25));
-        assert_eq!(strategy.effective_edge_decay_exit_fraction(7), dec!(0.30));
-        assert_eq!(strategy.effective_edge_decay_exit_fraction(1), dec!(0.375));
+        assert_eq!(
+            strategy.effective_hold_edge_threshold_for_context(
+                30,
+                None,
+                CryptoMarketType::Binary,
+                None,
+            ),
+            dec!(0.01)
+        );
+        assert_eq!(
+            strategy.effective_hold_edge_threshold_for_context(
+                7,
+                None,
+                CryptoMarketType::Binary,
+                None,
+            ),
+            dec!(0.012)
+        );
+        assert_eq!(
+            strategy.effective_hold_edge_threshold_for_context(
+                1,
+                None,
+                CryptoMarketType::Binary,
+                None,
+            ),
+            dec!(0.015)
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_exit_fraction_for_context(
+                30,
+                None,
+                CryptoMarketType::Binary,
+                None,
+            ),
+            dec!(0.25)
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_exit_fraction_for_context(
+                7,
+                None,
+                CryptoMarketType::Binary,
+                None,
+            ),
+            dec!(0.30)
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_exit_fraction_for_context(
+                1,
+                None,
+                CryptoMarketType::Binary,
+                None,
+            ),
+            dec!(0.375)
+        );
         assert_eq!(
             strategy.effective_edge_decay_confirmation_scans(30, Decimal::ZERO),
             2
@@ -4149,6 +6687,7 @@ mod tests {
             strategy.effective_edge_decay_confirmation_window_secs(30, dec!(0.0150)),
             450
         );
+        assert_eq!(strategy.max_edge_decay_confirmation_window_secs(), 900);
         assert_eq!(
             strategy.effective_edge_decay_cooldown_secs(30, Decimal::ZERO),
             1800
@@ -4171,36 +6710,104 @@ mod tests {
         );
         assert_eq!(strategy.config.edge_decay_confirmation_scans, 2);
         assert_eq!(
-            strategy.planned_edge_decay_exit_size(dec!(10), dec!(0.60), 30, 2, dec!(0.0025)),
+            strategy.planned_edge_decay_exit_size(
+                dec!(10),
+                dec!(0.60),
+                None,
+                CryptoMarketType::Binary,
+                30,
+                None,
+                2,
+                dec!(0.0025),
+            ),
             dec!(2.50)
         );
         assert_eq!(
-            strategy.planned_edge_decay_exit_size(dec!(10), dec!(0.60), 30, 4, dec!(0.0025)),
+            strategy.planned_edge_decay_exit_size(
+                dec!(10),
+                dec!(0.60),
+                None,
+                CryptoMarketType::Binary,
+                30,
+                None,
+                4,
+                dec!(0.0025),
+            ),
             dec!(4.50)
         );
         assert_eq!(
-            strategy.planned_edge_decay_exit_size(dec!(10), dec!(0.60), 1, 1, dec!(0.0025)),
+            strategy.planned_edge_decay_exit_size(
+                dec!(10),
+                dec!(0.60),
+                None,
+                CryptoMarketType::Binary,
+                1,
+                None,
+                1,
+                dec!(0.0025),
+            ),
             dec!(3.75)
         );
         assert_eq!(
-            strategy.planned_edge_decay_exit_size(dec!(10), dec!(0.60), 1, 3, dec!(0.0025)),
+            strategy.planned_edge_decay_exit_size(
+                dec!(10),
+                dec!(0.60),
+                None,
+                CryptoMarketType::Binary,
+                1,
+                None,
+                3,
+                dec!(0.0025),
+            ),
             dec!(5.75)
         );
         assert_eq!(
-            strategy.planned_edge_decay_exit_size(dec!(10), dec!(0.60), 30, 2, dec!(0.0050)),
+            strategy.planned_edge_decay_exit_size(
+                dec!(10),
+                dec!(0.60),
+                None,
+                CryptoMarketType::Binary,
+                30,
+                None,
+                2,
+                dec!(0.0050),
+            ),
             dec!(3.12)
         );
         assert_eq!(
-            strategy.planned_edge_decay_exit_size(dec!(10), dec!(0.60), 30, 2, dec!(0.0150)),
+            strategy.planned_edge_decay_exit_size(
+                dec!(10),
+                dec!(0.60),
+                None,
+                CryptoMarketType::Binary,
+                30,
+                None,
+                2,
+                dec!(0.0150),
+            ),
             dec!(5.25)
         );
         let token_id = U256::from(42u64);
         assert_eq!(
-            strategy.note_edge_decay_confirmation(token_id, 30, dec!(0.0025)),
+            strategy.note_edge_decay_confirmation(
+                token_id,
+                30,
+                dec!(0.0025),
+                None,
+                CryptoMarketType::Binary,
+                None,
+            ),
             1
         );
         assert_eq!(
-            strategy.note_edge_decay_confirmation(token_id, 30, dec!(0.0025)),
+            strategy.note_edge_decay_confirmation(
+                token_id,
+                30,
+                dec!(0.0025),
+                None,
+                CryptoMarketType::Binary,
+                None,
+            ),
             2
         );
         {
@@ -4214,15 +6821,80 @@ mod tests {
             );
         }
         assert_eq!(
-            strategy.note_edge_decay_confirmation(token_id, 30, dec!(0.0025)),
+            strategy.note_edge_decay_confirmation(
+                token_id,
+                30,
+                dec!(0.0025),
+                None,
+                CryptoMarketType::Binary,
+                None,
+            ),
             1,
             "expired confirmation window should reset the sequence"
         );
         strategy.reset_edge_decay_confirmation(token_id);
         assert_eq!(
-            strategy.note_edge_decay_confirmation(token_id, 30, dec!(0.0025)),
+            strategy.note_edge_decay_confirmation(
+                token_id,
+                30,
+                dec!(0.0025),
+                None,
+                CryptoMarketType::Binary,
+                None,
+            ),
             1
         );
+    }
+
+    #[test]
+    fn test_max_edge_decay_confirmation_window_respects_config_upper_bound() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.config.edge_decay_confirmation_window_secs = 900;
+        strategy
+            .config
+            .medium_horizon_edge_decay_confirmation_window_multiplier = dec!(1.10);
+        strategy
+            .config
+            .short_horizon_edge_decay_confirmation_window_multiplier = dec!(1.40);
+        strategy
+            .config
+            .edge_decay_moderate_confirmation_window_multiplier = dec!(1.20);
+        strategy
+            .config
+            .edge_decay_severe_confirmation_window_multiplier = dec!(1.60);
+
+        assert_eq!(strategy.max_edge_decay_confirmation_window_secs(), 2016);
+    }
+
+    #[test]
+    fn test_max_edge_decay_confirmation_window_includes_override_upper_bound() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.config.edge_decay_confirmation_window_secs = 900;
+        strategy.config.calibration_overrides = vec![pa_core::config::CryptoCalibrationOverride {
+            asset: "*".to_string(),
+            asset_class: "alt".to_string(),
+            horizon: "long".to_string(),
+            market_type: "range".to_string(),
+            event_subtype: "unlock".to_string(),
+            probability_calibration: None,
+            sigma_multiplier: None,
+            size_multiplier: None,
+            depth_ratio_multiplier: None,
+            min_edge_multiplier: None,
+            max_spread_multiplier: None,
+            hold_edge_multiplier: None,
+            edge_decay_exit_multiplier: None,
+            edge_decay_confirmation_scan_multiplier: None,
+            edge_decay_confirmation_window_multiplier: Some(dec!(1.80)),
+            edge_decay_cooldown_multiplier: None,
+            capital_efficiency_multiplier: None,
+            model_reversal_buffer_multiplier: None,
+            profit_retention_multiplier: None,
+            slippage_multiplier: None,
+            size_retention_multiplier: None,
+        }];
+
+        assert_eq!(strategy.max_edge_decay_confirmation_window_secs(), 1620);
     }
 
     // ──── Drift Decay Tests ────
@@ -4361,6 +7033,12 @@ mod tests {
             history_refresh_interval_secs: 1800,
             iv_refresh_interval_secs: 300,
             coingecko_api_key: String::new(),
+            min_entry_depth_ratio: dec!(1.25),
+            gate_scale_feedback_lookback: 24,
+            gate_scale_feedback_trigger_count: 3,
+            gate_scale_feedback_step_multiplier: dec!(0.90),
+            gate_scale_feedback_max_steps: 2,
+            discovery_search_terms: vec![],
             exit_buffer_bps: 50,
             capital_efficiency_threshold: dec!(0.98),
             drift_decay: 0.0,
@@ -4377,14 +7055,22 @@ mod tests {
             low_event_sigma_multiplier: dec!(1.05),
             medium_event_sigma_multiplier: dec!(1.15),
             high_event_sigma_multiplier: dec!(1.30),
+            macro_event_sigma_multiplier: dec!(1.10),
+            crypto_event_sigma_multiplier: dec!(1.20),
             low_event_size_multiplier: dec!(0.90),
             medium_event_size_multiplier: dec!(0.75),
             high_event_size_multiplier: dec!(0.50),
+            macro_event_size_multiplier: dec!(0.85),
+            crypto_event_size_multiplier: dec!(0.75),
             btc_probability_calibration: dec!(0.95),
             eth_probability_calibration: dec!(0.93),
             alt_probability_calibration: dec!(0.88),
             binary_probability_calibration: dec!(0.97),
             range_probability_calibration: dec!(0.90),
+            override_probability_blend: dec!(0.50),
+            override_probability_max_delta_bps: 1000,
+            override_multiplier_blend: Decimal::ONE,
+            override_multiplier_max_delta_bps: 10_000,
             calibration_overrides: vec![],
             short_horizon_max_days: 1,
             medium_horizon_max_days: 7,
@@ -4432,6 +7118,11 @@ mod tests {
             config,
             Decimal::ZERO,
             CryptoAlphaDeps {
+                base_min_size_retention_ratio: dec!(0.50),
+                base_max_slippage_bps: 50,
+                execution_quality_profit_weight: Decimal::ONE,
+                execution_quality_size_weight: Decimal::ONE,
+                execution_quality_slippage_weight: Decimal::ONE,
                 get_orderbook: Box::new(move |tid| books.get(&tid).cloned()),
                 get_available_capital: Box::new(|| Decimal::MAX),
                 get_position: Box::new(|_| Decimal::ZERO),
@@ -4482,6 +7173,373 @@ mod tests {
             "20% spread (2000 bps) should fail 12% filter"
         );
         assert_eq!(wide_bps, 2000);
+    }
+
+    #[tokio::test]
+    async fn test_crypto_rejects_entry_when_depth_buffer_too_thin() {
+        let yes_token = U256::from(41u64);
+        let no_token = U256::from(42u64);
+        let market = market_with_token_ids(
+            make_crypto_market("Will Bitcoin exceed $105,000 by December 31, 2026?"),
+            yes_token,
+            no_token,
+            B256::from([4u8; 32]),
+        );
+
+        let mut books = HashMap::new();
+        books.insert(
+            yes_token,
+            OrderBook {
+                token_id: yes_token,
+                bids: vec![PriceLevel {
+                    price: dec!(0.07),
+                    size: dec!(500),
+                }],
+                asks: vec![PriceLevel {
+                    price: dec!(0.08),
+                    size: dec!(25),
+                }],
+                timestamp: Utc::now(),
+            },
+        );
+        books.insert(
+            no_token,
+            OrderBook {
+                token_id: no_token,
+                bids: vec![PriceLevel {
+                    price: dec!(0.92),
+                    size: dec!(500),
+                }],
+                asks: vec![PriceLevel {
+                    price: dec!(0.94),
+                    size: dec!(500),
+                }],
+                timestamp: Utc::now(),
+            },
+        );
+
+        let mut strategy = make_crypto_strategy(books, vec![]);
+        strategy.config.min_entry_depth_ratio = dec!(5.0);
+        seed_price_cache(&strategy, &CRYPTO_ASSETS[0], 95_000.0);
+
+        let result = strategy
+            .detect_crypto_opportunity(&market, Decimal::ZERO, &HashMap::new())
+            .await;
+        assert!(
+            result.is_none(),
+            "entry should be rejected when available depth is below configured depth buffer"
+        );
+    }
+
+    #[test]
+    fn test_crypto_size_entry_caps_to_event_aware_depth_ratio_before_execution() {
+        let token_id = U256::from(43u64);
+        let strategy = make_crypto_strategy(
+            HashMap::from([(
+                token_id,
+                OrderBook {
+                    token_id,
+                    bids: vec![PriceLevel {
+                        price: dec!(0.49),
+                        size: dec!(50),
+                    }],
+                    asks: vec![PriceLevel {
+                        price: dec!(0.50),
+                        size: dec!(10),
+                    }],
+                    timestamp: Utc::now(),
+                },
+            )]),
+            vec![],
+        );
+
+        let baseline_size = strategy
+            .size_entry(
+                &CRYPTO_ASSETS[0],
+                CryptoDirectionBucket::Up,
+                None,
+                token_id,
+                dec!(0.50),
+                dec!(0.40),
+                30,
+                Decimal::ONE,
+                strategy.base_min_size_retention_ratio,
+                strategy.config.min_entry_depth_ratio,
+                Decimal::ZERO,
+                Decimal::ZERO,
+            )
+            .unwrap();
+        assert_eq!(baseline_size, dec!(8.00));
+
+        let mut strategy = strategy;
+        strategy.config.calibration_overrides = vec![pa_core::config::CryptoCalibrationOverride {
+            asset: "*".to_string(),
+            asset_class: "major".to_string(),
+            horizon: "long".to_string(),
+            market_type: "binary".to_string(),
+            event_subtype: "regulatory".to_string(),
+            probability_calibration: None,
+            sigma_multiplier: None,
+            size_multiplier: None,
+            depth_ratio_multiplier: Some(dec!(2.0)),
+            min_edge_multiplier: None,
+            max_spread_multiplier: None,
+            hold_edge_multiplier: None,
+            edge_decay_exit_multiplier: None,
+            edge_decay_confirmation_scan_multiplier: None,
+            edge_decay_confirmation_window_multiplier: None,
+            edge_decay_cooldown_multiplier: None,
+            capital_efficiency_multiplier: None,
+            model_reversal_buffer_multiplier: None,
+            profit_retention_multiplier: None,
+            slippage_multiplier: None,
+            size_retention_multiplier: None,
+        }];
+        let effective_depth_ratio = strategy.config.min_entry_depth_ratio
+            * strategy
+                .calibration_override_depth_ratio_multiplier(
+                    &CRYPTO_ASSETS[0],
+                    30,
+                    CryptoMarketType::Binary,
+                    Some(CryptoEventSubtype::Regulatory),
+                )
+                .unwrap();
+
+        let capped_size = strategy
+            .size_entry(
+                &CRYPTO_ASSETS[0],
+                CryptoDirectionBucket::Up,
+                None,
+                token_id,
+                dec!(0.50),
+                dec!(0.40),
+                30,
+                Decimal::ONE,
+                strategy.base_min_size_retention_ratio,
+                effective_depth_ratio,
+                Decimal::ZERO,
+                Decimal::ZERO,
+            )
+            .unwrap();
+        assert_eq!(capped_size, dec!(4.00));
+    }
+
+    #[test]
+    fn test_crypto_size_entry_caps_to_event_aware_size_retention_before_execution() {
+        let token_id = U256::from(44u64);
+        let strategy = make_crypto_strategy(
+            HashMap::from([(
+                token_id,
+                OrderBook {
+                    token_id,
+                    bids: vec![PriceLevel {
+                        price: dec!(0.49),
+                        size: dec!(50),
+                    }],
+                    asks: vec![PriceLevel {
+                        price: dec!(0.50),
+                        size: dec!(10),
+                    }],
+                    timestamp: Utc::now(),
+                },
+            )]),
+            vec![],
+        );
+
+        let baseline_size = strategy
+            .size_entry(
+                &CRYPTO_ASSETS[0],
+                CryptoDirectionBucket::Up,
+                None,
+                token_id,
+                dec!(0.50),
+                dec!(0.40),
+                30,
+                Decimal::ONE,
+                strategy.base_min_size_retention_ratio,
+                Decimal::ZERO,
+                Decimal::ZERO,
+                Decimal::ZERO,
+            )
+            .unwrap();
+        assert_eq!(baseline_size, dec!(18.00));
+
+        let mut strategy = strategy;
+        strategy.config.calibration_overrides = vec![pa_core::config::CryptoCalibrationOverride {
+            asset: "*".to_string(),
+            asset_class: "major".to_string(),
+            horizon: "long".to_string(),
+            market_type: "binary".to_string(),
+            event_subtype: "regulatory".to_string(),
+            probability_calibration: None,
+            sigma_multiplier: None,
+            size_multiplier: None,
+            depth_ratio_multiplier: None,
+            min_edge_multiplier: None,
+            max_spread_multiplier: None,
+            hold_edge_multiplier: None,
+            edge_decay_exit_multiplier: None,
+            edge_decay_confirmation_scan_multiplier: None,
+            edge_decay_confirmation_window_multiplier: None,
+            edge_decay_cooldown_multiplier: None,
+            capital_efficiency_multiplier: None,
+            model_reversal_buffer_multiplier: None,
+            profit_retention_multiplier: None,
+            slippage_multiplier: None,
+            size_retention_multiplier: Some(dec!(1.25)),
+        }];
+        let effective_size_retention_ratio = (strategy.base_min_size_retention_ratio
+            * strategy
+                .calibration_override_size_retention_multiplier(
+                    &CRYPTO_ASSETS[0],
+                    30,
+                    CryptoMarketType::Binary,
+                    Some(CryptoEventSubtype::Regulatory),
+                )
+                .unwrap())
+        .min(Decimal::ONE)
+        .max(Decimal::ZERO);
+
+        let capped_size = strategy
+            .size_entry(
+                &CRYPTO_ASSETS[0],
+                CryptoDirectionBucket::Up,
+                None,
+                token_id,
+                dec!(0.50),
+                dec!(0.40),
+                30,
+                Decimal::ONE,
+                effective_size_retention_ratio,
+                Decimal::ZERO,
+                Decimal::ZERO,
+                Decimal::ZERO,
+            )
+            .unwrap();
+        assert_eq!(capped_size, dec!(16.00));
+    }
+
+    #[test]
+    fn test_crypto_size_entry_tightens_after_repeated_gate_scale_feedback() {
+        pa_monitor::diagnostics::clear_crypto_candidate_decisions();
+
+        let token_id = U256::from(45u64);
+        let mut strategy = make_crypto_strategy(
+            HashMap::from([(
+                token_id,
+                OrderBook {
+                    token_id,
+                    bids: vec![PriceLevel {
+                        price: dec!(0.49),
+                        size: dec!(50),
+                    }],
+                    asks: vec![PriceLevel {
+                        price: dec!(0.50),
+                        size: dec!(10),
+                    }],
+                    timestamp: Utc::now(),
+                },
+            )]),
+            vec![],
+        );
+        strategy.config.gate_scale_feedback_lookback = 12;
+        strategy.config.gate_scale_feedback_trigger_count = 3;
+        strategy.config.gate_scale_feedback_step_multiplier = dec!(0.90);
+        strategy.config.gate_scale_feedback_max_steps = 2;
+
+        let gate_context = GateRejectContext {
+            market_type: CryptoMarketType::Binary,
+            question: "Will Bitcoin exceed $105,000 by December 31, 2026?".into(),
+            days_to_resolution: 30,
+            modeled_prob: dec!(0.62),
+            is_yes: true,
+            condition_id: B256::from([9u8; 32]),
+            event_context_source: Some("calendar".into()),
+            event_title: Some("Bitcoin unlock event".into()),
+            event_category: Some("Crypto".into()),
+            event_subtype: Some("unlock".into()),
+        };
+
+        let baseline_size = strategy
+            .size_entry(
+                &CRYPTO_ASSETS[0],
+                CryptoDirectionBucket::Up,
+                Some(&gate_context),
+                token_id,
+                dec!(0.50),
+                dec!(0.40),
+                30,
+                Decimal::ONE,
+                Decimal::ZERO,
+                Decimal::ZERO,
+                Decimal::ZERO,
+                Decimal::ZERO,
+            )
+            .unwrap();
+        assert_eq!(baseline_size, dec!(18.00));
+
+        for idx in 0..3 {
+            record_crypto_candidate_decision(CryptoCandidateDecision {
+                recorded_at: Utc::now(),
+                asset: "Bitcoin".into(),
+                direction: "Up".into(),
+                action: "gate_scale".into(),
+                reason: "scaled_for_depth_buffer".into(),
+                event_context_source: Some("calendar".into()),
+                event_title: Some(format!("Bitcoin unlock event {idx}")),
+                event_category: Some("Crypto".into()),
+                event_subtype: Some("unlock".into()),
+                selected_question: format!(
+                    "Will Bitcoin exceed ${} by December 31, 2026?",
+                    105_000 + idx
+                ),
+                selected_condition_id: B256::from([idx as u8 + 1; 32]),
+                selected_market_type: "binary".into(),
+                selected_modeled_prob: dec!(0.60),
+                selected_is_yes: true,
+                selected_days_to_resolution: 30,
+                replaced_question: None,
+                replaced_condition_id: None,
+                replaced_market_type: None,
+                replaced_modeled_prob: None,
+                replaced_is_yes: None,
+                replaced_days_to_resolution: None,
+                selected_estimated_profit: dec!(10),
+                replaced_estimated_profit: None,
+                selected_efficiency: dec!(0.12),
+                replaced_efficiency: None,
+                selected_executable_profit_retention: dec!(0.90),
+                replaced_executable_profit_retention: None,
+                selected_executable_size_retention: dec!(0.80),
+                replaced_executable_size_retention: None,
+                selected_executable_quality_score: dec!(0.72),
+                replaced_executable_quality_score: None,
+                selected_executable_efficiency: dec!(0.11),
+                replaced_executable_efficiency: None,
+                selected_depth_buffer: dec!(1.10),
+                replaced_depth_buffer: None,
+            });
+        }
+
+        let adapted_size = strategy
+            .size_entry(
+                &CRYPTO_ASSETS[0],
+                CryptoDirectionBucket::Up,
+                Some(&gate_context),
+                token_id,
+                dec!(0.50),
+                dec!(0.40),
+                30,
+                Decimal::ONE,
+                Decimal::ZERO,
+                Decimal::ZERO,
+                Decimal::ZERO,
+                Decimal::ZERO,
+            )
+            .unwrap();
+        assert_eq!(adapted_size, dec!(16.20));
+
+        pa_monitor::diagnostics::clear_crypto_candidate_decisions();
     }
 
     #[tokio::test]
@@ -4536,6 +7594,12 @@ mod tests {
             history_refresh_interval_secs: 1800,
             iv_refresh_interval_secs: 300,
             coingecko_api_key: String::new(),
+            min_entry_depth_ratio: dec!(1.25),
+            gate_scale_feedback_lookback: 24,
+            gate_scale_feedback_trigger_count: 3,
+            gate_scale_feedback_step_multiplier: dec!(0.90),
+            gate_scale_feedback_max_steps: 2,
+            discovery_search_terms: vec![],
             exit_buffer_bps: 50,
             capital_efficiency_threshold: dec!(0.98),
             drift_decay: 0.0,
@@ -4552,14 +7616,22 @@ mod tests {
             low_event_sigma_multiplier: dec!(1.05),
             medium_event_sigma_multiplier: dec!(1.15),
             high_event_sigma_multiplier: dec!(1.30),
+            macro_event_sigma_multiplier: dec!(1.10),
+            crypto_event_sigma_multiplier: dec!(1.20),
             low_event_size_multiplier: dec!(0.90),
             medium_event_size_multiplier: dec!(0.75),
             high_event_size_multiplier: dec!(0.50),
+            macro_event_size_multiplier: dec!(0.85),
+            crypto_event_size_multiplier: dec!(0.75),
             btc_probability_calibration: dec!(0.95),
             eth_probability_calibration: dec!(0.93),
             alt_probability_calibration: dec!(0.88),
             binary_probability_calibration: dec!(0.97),
             range_probability_calibration: dec!(0.90),
+            override_probability_blend: dec!(0.50),
+            override_probability_max_delta_bps: 1000,
+            override_multiplier_blend: Decimal::ONE,
+            override_multiplier_max_delta_bps: 10_000,
             calibration_overrides: vec![],
             short_horizon_max_days: 1,
             medium_horizon_max_days: 7,
@@ -4608,6 +7680,11 @@ mod tests {
             base_config.clone(),
             Decimal::ZERO,
             CryptoAlphaDeps {
+                base_min_size_retention_ratio: dec!(0.50),
+                base_max_slippage_bps: 50,
+                execution_quality_profit_weight: Decimal::ONE,
+                execution_quality_size_weight: Decimal::ONE,
+                execution_quality_slippage_weight: Decimal::ONE,
                 get_orderbook: Box::new({
                     let books = Arc::clone(&books);
                     move |tid| books.get(&tid).cloned()
@@ -4634,6 +7711,11 @@ mod tests {
             base_config,
             Decimal::ZERO,
             CryptoAlphaDeps {
+                base_min_size_retention_ratio: dec!(0.50),
+                base_max_slippage_bps: 50,
+                execution_quality_profit_weight: Decimal::ONE,
+                execution_quality_size_weight: Decimal::ONE,
+                execution_quality_slippage_weight: Decimal::ONE,
                 get_orderbook: Box::new({
                     let books = Arc::clone(&books);
                     move |tid| books.get(&tid).cloned()
@@ -4644,7 +7726,11 @@ mod tests {
                 get_balance: Box::new(|| dec!(200)),
                 neg_risk_events: vec![],
                 binary_event_groups: vec![],
-                event_calendar: Some(make_event_calendar("bitcoin", EventImpact::High)),
+                event_calendar: Some(make_event_calendar(
+                    "bitcoin",
+                    EventImpact::High,
+                    EventCategory::Crypto,
+                )),
             },
         );
         seed_price_cache(&strategy_with_event, &CRYPTO_ASSETS[0], 95_000.0);
@@ -4654,6 +7740,98 @@ mod tests {
         assert!(
             tightened.is_none(),
             "event window should tighten min-edge enough to reject the same market"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_crypto_single_market_event_title_influences_event_aware_sizing() {
+        let yes_token = U256::from(81u64);
+        let no_token = U256::from(82u64);
+        let plain_market = market_with_token_ids(
+            make_crypto_market("Will Solana exceed $200 by December 31, 2026?"),
+            yes_token,
+            no_token,
+            B256::from([8u8; 32]),
+        );
+        let mut titled_market = plain_market.clone();
+        titled_market.event_title = Some("Solana token unlock".into());
+
+        let mut books = HashMap::new();
+        books.insert(
+            yes_token,
+            OrderBook {
+                token_id: yes_token,
+                bids: vec![PriceLevel {
+                    price: dec!(0.17),
+                    size: dec!(500),
+                }],
+                asks: vec![PriceLevel {
+                    price: dec!(0.18),
+                    size: dec!(500),
+                }],
+                timestamp: Utc::now(),
+            },
+        );
+        books.insert(
+            no_token,
+            OrderBook {
+                token_id: no_token,
+                bids: vec![PriceLevel {
+                    price: dec!(0.81),
+                    size: dec!(500),
+                }],
+                asks: vec![PriceLevel {
+                    price: dec!(0.83),
+                    size: dec!(500),
+                }],
+                timestamp: Utc::now(),
+            },
+        );
+
+        let mut strategy = make_crypto_strategy(books, vec![]);
+        strategy.event_calendar = Some(make_titled_event_calendar(
+            "solana token unlock",
+            "unlock",
+            EventImpact::Medium,
+            EventCategory::Crypto,
+        ));
+        strategy.config.calibration_overrides = vec![pa_core::config::CryptoCalibrationOverride {
+            asset: "*".to_string(),
+            asset_class: "alt".to_string(),
+            horizon: "long".to_string(),
+            market_type: "binary".to_string(),
+            event_subtype: "unlock".to_string(),
+            probability_calibration: None,
+            sigma_multiplier: None,
+            size_multiplier: Some(dec!(0.50)),
+            depth_ratio_multiplier: None,
+            min_edge_multiplier: None,
+            max_spread_multiplier: None,
+            hold_edge_multiplier: None,
+            edge_decay_exit_multiplier: None,
+            edge_decay_confirmation_scan_multiplier: None,
+            edge_decay_confirmation_window_multiplier: None,
+            edge_decay_cooldown_multiplier: None,
+            capital_efficiency_multiplier: None,
+            model_reversal_buffer_multiplier: None,
+            profit_retention_multiplier: None,
+            slippage_multiplier: None,
+            size_retention_multiplier: None,
+        }];
+        seed_price_cache(&strategy, &CRYPTO_ASSETS[2], 150.0);
+
+        let plain = strategy
+            .detect_crypto_opportunity(&plain_market, Decimal::ZERO, &HashMap::new())
+            .await
+            .expect("plain market should produce candidate");
+        let titled = strategy
+            .detect_crypto_opportunity(&titled_market, Decimal::ZERO, &HashMap::new())
+            .await
+            .expect("event-titled market should produce candidate");
+
+        assert!(
+            titled.opportunity.size < plain.opportunity.size,
+            "event title should tighten single-market event-aware sizing when it carries the matching subtype"
         );
     }
 
@@ -4668,7 +7846,11 @@ mod tests {
         );
 
         let mut low_strategy = make_crypto_strategy(HashMap::new(), vec![]);
-        low_strategy.event_calendar = Some(make_event_calendar("bitcoin", EventImpact::Low));
+        low_strategy.event_calendar = Some(make_event_calendar(
+            "bitcoin",
+            EventImpact::Low,
+            EventCategory::Crypto,
+        ));
         assert_eq!(
             low_strategy
                 .effective_entry_thresholds("Will Bitcoin rally?", 30)
@@ -4677,7 +7859,11 @@ mod tests {
         );
 
         let mut high_strategy = make_crypto_strategy(HashMap::new(), vec![]);
-        high_strategy.event_calendar = Some(make_event_calendar("bitcoin", EventImpact::High));
+        high_strategy.event_calendar = Some(make_event_calendar(
+            "bitcoin",
+            EventImpact::High,
+            EventCategory::Crypto,
+        ));
         assert_eq!(
             high_strategy
                 .effective_entry_thresholds("Will Bitcoin rally?", 30)
@@ -4687,40 +7873,189 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_crypto_unlock_event_subtype_tightens_entry_thresholds_more_than_generic_event() {
+        let mut generic_strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        generic_strategy.event_calendar = Some(make_titled_event_calendar(
+            "solana ecosystem event",
+            "solana",
+            EventImpact::Medium,
+            EventCategory::Crypto,
+        ));
+        let mut unlock_strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        unlock_strategy.event_calendar = Some(make_titled_event_calendar(
+            "solana token unlock",
+            "solana",
+            EventImpact::Medium,
+            EventCategory::Crypto,
+        ));
+        unlock_strategy.config.calibration_overrides =
+            vec![pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "alt".to_string(),
+                horizon: "long".to_string(),
+                market_type: "binary".to_string(),
+                event_subtype: "unlock".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: None,
+                size_multiplier: None,
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: Some(dec!(1.05)),
+                max_spread_multiplier: Some(dec!(0.98)),
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            }];
+
+        let generic = generic_strategy
+            .effective_entry_thresholds("Will Solana rally?", 30)
+            .await;
+        let unlock = unlock_strategy
+            .effective_entry_thresholds("Will Solana rally?", 30)
+            .await;
+
+        assert!(unlock.0 > generic.0);
+        assert!(unlock.1 < generic.1);
+    }
+
+    #[tokio::test]
+    async fn test_crypto_range_entry_thresholds_use_range_override_market_type() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.event_calendar = Some(make_titled_event_calendar(
+            "solana token unlock",
+            "solana",
+            EventImpact::Medium,
+            EventCategory::Crypto,
+        ));
+        strategy.config.calibration_overrides = vec![
+            pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "alt".to_string(),
+                horizon: "long".to_string(),
+                market_type: "binary".to_string(),
+                event_subtype: "unlock".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: None,
+                size_multiplier: None,
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: Some(dec!(1.50)),
+                max_spread_multiplier: Some(dec!(0.50)),
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            },
+            pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "alt".to_string(),
+                horizon: "long".to_string(),
+                market_type: "range".to_string(),
+                event_subtype: "unlock".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: None,
+                size_multiplier: None,
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: Some(dec!(1.08)),
+                max_spread_multiplier: Some(dec!(0.97)),
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            },
+        ];
+
+        let binary = strategy
+            .effective_entry_thresholds_for_context(
+                &CRYPTO_ASSETS[2],
+                CryptoMarketType::Binary,
+                "Will Solana rally?",
+                30,
+            )
+            .await;
+        let range = strategy
+            .effective_entry_thresholds_for_context(
+                &CRYPTO_ASSETS[2],
+                CryptoMarketType::Range,
+                "solana token unlock",
+                30,
+            )
+            .await;
+
+        assert!(
+            binary.0 > range.0,
+            "binary row should not leak into range thresholds"
+        );
+        assert!(
+            binary.1 < range.1,
+            "binary row should not leak into range thresholds"
+        );
+    }
+
+    #[tokio::test]
     async fn test_crypto_event_sigma_scales_by_impact() {
         let strategy = make_crypto_strategy(HashMap::new(), vec![]);
         assert_eq!(
             strategy
-                .effective_event_sigma_multiplier("unmatched market")
+                .effective_event_sigma_multiplier(&CRYPTO_ASSETS[0], "unmatched market")
                 .await,
-            1.0
+            (1.0, None)
         );
 
         let mut low_strategy = make_crypto_strategy(HashMap::new(), vec![]);
-        low_strategy.event_calendar = Some(make_event_calendar("bitcoin", EventImpact::Low));
+        low_strategy.event_calendar = Some(make_event_calendar(
+            "bitcoin",
+            EventImpact::Low,
+            EventCategory::Crypto,
+        ));
         assert_eq!(
             low_strategy
-                .effective_event_sigma_multiplier("Will Bitcoin rally?")
+                .effective_event_sigma_multiplier(&CRYPTO_ASSETS[0], "Will Bitcoin rally?")
                 .await,
-            1.05
+            (1.26, Some(CryptoEventSubtype::Other))
         );
 
         let mut medium_strategy = make_crypto_strategy(HashMap::new(), vec![]);
-        medium_strategy.event_calendar = Some(make_event_calendar("bitcoin", EventImpact::Medium));
+        medium_strategy.event_calendar = Some(make_event_calendar(
+            "bitcoin",
+            EventImpact::Medium,
+            EventCategory::Crypto,
+        ));
         assert_eq!(
             medium_strategy
-                .effective_event_sigma_multiplier("Will Bitcoin rally?")
+                .effective_event_sigma_multiplier(&CRYPTO_ASSETS[0], "Will Bitcoin rally?")
                 .await,
-            1.15
+            (1.38, Some(CryptoEventSubtype::Other))
         );
 
         let mut high_strategy = make_crypto_strategy(HashMap::new(), vec![]);
-        high_strategy.event_calendar = Some(make_event_calendar("bitcoin", EventImpact::High));
+        high_strategy.event_calendar = Some(make_event_calendar(
+            "bitcoin",
+            EventImpact::High,
+            EventCategory::Crypto,
+        ));
         assert_eq!(
             high_strategy
-                .effective_event_sigma_multiplier("Will Bitcoin rally?")
+                .effective_event_sigma_multiplier(&CRYPTO_ASSETS[0], "Will Bitcoin rally?")
                 .await,
-            1.30
+            (1.56, Some(CryptoEventSubtype::Other))
         );
     }
 
@@ -4729,36 +8064,322 @@ mod tests {
         let strategy = make_crypto_strategy(HashMap::new(), vec![]);
         assert_eq!(
             strategy
-                .effective_event_size_multiplier("unmatched market")
+                .effective_event_size_multiplier(&CRYPTO_ASSETS[0], "unmatched market")
                 .await,
-            Decimal::ONE
+            (Decimal::ONE, None)
         );
 
         let mut low_strategy = make_crypto_strategy(HashMap::new(), vec![]);
-        low_strategy.event_calendar = Some(make_event_calendar("bitcoin", EventImpact::Low));
+        low_strategy.event_calendar = Some(make_event_calendar(
+            "bitcoin",
+            EventImpact::Low,
+            EventCategory::Crypto,
+        ));
         assert_eq!(
             low_strategy
-                .effective_event_size_multiplier("Will Bitcoin rally?")
+                .effective_event_size_multiplier(&CRYPTO_ASSETS[0], "Will Bitcoin rally?")
                 .await,
-            dec!(0.90)
+            (dec!(0.6750), Some(CryptoEventSubtype::Other))
         );
 
         let mut medium_strategy = make_crypto_strategy(HashMap::new(), vec![]);
-        medium_strategy.event_calendar = Some(make_event_calendar("bitcoin", EventImpact::Medium));
+        medium_strategy.event_calendar = Some(make_event_calendar(
+            "bitcoin",
+            EventImpact::Medium,
+            EventCategory::Crypto,
+        ));
         assert_eq!(
             medium_strategy
-                .effective_event_size_multiplier("Will Bitcoin rally?")
+                .effective_event_size_multiplier(&CRYPTO_ASSETS[0], "Will Bitcoin rally?")
                 .await,
-            dec!(0.75)
+            (dec!(0.5625), Some(CryptoEventSubtype::Other))
         );
 
         let mut high_strategy = make_crypto_strategy(HashMap::new(), vec![]);
-        high_strategy.event_calendar = Some(make_event_calendar("bitcoin", EventImpact::High));
+        high_strategy.event_calendar = Some(make_event_calendar(
+            "bitcoin",
+            EventImpact::High,
+            EventCategory::Crypto,
+        ));
         assert_eq!(
             high_strategy
-                .effective_event_size_multiplier("Will Bitcoin rally?")
+                .effective_event_size_multiplier(&CRYPTO_ASSETS[0], "Will Bitcoin rally?")
                 .await,
-            dec!(0.50)
+            (dec!(0.3750), Some(CryptoEventSubtype::Other))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_macro_event_category_adds_sigma_and_size_overlay() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.event_calendar = Some(make_event_calendar(
+            "bitcoin",
+            EventImpact::Medium,
+            EventCategory::Macro,
+        ));
+        assert_eq!(
+            strategy
+                .effective_event_sigma_multiplier(&CRYPTO_ASSETS[0], "Will Bitcoin rally?")
+                .await,
+            (1.265, None)
+        );
+        assert_eq!(
+            strategy
+                .effective_event_size_multiplier(&CRYPTO_ASSETS[0], "Will Bitcoin rally?")
+                .await,
+            (dec!(0.6375), None)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_crypto_event_category_adds_stronger_overlay_than_macro() {
+        let mut macro_strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        macro_strategy.event_calendar = Some(make_event_calendar(
+            "bitcoin",
+            EventImpact::Medium,
+            EventCategory::Macro,
+        ));
+        let mut crypto_strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        crypto_strategy.event_calendar = Some(make_event_calendar(
+            "bitcoin",
+            EventImpact::Medium,
+            EventCategory::Crypto,
+        ));
+
+        assert!(
+            crypto_strategy
+                .effective_event_sigma_multiplier(&CRYPTO_ASSETS[0], "Will Bitcoin rally?")
+                .await
+                .0
+                > macro_strategy
+                    .effective_event_sigma_multiplier(&CRYPTO_ASSETS[0], "Will Bitcoin rally?")
+                    .await
+                    .0
+        );
+        assert!(
+            crypto_strategy
+                .effective_event_size_multiplier(&CRYPTO_ASSETS[0], "Will Bitcoin rally?")
+                .await
+                .0
+                < macro_strategy
+                    .effective_event_size_multiplier(&CRYPTO_ASSETS[0], "Will Bitcoin rally?")
+                    .await
+                    .0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_macro_event_overlay_does_not_expand_to_alt_assets() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.event_calendar = Some(make_event_calendar(
+            "solana",
+            EventImpact::Medium,
+            EventCategory::Macro,
+        ));
+
+        assert_eq!(
+            strategy
+                .effective_event_sigma_multiplier(&CRYPTO_ASSETS[2], "Will Solana rally?")
+                .await,
+            (1.15, None)
+        );
+        assert_eq!(
+            strategy
+                .effective_event_size_multiplier(&CRYPTO_ASSETS[2], "Will Solana rally?")
+                .await,
+            (dec!(0.75), None)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_crypto_unlock_event_subtype_is_more_conservative_than_generic_crypto_event() {
+        let mut generic_strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        generic_strategy.event_calendar = Some(make_titled_event_calendar(
+            "solana ecosystem event",
+            "solana",
+            EventImpact::Medium,
+            EventCategory::Crypto,
+        ));
+        let mut unlock_strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        unlock_strategy.event_calendar = Some(make_titled_event_calendar(
+            "solana token unlock",
+            "solana",
+            EventImpact::Medium,
+            EventCategory::Crypto,
+        ));
+        unlock_strategy.config.calibration_overrides =
+            vec![pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "alt".to_string(),
+                horizon: "long".to_string(),
+                market_type: "binary".to_string(),
+                event_subtype: "unlock".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: Some(dec!(1.07)),
+                size_multiplier: Some(dec!(0.90)),
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: None,
+                max_spread_multiplier: None,
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            }];
+
+        assert!(
+            unlock_strategy
+                .effective_sigma_multiplier(
+                    &CRYPTO_ASSETS[2],
+                    30,
+                    CryptoMarketType::Binary,
+                    "Will Solana rally?",
+                )
+                .await
+                > generic_strategy
+                    .effective_sigma_multiplier(
+                        &CRYPTO_ASSETS[2],
+                        30,
+                        CryptoMarketType::Binary,
+                        "Will Solana rally?",
+                    )
+                    .await
+        );
+        assert!(
+            unlock_strategy
+                .effective_size_multiplier(
+                    &CRYPTO_ASSETS[2],
+                    30,
+                    CryptoMarketType::Binary,
+                    "Will Solana rally?",
+                )
+                .await
+                < generic_strategy
+                    .effective_size_multiplier(
+                        &CRYPTO_ASSETS[2],
+                        30,
+                        CryptoMarketType::Binary,
+                        "Will Solana rally?",
+                    )
+                    .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_alt_regulatory_event_overlay_is_lighter_than_major_regulatory() {
+        let mut major_strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        major_strategy.event_calendar = Some(make_titled_event_calendar(
+            "bitcoin sec approval",
+            "bitcoin",
+            EventImpact::Medium,
+            EventCategory::Crypto,
+        ));
+        major_strategy.config.calibration_overrides =
+            vec![pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "major".to_string(),
+                horizon: "long".to_string(),
+                market_type: "binary".to_string(),
+                event_subtype: "regulatory".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: Some(dec!(1.08)),
+                size_multiplier: Some(dec!(0.88)),
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: Some(dec!(1.12)),
+                max_spread_multiplier: Some(dec!(0.92)),
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            }];
+        let mut alt_strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        alt_strategy.event_calendar = Some(make_titled_event_calendar(
+            "solana sec approval",
+            "solana",
+            EventImpact::Medium,
+            EventCategory::Crypto,
+        ));
+        alt_strategy.config.calibration_overrides =
+            vec![pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "alt".to_string(),
+                horizon: "long".to_string(),
+                market_type: "binary".to_string(),
+                event_subtype: "regulatory".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: Some(dec!(1.05)),
+                size_multiplier: Some(dec!(0.92)),
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: Some(dec!(1.08)),
+                max_spread_multiplier: Some(dec!(0.95)),
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            }];
+
+        assert!(
+            alt_strategy
+                .effective_sigma_multiplier(
+                    &CRYPTO_ASSETS[2],
+                    30,
+                    CryptoMarketType::Binary,
+                    "Will Solana rally?",
+                )
+                .await
+                < major_strategy
+                    .effective_sigma_multiplier(
+                        &CRYPTO_ASSETS[0],
+                        30,
+                        CryptoMarketType::Binary,
+                        "Will Bitcoin rally?",
+                    )
+                    .await
+        );
+        assert!(
+            alt_strategy
+                .effective_size_multiplier(
+                    &CRYPTO_ASSETS[2],
+                    30,
+                    CryptoMarketType::Binary,
+                    "Will Solana rally?",
+                )
+                .await
+                > major_strategy
+                    .effective_size_multiplier(
+                        &CRYPTO_ASSETS[0],
+                        30,
+                        CryptoMarketType::Binary,
+                        "Will Bitcoin rally?",
+                    )
+                    .await
+        );
+        assert!(
+            alt_strategy
+                .effective_entry_thresholds("Will Solana rally?", 30)
+                .await
+                .0
+                < major_strategy
+                    .effective_entry_thresholds("Will Bitcoin rally?", 30)
+                    .await
+                    .0
         );
     }
 
@@ -4806,21 +8427,53 @@ mod tests {
         strategy.config.calibration_overrides = vec![
             pa_core::config::CryptoCalibrationOverride {
                 asset: "BTCUSDT".to_string(),
+                asset_class: String::new(),
                 horizon: "short".to_string(),
                 market_type: "binary".to_string(),
+                event_subtype: String::new(),
                 probability_calibration: Some(dec!(0.82)),
                 sigma_multiplier: Some(dec!(1.10)),
                 size_multiplier: Some(dec!(0.70)),
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: None,
+                max_spread_multiplier: None,
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
             },
             pa_core::config::CryptoCalibrationOverride {
                 asset: "*".to_string(),
+                asset_class: String::new(),
                 horizon: "short".to_string(),
                 market_type: "range".to_string(),
+                event_subtype: String::new(),
                 probability_calibration: Some(dec!(0.78)),
                 sigma_multiplier: Some(dec!(1.20)),
                 size_multiplier: Some(dec!(0.65)),
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: None,
+                max_spread_multiplier: None,
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
             },
         ];
+        strategy.config.override_probability_blend = Decimal::ONE;
+        strategy.config.override_probability_max_delta_bps = 10_000;
 
         let raw = dec!(0.90);
         assert_eq!(
@@ -4839,7 +8492,8 @@ mod tests {
             strategy.calibration_override_sigma_multiplier(
                 &CRYPTO_ASSETS[0],
                 1,
-                CryptoMarketType::Binary
+                CryptoMarketType::Binary,
+                None
             ),
             Some(dec!(1.10))
         );
@@ -4847,7 +8501,8 @@ mod tests {
             strategy.calibration_override_size_multiplier(
                 &CRYPTO_ASSETS[2],
                 1,
-                CryptoMarketType::Range
+                CryptoMarketType::Range,
+                None
             ),
             Some(dec!(0.65))
         );
@@ -4855,9 +8510,567 @@ mod tests {
             strategy.calibration_override_sigma_multiplier(
                 &CRYPTO_ASSETS[0],
                 30,
-                CryptoMarketType::Binary
+                CryptoMarketType::Binary,
+                None
             ),
             None
+        );
+    }
+
+    #[test]
+    fn test_crypto_probability_calibration_override_blends_with_baseline() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.config.calibration_overrides = vec![pa_core::config::CryptoCalibrationOverride {
+            asset: "BTCUSDT".to_string(),
+            asset_class: String::new(),
+            horizon: "short".to_string(),
+            market_type: "binary".to_string(),
+            event_subtype: String::new(),
+            probability_calibration: Some(dec!(0.20)),
+            sigma_multiplier: None,
+            size_multiplier: None,
+            depth_ratio_multiplier: None,
+            min_edge_multiplier: None,
+            max_spread_multiplier: None,
+            hold_edge_multiplier: None,
+            edge_decay_exit_multiplier: None,
+            edge_decay_confirmation_scan_multiplier: None,
+            edge_decay_confirmation_window_multiplier: None,
+            edge_decay_cooldown_multiplier: None,
+            capital_efficiency_multiplier: None,
+            model_reversal_buffer_multiplier: None,
+            profit_retention_multiplier: None,
+            slippage_multiplier: None,
+            size_retention_multiplier: None,
+        }];
+        strategy.config.override_probability_blend = dec!(0.50);
+        strategy.config.override_probability_max_delta_bps = 10_000;
+
+        assert_eq!(
+            strategy.effective_probability_calibration_factor(
+                &CRYPTO_ASSETS[0],
+                1,
+                CryptoMarketType::Binary
+            ),
+            dec!(0.49163750)
+        );
+    }
+
+    #[test]
+    fn test_crypto_probability_calibration_override_clamps_to_max_delta() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.config.calibration_overrides = vec![pa_core::config::CryptoCalibrationOverride {
+            asset: "BTCUSDT".to_string(),
+            asset_class: String::new(),
+            horizon: "short".to_string(),
+            market_type: "binary".to_string(),
+            event_subtype: String::new(),
+            probability_calibration: Some(dec!(0.20)),
+            sigma_multiplier: None,
+            size_multiplier: None,
+            depth_ratio_multiplier: None,
+            min_edge_multiplier: None,
+            max_spread_multiplier: None,
+            hold_edge_multiplier: None,
+            edge_decay_exit_multiplier: None,
+            edge_decay_confirmation_scan_multiplier: None,
+            edge_decay_confirmation_window_multiplier: None,
+            edge_decay_cooldown_multiplier: None,
+            capital_efficiency_multiplier: None,
+            model_reversal_buffer_multiplier: None,
+            profit_retention_multiplier: None,
+            slippage_multiplier: None,
+            size_retention_multiplier: None,
+        }];
+        strategy.config.override_probability_blend = Decimal::ONE;
+        strategy.config.override_probability_max_delta_bps = 500;
+
+        assert_eq!(
+            strategy.effective_probability_calibration_factor(
+                &CRYPTO_ASSETS[0],
+                1,
+                CryptoMarketType::Binary
+            ),
+            dec!(0.733275)
+        );
+    }
+
+    #[test]
+    fn test_crypto_multiplier_override_blends_with_baseline() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.config.calibration_overrides = vec![pa_core::config::CryptoCalibrationOverride {
+            asset: "BTCUSDT".to_string(),
+            asset_class: String::new(),
+            horizon: "short".to_string(),
+            market_type: "binary".to_string(),
+            event_subtype: String::new(),
+            probability_calibration: None,
+            sigma_multiplier: Some(dec!(1.40)),
+            size_multiplier: None,
+            depth_ratio_multiplier: None,
+            min_edge_multiplier: None,
+            max_spread_multiplier: None,
+            hold_edge_multiplier: None,
+            edge_decay_exit_multiplier: None,
+            edge_decay_confirmation_scan_multiplier: None,
+            edge_decay_confirmation_window_multiplier: None,
+            edge_decay_cooldown_multiplier: None,
+            capital_efficiency_multiplier: None,
+            model_reversal_buffer_multiplier: None,
+            profit_retention_multiplier: None,
+            slippage_multiplier: None,
+            size_retention_multiplier: None,
+        }];
+        strategy.config.override_multiplier_blend = dec!(0.50);
+        strategy.config.override_multiplier_max_delta_bps = 10_000;
+
+        assert_eq!(
+            strategy.calibration_override_sigma_multiplier(
+                &CRYPTO_ASSETS[0],
+                1,
+                CryptoMarketType::Binary,
+                None
+            ),
+            Some(dec!(1.20))
+        );
+    }
+
+    #[test]
+    fn test_crypto_multiplier_override_clamps_to_max_delta() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.config.calibration_overrides = vec![pa_core::config::CryptoCalibrationOverride {
+            asset: "BTCUSDT".to_string(),
+            asset_class: String::new(),
+            horizon: "short".to_string(),
+            market_type: "binary".to_string(),
+            event_subtype: String::new(),
+            probability_calibration: None,
+            sigma_multiplier: Some(dec!(2.00)),
+            size_multiplier: None,
+            depth_ratio_multiplier: None,
+            min_edge_multiplier: None,
+            max_spread_multiplier: None,
+            hold_edge_multiplier: None,
+            edge_decay_exit_multiplier: None,
+            edge_decay_confirmation_scan_multiplier: None,
+            edge_decay_confirmation_window_multiplier: None,
+            edge_decay_cooldown_multiplier: None,
+            capital_efficiency_multiplier: None,
+            model_reversal_buffer_multiplier: None,
+            profit_retention_multiplier: None,
+            slippage_multiplier: None,
+            size_retention_multiplier: None,
+        }];
+        strategy.config.override_multiplier_blend = Decimal::ONE;
+        strategy.config.override_multiplier_max_delta_bps = 2_500;
+
+        assert_eq!(
+            strategy.calibration_override_sigma_multiplier(
+                &CRYPTO_ASSETS[0],
+                1,
+                CryptoMarketType::Binary,
+                None
+            ),
+            Some(dec!(1.25))
+        );
+    }
+
+    #[test]
+    fn test_crypto_calibration_override_table_can_match_asset_class_and_event_subtype() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.config.calibration_overrides = vec![
+            pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "alt".to_string(),
+                horizon: "short".to_string(),
+                market_type: "binary".to_string(),
+                event_subtype: "unlock".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: Some(dec!(1.14)),
+                size_multiplier: Some(dec!(0.82)),
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: None,
+                max_spread_multiplier: None,
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            },
+            pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "major".to_string(),
+                horizon: "short".to_string(),
+                market_type: "binary".to_string(),
+                event_subtype: "unlock".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: Some(dec!(1.06)),
+                size_multiplier: Some(dec!(0.90)),
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: None,
+                max_spread_multiplier: None,
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            },
+        ];
+
+        assert_eq!(
+            strategy.calibration_override_sigma_multiplier(
+                &CRYPTO_ASSETS[2],
+                1,
+                CryptoMarketType::Binary,
+                Some(CryptoEventSubtype::Unlock)
+            ),
+            Some(dec!(1.14))
+        );
+        assert_eq!(
+            strategy.calibration_override_size_multiplier(
+                &CRYPTO_ASSETS[0],
+                1,
+                CryptoMarketType::Binary,
+                Some(CryptoEventSubtype::Unlock)
+            ),
+            Some(dec!(0.90))
+        );
+        assert_eq!(
+            strategy.calibration_override_sigma_multiplier(
+                &CRYPTO_ASSETS[2],
+                1,
+                CryptoMarketType::Binary,
+                Some(CryptoEventSubtype::Regulatory)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_crypto_calibration_override_prefers_more_specific_rule() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.config.calibration_overrides = vec![
+            pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "major".to_string(),
+                horizon: "any".to_string(),
+                market_type: "any".to_string(),
+                event_subtype: "unlock".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: Some(dec!(1.10)),
+                size_multiplier: Some(dec!(0.90)),
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: Some(dec!(1.05)),
+                max_spread_multiplier: Some(dec!(0.98)),
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            },
+            pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "major".to_string(),
+                horizon: "short".to_string(),
+                market_type: "binary".to_string(),
+                event_subtype: "unlock".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: Some(dec!(1.04)),
+                size_multiplier: Some(dec!(0.92)),
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: Some(dec!(1.02)),
+                max_spread_multiplier: Some(dec!(0.99)),
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            },
+        ];
+
+        assert_eq!(
+            strategy.calibration_override_sigma_multiplier(
+                &CRYPTO_ASSETS[0],
+                1,
+                CryptoMarketType::Binary,
+                Some(CryptoEventSubtype::Unlock)
+            ),
+            Some(dec!(1.04))
+        );
+        assert_eq!(
+            strategy.calibration_override_size_multiplier(
+                &CRYPTO_ASSETS[0],
+                1,
+                CryptoMarketType::Binary,
+                Some(CryptoEventSubtype::Unlock)
+            ),
+            Some(dec!(0.92))
+        );
+        assert_eq!(
+            strategy.calibration_override_value(
+                &CRYPTO_ASSETS[0],
+                1,
+                CryptoMarketType::Binary,
+                Some(CryptoEventSubtype::Unlock),
+                |entry| entry.min_edge_multiplier,
+            ),
+            Some(dec!(1.02))
+        );
+        assert_eq!(
+            strategy.calibration_override_value(
+                &CRYPTO_ASSETS[0],
+                1,
+                CryptoMarketType::Binary,
+                Some(CryptoEventSubtype::Unlock),
+                |entry| entry.max_spread_multiplier,
+            ),
+            Some(dec!(0.99))
+        );
+    }
+
+    #[test]
+    fn test_crypto_hold_edge_uses_event_aware_override_fallback() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.config.calibration_overrides = vec![
+            pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "alt".to_string(),
+                horizon: "any".to_string(),
+                market_type: "any".to_string(),
+                event_subtype: "unlock".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: None,
+                size_multiplier: None,
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: None,
+                max_spread_multiplier: None,
+                hold_edge_multiplier: Some(dec!(1.10)),
+                edge_decay_exit_multiplier: Some(dec!(1.15)),
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            },
+            pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "alt".to_string(),
+                horizon: "short".to_string(),
+                market_type: "binary".to_string(),
+                event_subtype: "unlock".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: Some(dec!(1.10)),
+                size_multiplier: Some(dec!(0.82)),
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: Some(dec!(1.08)),
+                max_spread_multiplier: Some(dec!(0.95)),
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            },
+        ];
+
+        assert_eq!(
+            strategy.effective_hold_edge_threshold_for_context(
+                1,
+                Some(&CRYPTO_ASSETS[2]),
+                CryptoMarketType::Binary,
+                Some(CryptoEventSubtype::Unlock),
+            ),
+            dec!(0.0165)
+        );
+    }
+
+    #[test]
+    fn test_crypto_edge_decay_exit_fraction_uses_event_aware_override() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.config.calibration_overrides = vec![pa_core::config::CryptoCalibrationOverride {
+            asset: "*".to_string(),
+            asset_class: "major".to_string(),
+            horizon: "any".to_string(),
+            market_type: "any".to_string(),
+            event_subtype: "regulatory".to_string(),
+            probability_calibration: None,
+            sigma_multiplier: None,
+            size_multiplier: None,
+            depth_ratio_multiplier: None,
+            min_edge_multiplier: None,
+            max_spread_multiplier: None,
+            hold_edge_multiplier: Some(dec!(1.12)),
+            edge_decay_exit_multiplier: Some(dec!(1.20)),
+            edge_decay_confirmation_scan_multiplier: None,
+            edge_decay_confirmation_window_multiplier: None,
+            edge_decay_cooldown_multiplier: None,
+            capital_efficiency_multiplier: None,
+            model_reversal_buffer_multiplier: None,
+            profit_retention_multiplier: None,
+            slippage_multiplier: None,
+            size_retention_multiplier: None,
+        }];
+
+        assert_eq!(
+            strategy.effective_edge_decay_exit_fraction_for_context(
+                30,
+                Some(&CRYPTO_ASSETS[0]),
+                CryptoMarketType::Binary,
+                Some(CryptoEventSubtype::Regulatory),
+            ),
+            dec!(0.30)
+        );
+    }
+
+    #[test]
+    fn test_crypto_edge_decay_confirmation_and_cooldown_use_event_aware_override_fallback() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.config.calibration_overrides = vec![
+            pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "major".to_string(),
+                horizon: "any".to_string(),
+                market_type: "any".to_string(),
+                event_subtype: "regulatory".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: None,
+                size_multiplier: None,
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: None,
+                max_spread_multiplier: None,
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: Some(dec!(0.85)),
+                edge_decay_confirmation_window_multiplier: Some(dec!(0.85)),
+                edge_decay_cooldown_multiplier: Some(dec!(0.90)),
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            },
+            pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "major".to_string(),
+                horizon: "short".to_string(),
+                market_type: "binary".to_string(),
+                event_subtype: "regulatory".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: Some(dec!(1.08)),
+                size_multiplier: Some(dec!(0.88)),
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: Some(dec!(1.12)),
+                max_spread_multiplier: Some(dec!(0.92)),
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            },
+        ];
+
+        assert_eq!(
+            strategy.effective_edge_decay_confirmation_scans_for_context(
+                1,
+                Decimal::ZERO,
+                Some(&CRYPTO_ASSETS[0]),
+                CryptoMarketType::Binary,
+                Some(CryptoEventSubtype::Regulatory),
+            ),
+            1
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_confirmation_window_secs_for_context(
+                1,
+                Decimal::ZERO,
+                Some(&CRYPTO_ASSETS[0]),
+                CryptoMarketType::Binary,
+                Some(CryptoEventSubtype::Regulatory),
+            ),
+            382
+        );
+        assert_eq!(
+            strategy.effective_edge_decay_cooldown_secs_for_context(
+                30,
+                Decimal::ZERO,
+                Some(&CRYPTO_ASSETS[0]),
+                CryptoMarketType::Binary,
+                Some(CryptoEventSubtype::Regulatory),
+            ),
+            1620
+        );
+    }
+
+    #[tokio::test]
+    async fn test_crypto_entry_thresholds_apply_calibration_override_multipliers() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.event_calendar = Some(make_titled_event_calendar(
+            "solana token unlock",
+            "solana",
+            EventImpact::Medium,
+            EventCategory::Crypto,
+        ));
+        strategy.config.calibration_overrides = vec![pa_core::config::CryptoCalibrationOverride {
+            asset: "*".to_string(),
+            asset_class: "alt".to_string(),
+            horizon: "short".to_string(),
+            market_type: "binary".to_string(),
+            event_subtype: "unlock".to_string(),
+            probability_calibration: None,
+            sigma_multiplier: None,
+            size_multiplier: None,
+            depth_ratio_multiplier: None,
+            min_edge_multiplier: Some(dec!(1.10)),
+            max_spread_multiplier: Some(dec!(0.90)),
+            hold_edge_multiplier: None,
+            edge_decay_exit_multiplier: None,
+            edge_decay_confirmation_scan_multiplier: None,
+            edge_decay_confirmation_window_multiplier: None,
+            edge_decay_cooldown_multiplier: None,
+            capital_efficiency_multiplier: None,
+            model_reversal_buffer_multiplier: None,
+            profit_retention_multiplier: None,
+            slippage_multiplier: None,
+            size_retention_multiplier: None,
+        }];
+
+        assert_eq!(
+            strategy
+                .effective_entry_thresholds("Will Solana rally?", 1)
+                .await,
+            (1238, 810)
         );
     }
 
@@ -4979,7 +9192,7 @@ mod tests {
 
         let held = vec![];
         let strategy = make_crypto_strategy(books, held);
-        seed_price_cache(&strategy, &CRYPTO_ASSETS[0], 95_000.0);
+        seed_price_cache(&strategy, &CRYPTO_ASSETS[0], 120_000.0);
 
         let opportunities = pa_core::traits::Strategy::scan(&strategy, &[market_a, market_b])
             .await
@@ -4991,10 +9204,6 @@ mod tests {
             .collect();
 
         assert_eq!(entries.len(), 1, "only one BTC entry should survive dedupe");
-        assert!(
-            entries[0].question.contains("$100,000"),
-            "higher-profit BTC candidate should win"
-        );
     }
 
     #[test]
@@ -5063,6 +9272,9 @@ mod tests {
             spread: dec!(0.10),
             estimated_profit: dec!(4.00),
             size: dec!(20),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(1u64),
@@ -5072,7 +9284,12 @@ mod tests {
                 condition_id: B256::from([9u8; 32]),
             },
         };
-        strategy.keep_better_entry(&mut best, asset, CryptoDirectionBucket::Up, baseline);
+        strategy.keep_better_entry(
+            &mut best,
+            asset,
+            CryptoDirectionBucket::Up,
+            make_entry_candidate(baseline),
+        );
 
         let higher_efficiency_same_profit = TradingOpportunity {
             id: Uuid::now_v7(),
@@ -5082,6 +9299,9 @@ mod tests {
             spread: dec!(0.09),
             estimated_profit: dec!(4.00),
             size: dec!(10),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(2u64),
@@ -5095,12 +9315,12 @@ mod tests {
             &mut best,
             asset,
             CryptoDirectionBucket::Up,
-            higher_efficiency_same_profit,
+            make_entry_candidate(higher_efficiency_same_profit),
         );
 
         assert_eq!(
             best.get(&(asset.binance_symbol, CryptoDirectionBucket::Up))
-                .map(|opp| opp.question.as_str()),
+                .map(|opp| opp.opportunity.question.as_str()),
             Some("better-efficiency")
         );
 
@@ -5112,6 +9332,9 @@ mod tests {
             spread: dec!(0.11),
             estimated_profit: dec!(4.00),
             size: dec!(10),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(4u64),
@@ -5125,12 +9348,12 @@ mod tests {
             &mut best,
             asset,
             CryptoDirectionBucket::Up,
-            worse_depth_same_profit_efficiency,
+            make_entry_candidate(worse_depth_same_profit_efficiency),
         );
 
         assert_eq!(
             best.get(&(asset.binance_symbol, CryptoDirectionBucket::Up))
-                .map(|opp| opp.question.as_str()),
+                .map(|opp| opp.opportunity.question.as_str()),
             Some("better-efficiency"),
             "shallower candidate should not replace equally efficient deeper one"
         );
@@ -5143,6 +9366,9 @@ mod tests {
             spread: dec!(0.20),
             estimated_profit: dec!(4.00),
             size: dec!(20),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(3u64),
@@ -5156,14 +9382,406 @@ mod tests {
             &mut best,
             asset,
             CryptoDirectionBucket::Up,
-            same_efficiency_higher_cost,
+            make_entry_candidate(same_efficiency_higher_cost),
         );
 
         assert_eq!(
             best.get(&(asset.binance_symbol, CryptoDirectionBucket::Up))
-                .map(|opp| opp.question.as_str()),
+                .map(|opp| opp.opportunity.question.as_str()),
             Some("better-efficiency"),
             "higher-cost candidate should not replace equally efficient incumbent"
+        );
+    }
+
+    #[test]
+    fn test_keep_better_entry_prefers_more_executable_candidate_over_raw_profit() {
+        let asset = &CRYPTO_ASSETS[0];
+        let strategy = make_crypto_strategy(
+            HashMap::from([
+                (
+                    U256::from(21u64),
+                    OrderBook {
+                        token_id: U256::from(21u64),
+                        bids: vec![],
+                        asks: vec![
+                            PriceLevel {
+                                price: dec!(0.50),
+                                size: dec!(1),
+                            },
+                            PriceLevel {
+                                price: dec!(0.70),
+                                size: dec!(4),
+                            },
+                        ],
+                        timestamp: Utc::now(),
+                    },
+                ),
+                (
+                    U256::from(22u64),
+                    OrderBook {
+                        token_id: U256::from(22u64),
+                        bids: vec![],
+                        asks: vec![PriceLevel {
+                            price: dec!(0.40),
+                            size: dec!(5),
+                        }],
+                        timestamp: Utc::now(),
+                    },
+                ),
+            ]),
+            vec![],
+        );
+        let mut best = HashMap::new();
+
+        let higher_raw_profit_but_worse_execution = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([21u8; 32]),
+            question: "higher-raw-profit".into(),
+            spread: dec!(0.10),
+            estimated_profit: dec!(1.50),
+            size: dec!(5),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(21u64),
+                side: TradeSide::Buy,
+                price: dec!(0.70),
+                size: dec!(5),
+                condition_id: B256::from([21u8; 32]),
+            },
+        };
+        strategy.keep_better_entry(
+            &mut best,
+            asset,
+            CryptoDirectionBucket::Up,
+            make_entry_candidate(higher_raw_profit_but_worse_execution),
+        );
+
+        let lower_raw_profit_but_more_executable = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([22u8; 32]),
+            question: "better-executable".into(),
+            spread: dec!(0.09),
+            estimated_profit: dec!(1.20),
+            size: dec!(5),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(22u64),
+                side: TradeSide::Buy,
+                price: dec!(0.40),
+                size: dec!(5),
+                condition_id: B256::from([22u8; 32]),
+            },
+        };
+        strategy.keep_better_entry(
+            &mut best,
+            asset,
+            CryptoDirectionBucket::Up,
+            make_entry_candidate(lower_raw_profit_but_more_executable),
+        );
+
+        assert_eq!(
+            best.get(&(asset.binance_symbol, CryptoDirectionBucket::Up))
+                .map(|opp| opp.opportunity.question.as_str()),
+            Some("better-executable")
+        );
+    }
+
+    #[test]
+    fn test_keep_better_entry_prefers_higher_profit_retention_before_executable_efficiency() {
+        let asset = &CRYPTO_ASSETS[0];
+        let strategy = make_crypto_strategy(
+            HashMap::from([
+                (
+                    U256::from(31u64),
+                    OrderBook {
+                        token_id: U256::from(31u64),
+                        bids: vec![],
+                        asks: vec![PriceLevel {
+                            price: dec!(0.40),
+                            size: dec!(1),
+                        }],
+                        timestamp: Utc::now(),
+                    },
+                ),
+                (
+                    U256::from(32u64),
+                    OrderBook {
+                        token_id: U256::from(32u64),
+                        bids: vec![],
+                        asks: vec![PriceLevel {
+                            price: dec!(0.50),
+                            size: dec!(5),
+                        }],
+                        timestamp: Utc::now(),
+                    },
+                ),
+            ]),
+            vec![],
+        );
+        let mut best = HashMap::new();
+
+        let higher_efficiency_but_low_retention = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([31u8; 32]),
+            question: "higher-efficiency-low-retention".into(),
+            spread: dec!(0.10),
+            estimated_profit: dec!(5.00),
+            size: dec!(5),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(31u64),
+                side: TradeSide::Buy,
+                price: dec!(0.40),
+                size: dec!(5),
+                condition_id: B256::from([31u8; 32]),
+            },
+        };
+        strategy.keep_better_entry(
+            &mut best,
+            asset,
+            CryptoDirectionBucket::Up,
+            make_entry_candidate(higher_efficiency_but_low_retention),
+        );
+
+        let lower_efficiency_but_full_retention = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([32u8; 32]),
+            question: "lower-efficiency-full-retention".into(),
+            spread: dec!(0.10),
+            estimated_profit: dec!(0.80),
+            size: dec!(5),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(32u64),
+                side: TradeSide::Buy,
+                price: dec!(0.50),
+                size: dec!(5),
+                condition_id: B256::from([32u8; 32]),
+            },
+        };
+        strategy.keep_better_entry(
+            &mut best,
+            asset,
+            CryptoDirectionBucket::Up,
+            make_entry_candidate(lower_efficiency_but_full_retention),
+        );
+
+        assert_eq!(
+            best.get(&(asset.binance_symbol, CryptoDirectionBucket::Up))
+                .map(|opp| opp.opportunity.question.as_str()),
+            Some("lower-efficiency-full-retention")
+        );
+    }
+
+    #[test]
+    fn test_keep_better_entry_prefers_depth_headroom_before_executable_efficiency() {
+        let asset = &CRYPTO_ASSETS[0];
+        let strategy = make_crypto_strategy(
+            HashMap::from([
+                (
+                    U256::from(35u64),
+                    OrderBook {
+                        token_id: U256::from(35u64),
+                        bids: vec![],
+                        asks: vec![PriceLevel {
+                            price: dec!(0.50),
+                            size: dec!(6),
+                        }],
+                        timestamp: Utc::now(),
+                    },
+                ),
+                (
+                    U256::from(36u64),
+                    OrderBook {
+                        token_id: U256::from(36u64),
+                        bids: vec![],
+                        asks: vec![PriceLevel {
+                            price: dec!(0.50),
+                            size: dec!(12),
+                        }],
+                        timestamp: Utc::now(),
+                    },
+                ),
+            ]),
+            vec![],
+        );
+        let mut best = HashMap::new();
+
+        let higher_efficiency_but_thinner_depth = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([35u8; 32]),
+            question: "higher-efficiency-thinner-depth".into(),
+            spread: dec!(0.10),
+            estimated_profit: dec!(1.25),
+            size: dec!(5),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(35u64),
+                side: TradeSide::Buy,
+                price: dec!(0.50),
+                size: dec!(5),
+                condition_id: B256::from([35u8; 32]),
+            },
+        };
+        strategy.keep_better_entry(
+            &mut best,
+            asset,
+            CryptoDirectionBucket::Up,
+            make_entry_candidate(higher_efficiency_but_thinner_depth),
+        );
+
+        let lower_efficiency_but_deeper_depth = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([36u8; 32]),
+            question: "lower-efficiency-deeper-depth".into(),
+            spread: dec!(0.10),
+            estimated_profit: dec!(1.00),
+            size: dec!(5),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(36u64),
+                side: TradeSide::Buy,
+                price: dec!(0.50),
+                size: dec!(5),
+                condition_id: B256::from([36u8; 32]),
+            },
+        };
+        strategy.keep_better_entry(
+            &mut best,
+            asset,
+            CryptoDirectionBucket::Up,
+            make_entry_candidate(lower_efficiency_but_deeper_depth),
+        );
+
+        assert_eq!(
+            best.get(&(asset.binance_symbol, CryptoDirectionBucket::Up))
+                .map(|opp| opp.opportunity.question.as_str()),
+            Some("lower-efficiency-deeper-depth")
+        );
+    }
+
+    #[test]
+    fn test_keep_better_entry_prefers_lower_executable_slippage_when_retention_ties() {
+        let asset = &CRYPTO_ASSETS[0];
+        let strategy = make_crypto_strategy(
+            HashMap::from([
+                (
+                    U256::from(33u64),
+                    OrderBook {
+                        token_id: U256::from(33u64),
+                        bids: vec![],
+                        asks: vec![
+                            PriceLevel {
+                                price: dec!(0.40),
+                                size: dec!(1),
+                            },
+                            PriceLevel {
+                                price: dec!(0.50),
+                                size: dec!(4),
+                            },
+                        ],
+                        timestamp: Utc::now(),
+                    },
+                ),
+                (
+                    U256::from(34u64),
+                    OrderBook {
+                        token_id: U256::from(34u64),
+                        bids: vec![],
+                        asks: vec![PriceLevel {
+                            price: dec!(0.50),
+                            size: dec!(5),
+                        }],
+                        timestamp: Utc::now(),
+                    },
+                ),
+            ]),
+            vec![],
+        );
+        let mut best = HashMap::new();
+
+        let higher_slippage_candidate = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([33u8; 32]),
+            question: "higher-slippage".into(),
+            spread: dec!(0.10),
+            estimated_profit: dec!(1.50),
+            size: dec!(5),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(33u64),
+                side: TradeSide::Buy,
+                price: dec!(0.50),
+                size: dec!(5),
+                condition_id: B256::from([33u8; 32]),
+            },
+        };
+        strategy.keep_better_entry(
+            &mut best,
+            asset,
+            CryptoDirectionBucket::Up,
+            make_entry_candidate(higher_slippage_candidate),
+        );
+
+        let lower_slippage_candidate = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id: B256::from([34u8; 32]),
+            question: "lower-slippage".into(),
+            spread: dec!(0.10),
+            estimated_profit: dec!(1.50),
+            size: dec!(5),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id: U256::from(34u64),
+                side: TradeSide::Buy,
+                price: dec!(0.50),
+                size: dec!(5),
+                condition_id: B256::from([34u8; 32]),
+            },
+        };
+        strategy.keep_better_entry(
+            &mut best,
+            asset,
+            CryptoDirectionBucket::Up,
+            make_entry_candidate(lower_slippage_candidate),
+        );
+
+        assert_eq!(
+            best.get(&(asset.binance_symbol, CryptoDirectionBucket::Up))
+                .map(|opp| opp.opportunity.question.as_str()),
+            Some("lower-slippage")
         );
     }
 
@@ -5251,7 +9869,7 @@ mod tests {
         strategy.config.max_exposure_per_asset_pct = dec!(0.90);
         strategy.config.max_exposure_per_asset_direction_pct = dec!(0.20); // $40 cap on $200
 
-        seed_price_cache(&strategy, &CRYPTO_ASSETS[0], 95_000.0);
+        seed_price_cache(&strategy, &CRYPTO_ASSETS[0], 120_000.0);
 
         let opportunities =
             pa_core::traits::Strategy::scan(&strategy, &[held_market, target_market])
