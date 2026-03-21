@@ -83,6 +83,21 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-21
+- Area: `crates/pa-strategy/src/crypto_alpha.rs`, `crates/pa-monitor/src/api.rs`
+- Change: Fixed crypto binary exit probability recomputation to use the same `event_title + question` event-aware sigma context as entry detection, added observable `beyond_entry_horizon` gate-reject diagnostics when markets are filtered by the new hard entry window, taught NegRisk entry-day inference to fall back to constituent market `end_date` instead of assuming `30` days when the event title omits a date, and surfaced `beyond_entry_horizon` as a first-class tuning hint/override suggestion in the status API.
+- Why: After tightening crypto entries to one day, the remaining gaps were inconsistent event-context handling between entry and binary exits, invisible horizon filtering in front-door diagnostics, and overly blunt NegRisk date inference that could block short-dated events simply because the parent title lacked an explicit calendar date.
+
+### 2026-03-21
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `README.md`
+- Change: Tightened the default crypto hard entry horizon from `3` days to `1` day by changing `crypto_alpha.max_entry_days`, while leaving the exit path unchanged so existing holdings can still be managed and unwound normally.
+- Why: The crypto strategy has been progressively tuned toward short-dated execution and event-driven trading, so keeping the default entry window at three days still admitted too many swing-style markets relative to the strategy's strongest edge and execution model.
+
+### 2026-03-21
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added a crypto-specific hard entry horizon via `crypto_alpha.max_entry_days` (default `3`) and enforced it across single-market, grouped-binary, and NegRisk entry generation so long-dated crypto markets no longer produce new positions while existing holdings still flow through exit scans; also added focused regression coverage for filtering long-dated entry candidates.
+- Why: The crypto strategy had already been tuned around short-dated horizons, but long-dated markets were still entering because horizon buckets only changed multipliers instead of acting as a hard entry filter, which left live crypto positions drifting into December 2026 contracts despite the intended short-term trading posture.
+
+### 2026-03-21
 - Area: `crates/pa-strategy/src/crypto_alpha.rs`, `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
 - Change: Refined adaptive crypto gate-scale feedback so repeated pre-sizing now weights exact-asset matches, reason-specific friction, recency, and shrink severity instead of using a flat bucket count; preserved retained-size severity on `gate_scale` diagnostics; replaced generic entry override suggestions with per-bucket single-action suggestions; and added post-entry tuning/override suggestions derived from recent crypto exits to both the status API and the CryptoMarkets page.
 - Why: The remaining crypto strategy gaps were no longer missing control surfaces but overly coarse feedback loops: repeated pre-sizing still reacted too bluntly, override suggestions could remain too generic to apply safely, and holding/exit diagnostics were not yet feeding back into actionable post-entry parameter guidance.

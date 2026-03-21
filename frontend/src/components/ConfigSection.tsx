@@ -112,6 +112,7 @@ const FIELD_HINTS: Record<string, Record<string, string>> = {
     calibration_overrides: "表驱动校准覆盖：按 asset/asset_class/horizon/market_type/event_subtype 精细覆盖默认校准",
     short_horizon_max_days: "短期期限桶最大天数",
     medium_horizon_max_days: "中期期限桶最大天数",
+    max_entry_days: "新开仓允许的最大到期天数",
     short_horizon_probability_calibration: "短期期限概率校准收缩系数",
     medium_horizon_probability_calibration: "中期期限概率校准收缩系数",
     short_horizon_size_multiplier: "短期期限仓位乘数",

@@ -1430,6 +1430,30 @@ impl CryptoAlphaStrategy {
         }
     }
 
+    fn within_entry_horizon(&self, days_to_resolution: u32) -> bool {
+        days_to_resolution <= self.config.max_entry_days
+    }
+
+    fn infer_neg_risk_entry_days(&self, event: &NegRiskEvent) -> Option<u32> {
+        let now = Utc::now();
+        let title_target_date = parse_crypto_event_title(&event.title)
+            .and_then(|(_, target_date)| target_date)
+            .map(|target_date| (target_date - now.date_naive()).num_days());
+        title_target_date
+            .or_else(|| {
+                event
+                    .markets
+                    .iter()
+                    .filter_map(|market| {
+                        market
+                            .end_date
+                            .map(|end_date| (end_date.date_naive() - now.date_naive()).num_days())
+                    })
+                    .min()
+            })
+            .and_then(|days| (days > 0).then_some(days as u32))
+    }
+
     fn calibration_override_value(
         &self,
         asset: &CryptoAsset,
@@ -3686,6 +3710,31 @@ impl CryptoAlphaStrategy {
         if days <= 0 {
             return None;
         }
+        if !self.within_entry_horizon(days as u32) {
+            let market_text = market
+                .event_title
+                .as_deref()
+                .map(|title| format!("{} {}", title, market.question))
+                .unwrap_or_else(|| market.question.clone());
+            let (event_context_source, event_title, event_category, event_subtype) =
+                self.decision_event_context(&market_text).await;
+            self.record_gate_reject_decision(
+                question.asset,
+                None,
+                CryptoMarketType::Binary,
+                &market.question,
+                days as u32,
+                Decimal::ZERO,
+                false,
+                market.condition_id,
+                "beyond_entry_horizon",
+                event_context_source,
+                event_title,
+                event_category,
+                event_subtype,
+            );
+            return None;
+        }
         let market_text = market
             .event_title
             .as_deref()
@@ -4029,6 +4078,9 @@ impl CryptoAlphaStrategy {
         asset_direction_exposure: &HashMap<(&'static str, CryptoDirectionBucket), Decimal>,
     ) -> Option<CryptoEntryCandidate> {
         let event_market_text = format!("{} {}", event.title, asset.name);
+        if !self.within_entry_horizon(days.ceil() as u32) {
+            return None;
+        }
         let (event_context_source, event_title, event_category, event_subtype) =
             self.decision_event_context(&event_market_text).await;
         let (effective_min_edge_bps, effective_max_spread_bps) = self
@@ -4478,6 +4530,31 @@ impl CryptoAlphaStrategy {
             let now_date = Utc::now().date_naive();
             let days = (target_date - now_date).num_days();
             if days <= 0 {
+                continue;
+            }
+            if !self.within_entry_horizon(days as u32) {
+                let group_market_text = if group.title.is_empty() {
+                    market.question.clone()
+                } else {
+                    format!("{} {}", group.title, market.question)
+                };
+                let (event_context_source, event_title, event_category, event_subtype) =
+                    self.decision_event_context(&group_market_text).await;
+                self.record_gate_reject_decision(
+                    asset,
+                    None,
+                    CryptoMarketType::Binary,
+                    &market.question,
+                    days as u32,
+                    Decimal::ZERO,
+                    false,
+                    market.condition_id,
+                    "beyond_entry_horizon",
+                    event_context_source,
+                    event_title,
+                    event_category,
+                    event_subtype,
+                );
                 continue;
             }
             let group_market_text = if group.title.is_empty() {
@@ -5092,7 +5169,7 @@ impl CryptoAlphaStrategy {
                 let mu = mu * self.config.drift_decay;
                 let sigma = effective_volatility(sigma, price_data.implied_vol)
                     * self
-                        .effective_event_sigma_multiplier(parsed.asset, &market.question)
+                        .effective_event_sigma_multiplier(parsed.asset, &exit_market_text)
                         .await
                         .0;
                 self.update_cache_sigma(parsed.asset.binance_symbol, sigma);
@@ -5456,7 +5533,7 @@ impl Strategy for CryptoAlphaStrategy {
         let mut binary_crypto = 0u32;
         let mut binary_group_crypto = 0u32;
         let mut neg_risk_matched = 0u32;
-        let mut neg_risk_expired = 0u32;
+        let neg_risk_expired = 0u32;
         let token_assets = self.build_token_asset_map(markets);
         let token_directions = self.build_token_direction_map(markets);
         let mut asset_exposure: HashMap<&'static str, Decimal> = HashMap::new();
@@ -5588,11 +5665,32 @@ impl Strategy for CryptoAlphaStrategy {
 
         // 3. NegRisk events
         for event in &self.neg_risk_events {
-            if let Some((asset, target_date)) = parse_crypto_event_title(&event.title) {
-                let now_date = Utc::now().date_naive();
-                let days = target_date.map(|d| (d - now_date).num_days()).unwrap_or(30); // Default 30 days for events without explicit date
-                if days <= 0 {
-                    neg_risk_expired += 1;
+            if let Some((asset, _target_date)) = parse_crypto_event_title(&event.title) {
+                let Some(days_to_resolution) = self.infer_neg_risk_entry_days(event) else {
+                    continue;
+                };
+                if !self.within_entry_horizon(days_to_resolution) {
+                    let (event_context_source, event_title, event_category, event_subtype) =
+                        self.decision_event_context(&event.title).await;
+                    self.record_gate_reject_decision(
+                        asset,
+                        None,
+                        CryptoMarketType::Range,
+                        &event.title,
+                        days_to_resolution,
+                        Decimal::ZERO,
+                        false,
+                        event
+                            .markets
+                            .first()
+                            .map(|market| market.condition_id)
+                            .unwrap_or_default(),
+                        "beyond_entry_horizon",
+                        event_context_source,
+                        event_title,
+                        event_category,
+                        event_subtype,
+                    );
                     continue;
                 }
                 neg_risk_matched += 1;
@@ -5603,7 +5701,7 @@ impl Strategy for CryptoAlphaStrategy {
                     .detect_crypto_neg_risk(
                         event,
                         asset,
-                        days as f64,
+                        days_to_resolution as f64,
                         current_asset_exposure,
                         &asset_direction_exposure,
                     )
@@ -6270,6 +6368,7 @@ mod tests {
             calibration_overrides: vec![],
             short_horizon_max_days: 1,
             medium_horizon_max_days: 7,
+            max_entry_days: 3650,
             short_horizon_probability_calibration: dec!(0.85),
             medium_horizon_probability_calibration: dec!(0.92),
             short_horizon_size_multiplier: dec!(0.60),
@@ -6365,6 +6464,84 @@ mod tests {
             }],
             ..EventCalendarConfig::default()
         }))
+    }
+
+    #[tokio::test]
+    async fn test_crypto_long_dated_market_is_filtered_from_new_entries() {
+        pa_monitor::diagnostics::clear_crypto_candidate_decisions();
+        let yes_token = U256::from(91u64);
+        let no_token = U256::from(92u64);
+        let market = market_with_token_ids(
+            make_crypto_market("Will Bitcoin exceed $150,000 by December 31, 2026?"),
+            yes_token,
+            no_token,
+            B256::from([91u8; 32]),
+        );
+
+        let mut books = HashMap::new();
+        books.insert(
+            yes_token,
+            OrderBook {
+                token_id: yes_token,
+                bids: vec![PriceLevel {
+                    price: dec!(0.19),
+                    size: dec!(500),
+                }],
+                asks: vec![PriceLevel {
+                    price: dec!(0.20),
+                    size: dec!(500),
+                }],
+                timestamp: Utc::now(),
+            },
+        );
+        books.insert(
+            no_token,
+            OrderBook {
+                token_id: no_token,
+                bids: vec![PriceLevel {
+                    price: dec!(0.79),
+                    size: dec!(500),
+                }],
+                asks: vec![PriceLevel {
+                    price: dec!(0.80),
+                    size: dec!(500),
+                }],
+                timestamp: Utc::now(),
+            },
+        );
+
+        let mut strategy = make_crypto_strategy(books, vec![]);
+        strategy.config.max_entry_days = 3;
+        let opp = strategy
+            .detect_crypto_opportunity(&market, Decimal::ZERO, &HashMap::new())
+            .await;
+        assert!(
+            opp.is_none(),
+            "markets beyond max_entry_days should not generate new crypto entries"
+        );
+
+        let decisions = pa_monitor::diagnostics::recent_crypto_candidate_decisions();
+        assert!(decisions.iter().any(|decision| {
+            decision.action == "gate_reject" && decision.reason == "beyond_entry_horizon"
+        }));
+
+        pa_monitor::diagnostics::clear_crypto_candidate_decisions();
+    }
+
+    #[test]
+    fn test_infer_neg_risk_entry_days_falls_back_to_market_end_date() {
+        let strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        let mut market = make_crypto_market("$100,000 or above");
+        market.end_date = Some(Utc::now() + chrono::Duration::hours(36));
+        let event = NegRiskEvent {
+            neg_risk_market_id: B256::from([77u8; 32]),
+            title: "Bitcoin price".into(),
+            markets: vec![market],
+            fee_rate_bps: 200,
+        };
+
+        let inferred = strategy.infer_neg_risk_entry_days(&event);
+        assert_eq!(inferred, Some(1));
     }
 
     #[tokio::test]
@@ -7129,6 +7306,7 @@ mod tests {
             calibration_overrides: vec![],
             short_horizon_max_days: 1,
             medium_horizon_max_days: 7,
+            max_entry_days: 3650,
             short_horizon_probability_calibration: dec!(0.85),
             medium_horizon_probability_calibration: dec!(0.92),
             short_horizon_size_multiplier: dec!(0.60),
@@ -7813,6 +7991,7 @@ mod tests {
             calibration_overrides: vec![],
             short_horizon_max_days: 1,
             medium_horizon_max_days: 7,
+            max_entry_days: 3650,
             short_horizon_probability_calibration: dec!(0.85),
             medium_horizon_probability_calibration: dec!(0.92),
             short_horizon_size_multiplier: dec!(0.60),

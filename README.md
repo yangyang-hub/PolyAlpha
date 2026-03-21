@@ -698,6 +698,7 @@ override_multiplier_blend = 1.00
 override_multiplier_max_delta_bps = 2500
 short_horizon_max_days = 1
 medium_horizon_max_days = 7
+max_entry_days = 1
 short_horizon_probability_calibration = 0.85
 medium_horizon_probability_calibration = 0.92
 short_horizon_size_multiplier = 0.60
@@ -730,6 +731,8 @@ override 因子和默认 baseline 做混合，再限制它相对 baseline 的最
 `override_multiplier_blend` 和 `override_multiplier_max_delta_bps` 则对其他
 multiplier 类 override 做同样的运行时护栏，统一限制 sigma/size/entry/exit/execution
 乘数相对 `1.0` 的偏移幅度。
+`max_entry_days` 则是 crypto 新开仓的硬过滤窗口：超过这个到期天数的市场不再生成新机会，
+但已持有仓位仍然会继续进入退出扫描。
 `gate_scale_feedback_*` 则是 runtime sizing 反馈护栏：当某个 `asset_class × event_subtype`
 桶最近持续出现 `gate_scale`（也就是候选能做，但总被 depth/retention 预缩量）时，
 策略会先把目标下单量轻微压低，减少“先生成、再裁掉”的重复摩擦。

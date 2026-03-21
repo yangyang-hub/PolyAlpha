@@ -579,6 +579,10 @@ pub struct CryptoAlphaConfig {
     /// Markets resolving within this many days are treated as medium-dated.
     #[serde(default = "default_crypto_medium_horizon_max_days")]
     pub medium_horizon_max_days: u32,
+    /// Hard cap for new crypto entries. Markets beyond this resolution window are ignored for
+    /// entry generation but can still be scanned for exits if already held.
+    #[serde(default = "default_crypto_max_entry_days")]
+    pub max_entry_days: u32,
     /// Probability shrink factor for short-dated markets.
     #[serde(default = "default_crypto_short_horizon_probability_calibration")]
     pub short_horizon_probability_calibration: Decimal,
@@ -827,6 +831,9 @@ fn default_crypto_short_horizon_max_days() -> u32 {
 fn default_crypto_medium_horizon_max_days() -> u32 {
     7
 }
+fn default_crypto_max_entry_days() -> u32 {
+    1
+}
 fn default_crypto_short_horizon_probability_calibration() -> Decimal {
     Decimal::new(85, 2)
 } // 0.85
@@ -996,6 +1003,7 @@ impl Default for CryptoAlphaConfig {
             calibration_overrides: Vec::new(),
             short_horizon_max_days: default_crypto_short_horizon_max_days(),
             medium_horizon_max_days: default_crypto_medium_horizon_max_days(),
+            max_entry_days: default_crypto_max_entry_days(),
             short_horizon_probability_calibration:
                 default_crypto_short_horizon_probability_calibration(),
             medium_horizon_probability_calibration:

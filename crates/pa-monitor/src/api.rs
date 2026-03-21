@@ -877,6 +877,33 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
                     support_count,
                 );
             }
+            ("gate_reject", "beyond_entry_horizon") => {
+                push_scoped_hint(
+                    &mut crypto_entry_tuning_hints,
+                    "gate_reject",
+                    "high",
+                    "先看到期窗口",
+                    format!(
+                        "{scope_label} 最近更多市场因为超出新开仓期限窗口被直接过滤，先确认 `max_entry_days` 是否符合当前策略目标。"
+                    ),
+                    scope_label.clone(),
+                    support_count,
+                );
+                push_scoped_override_suggestion(
+                    &mut crypto_override_suggestions,
+                    "entry",
+                    "high",
+                    "max_entry_days",
+                    "raise",
+                    &asset_class,
+                    &event_subtype,
+                    "beyond_entry_horizon",
+                    format!(
+                        "{scope_label} 最近主要是期限过滤在起作用，不是 edge/spread/depth 本身的问题。"
+                    ),
+                    support_count,
+                );
+            }
             ("gate_reject", "spread_too_wide") => {
                 push_scoped_hint(
                     &mut crypto_entry_tuning_hints,

@@ -137,6 +137,7 @@ override_multiplier_blend = 1.00
 override_multiplier_max_delta_bps = 2500
 short_horizon_max_days = 1
 medium_horizon_max_days = 7
+max_entry_days = 1
 short_horizon_probability_calibration = 0.85
 medium_horizon_probability_calibration = 0.92
 short_horizon_size_multiplier = 0.60
