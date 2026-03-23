@@ -2,12 +2,13 @@ use std::collections::VecDeque;
 use std::sync::{LazyLock, Mutex};
 
 use alloy::primitives::B256;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 const MAX_CRYPTO_DECISIONS: usize = 100;
 const MAX_CRYPTO_EXITS: usize = 100;
+const CRYPTO_EXIT_DEDUP_WINDOW_SECS: i64 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CryptoCandidateDecision {
@@ -95,6 +96,27 @@ pub fn clear_crypto_candidate_decisions() {
 
 pub fn record_crypto_exit_decision(entry: CryptoExitDecision) {
     let mut entries = CRYPTO_EXIT_DECISIONS.lock().unwrap();
+    if let Some(latest) = entries.front() {
+        let within_dedup_window = (entry.recorded_at - latest.recorded_at)
+            <= Duration::seconds(CRYPTO_EXIT_DEDUP_WINDOW_SECS);
+        let same_exit = latest.asset == entry.asset
+            && latest.reason == entry.reason
+            && latest.event_context_source == entry.event_context_source
+            && latest.event_title == entry.event_title
+            && latest.event_category == entry.event_category
+            && latest.event_subtype == entry.event_subtype
+            && latest.question == entry.question
+            && latest.market_type == entry.market_type
+            && latest.held_is_yes == entry.held_is_yes
+            && latest.modeled_prob == entry.modeled_prob
+            && latest.days_to_resolution == entry.days_to_resolution
+            && latest.best_bid == entry.best_bid
+            && latest.avg_cost == entry.avg_cost
+            && latest.size == entry.size;
+        if within_dedup_window && same_exit {
+            return;
+        }
+    }
     entries.push_front(entry);
     while entries.len() > MAX_CRYPTO_EXITS {
         entries.pop_back();
@@ -112,4 +134,56 @@ pub fn recent_crypto_exit_decisions() -> Vec<CryptoExitDecision> {
 
 pub fn clear_crypto_exit_decisions() {
     CRYPTO_EXIT_DECISIONS.lock().unwrap().clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use std::str::FromStr;
+
+    fn sample_exit(recorded_at: DateTime<Utc>) -> CryptoExitDecision {
+        CryptoExitDecision {
+            recorded_at,
+            asset: Some("Bitcoin".into()),
+            reason: "capital_efficiency".into(),
+            event_context_source: None,
+            event_title: None,
+            event_category: None,
+            event_subtype: None,
+            question: "Will Bitcoin hit $150k by tomorrow?".into(),
+            market_type: Some("binary".into()),
+            held_is_yes: Some(false),
+            modeled_prob: None,
+            days_to_resolution: Some(1),
+            best_bid: Decimal::from_str("0.999").unwrap(),
+            avg_cost: Decimal::from_str("0.44").unwrap(),
+            size: Decimal::from_str("0.01").unwrap(),
+        }
+    }
+
+    #[test]
+    fn record_crypto_exit_decision_deduplicates_identical_recent_exit() {
+        clear_crypto_exit_decisions();
+        let now = Utc::now();
+        record_crypto_exit_decision(sample_exit(now));
+        record_crypto_exit_decision(sample_exit(now + Duration::seconds(1)));
+        let exits = recent_crypto_exit_decisions();
+        assert_eq!(exits.len(), 1);
+        clear_crypto_exit_decisions();
+    }
+
+    #[test]
+    fn record_crypto_exit_decision_keeps_distinct_or_stale_exit() {
+        clear_crypto_exit_decisions();
+        let now = Utc::now();
+        record_crypto_exit_decision(sample_exit(now));
+        let mut changed_bid = sample_exit(now + Duration::seconds(1));
+        changed_bid.best_bid = Decimal::from_str("0.998").unwrap();
+        record_crypto_exit_decision(changed_bid);
+        record_crypto_exit_decision(sample_exit(now + Duration::seconds(6)));
+        let exits = recent_crypto_exit_decisions();
+        assert_eq!(exits.len(), 3);
+        clear_crypto_exit_decisions();
+    }
 }

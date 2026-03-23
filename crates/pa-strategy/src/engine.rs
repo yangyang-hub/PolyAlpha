@@ -1285,6 +1285,13 @@ impl StrategyEngine {
                 // significantly — use a longer cooldown to avoid retry spam.
                 if err_msg.contains("lot size") {
                     self.set_cooldown(opp.condition_id, opp.strategy_type, 600);
+                } else if err_msg.contains("couldn't be fully filled")
+                    || err_msg.contains("fully filled or killed")
+                {
+                    // FOK full-fill failures usually reflect transient book depth shortages
+                    // rather than a strategy-side logic problem; retrying every minute
+                    // just creates churn on thin markets.
+                    self.set_cooldown(opp.condition_id, opp.strategy_type, 300);
                 } else if err_msg.contains("does not exist") {
                     // Orderbook removed — market is closed/resolved permanently.
                     self.set_cooldown(opp.condition_id, opp.strategy_type, 86400);

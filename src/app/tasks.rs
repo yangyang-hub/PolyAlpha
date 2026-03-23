@@ -55,6 +55,13 @@ pub fn compute_strategy_financials(
     compute_strategy_financials_from_state(&account_strategy_state, positions)
 }
 
+fn canonical_strategy_bucket(strategy: &str) -> &str {
+    match strategy {
+        "crypto" => "crypto_alpha",
+        other => other,
+    }
+}
+
 fn compute_strategy_financials_from_state(
     account_strategy_state: &[(Vec<String>, Decimal, Decimal)],
     positions: &[pa_monitor::api::PositionApiEntry],
@@ -66,7 +73,9 @@ fn compute_strategy_financials_from_state(
 
     for (strategies, balance, realized_pnl) in account_strategy_state {
         for strategy in strategies {
-            let entry = by_strategy.entry(strategy.clone()).or_default();
+            let entry = by_strategy
+                .entry(canonical_strategy_bucket(strategy).to_string())
+                .or_default();
             entry.wallet_balance += *balance;
             entry.realized_pnl += *realized_pnl;
         }
@@ -74,7 +83,9 @@ fn compute_strategy_financials_from_state(
 
     for position in positions {
         if let Some(strategy) = &position.strategy {
-            let entry = by_strategy.entry(strategy.clone()).or_default();
+            let entry = by_strategy
+                .entry(canonical_strategy_bucket(strategy).to_string())
+                .or_default();
             entry.positions_market_value += position
                 .current_price
                 .map(|price| price * position.size)

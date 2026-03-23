@@ -158,7 +158,9 @@ export default function CryptoMarkets() {
     (sum, p) => sum + Number(p.current_price ?? 0) * Number(p.size),
     0,
   );
-  const strategyFinancials = status?.strategy_financials?.crypto_alpha;
+  const strategyFinancials =
+    status?.strategy_financials?.crypto_alpha ?? status?.strategy_financials?.crypto;
+  const strategyAccounts = status?.accounts.filter((account) => account.strategies.includes("crypto")) ?? [];
   const walletBalance = Number(strategyFinancials?.wallet_balance ?? 0);
   const strategyPositionsMarketValue = Number(strategyFinancials?.positions_market_value ?? totalMarkValue);
   const strategyPortfolioValue = Number(strategyFinancials?.portfolio_value ?? walletBalance + strategyPositionsMarketValue);
@@ -411,15 +413,15 @@ export default function CryptoMarkets() {
                 </div>
               </div>
               <div>
-                <div className="opacity-60 text-xs">账户</div>
-                <div>{status.accounts.map((account) => account.name).join(", ") || "-"}</div>
-              </div>
-              <div>
-                <div className="opacity-60 text-xs">代理钱包</div>
-                <div className="font-mono text-xs break-all">
-                  {status.accounts.map((account) => account.proxy_wallet || "(EOA)").join(", ") || "-"}
+                  <div className="opacity-60 text-xs">账户</div>
+                  <div>{strategyAccounts.map((account) => account.name).join(", ") || "-"}</div>
                 </div>
-              </div>
+                <div>
+                  <div className="opacity-60 text-xs">代理钱包</div>
+                  <div className="font-mono text-xs break-all">
+                    {strategyAccounts.map((account) => account.proxy_wallet || "(EOA)").join(", ") || "-"}
+                  </div>
+                </div>
             </div>
           </div>
         </div>

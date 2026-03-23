@@ -15,6 +15,7 @@ export default function SmartMoney() {
   const { data: positions, loading: posLoading } = usePolling<PositionEntry[]>(posFetcher, 15000);
   const { data: config } = usePolling<Record<string, unknown>>(configFetcher, 60000);
   const { data: status } = usePolling<StatusResponse>(statusFetcher, 15000);
+  const strategyAccounts = status?.accounts.filter((account) => account.strategies.includes("smart_money")) ?? [];
   const wallets: Wallet[] = Array.isArray(config?.wallets) ? (config.wallets as Wallet[]) : [];
 
   const totalCost = (positions ?? []).reduce((s, p) => s + Number(p.cost_basis), 0);
@@ -69,6 +70,26 @@ export default function SmartMoney() {
           </div>
         );
       })()}
+
+      {status && (
+        <div className="card bg-base-200 shadow-sm">
+          <div className="card-body p-4">
+            <h2 className="card-title text-base">运行上下文</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+              <div>
+                <div className="opacity-60 text-xs">账户</div>
+                <div>{strategyAccounts.map((account) => account.name).join(", ") || "-"}</div>
+              </div>
+              <div>
+                <div className="opacity-60 text-xs">代理钱包</div>
+                <div className="font-mono text-xs break-all">
+                  {strategyAccounts.map((account) => account.proxy_wallet || "(EOA)").join(", ") || "-"}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Summary stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">

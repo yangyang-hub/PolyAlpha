@@ -82,6 +82,11 @@ This file records repository-specific working agreements, high-level project con
 
 ## Change Log
 
+### 2026-03-23
+- Area: `src/app/tasks.rs`, `crates/pa-monitor/src/diagnostics.rs`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Canonicalized strategy financial aggregation so accounts configured with the legacy `crypto` strategy bucket contribute wallet balances and realized PnL to the `crypto_alpha` financial snapshot used by the crypto page, added a short dedup window for identical recent crypto exit decisions to prevent `/api/crypto/exits` from recording the same capital-efficiency/model-reversal exit every scan tick, and made the frontend fall back to the legacy `crypto` bucket if a status payload still lacks `crypto_alpha` financials.
+- Why: The live crypto page could show `0` available balance even while the crypto account still held free USDC because account cash was aggregated under `crypto` while positions were tracked under `crypto_alpha`, and repeated exit conditions were spamming the recent-exits table with duplicate entries every 100ms scan cycle instead of representing distinct exit events.
+
 ### 2026-03-21
 - Area: `crates/pa-strategy/src/weather.rs`
 - Change: Added a short-lived forecast failure backoff cache for weather location fetches so repeated provider errors (especially Met Office `429 Too Many Requests`) temporarily suppress immediate re-fetch attempts, included the chosen backoff in the warning log, and added focused regression coverage showing location-based forecast reads short-circuit while a failure backoff is active.
@@ -111,6 +116,16 @@ This file records repository-specific working agreements, high-level project con
 - Area: `crates/pa-monitor/src/api.rs`, `crates/pa-risk/src/manager.rs`, `src/app/bootstrap.rs`, `src/app/market_runtime.rs`, `src/app/tasks.rs`, `src/main.rs`, `frontend/src/api.ts`, `frontend/src/pages/WeatherStrategy.tsx`, `frontend/src/pages/CryptoMarkets.tsx`, `frontend/src/pages/SmartMoney.tsx`
 - Change: Added `strategy_financials` to the runtime status API by aggregating wallet cash, marked-to-market position value, and process-lifetime realized PnL per strategy from strategy-assigned accounts, switched the weather/crypto/smart-money pages to use strategy-scoped balances instead of global portfolio totals, relabeled strategy realized PnL as process-local instead of pretending to match Polymarket's full historical ledger, and updated the `pa-risk` test fixture for the newer `RiskConfig` execution-quality fields.
 - Why: Market-specific frontend pages were showing misleading all-account cash and portfolio values, while their realized-PnL cards were still pulling a global in-process gauge that does not match Polymarket's full historical收益口径.
+
+### 2026-03-23
+- Area: `frontend/src/pages/WeatherStrategy.tsx`, `frontend/src/pages/CryptoMarkets.tsx`, `frontend/src/pages/SmartMoney.tsx`
+- Change: Filtered the strategy-page runtime context account/proxy-wallet display so each page now lists only accounts assigned to that strategy instead of echoing every configured account.
+- Why: The funds cards were already strategy-scoped, but the runtime context block still listed all accounts, which made the pages look like they were mixing global and strategy-local wallet data.
+
+### 2026-03-23
+- Area: `crates/pa-strategy/src/engine.rs`, `crates/pa-strategy/src/weather.rs`
+- Change: Treated FOK full-fill execution failures as thin-book depth failures with a longer `300s` strategy cooldown instead of the generic `60s` retry loop, and slightly widened preferred weather-city entry settings by increasing preferred-city edge relief, allowing a modestly higher non-conservative entry-price ceiling, and raising preferred-city size capacity.
+- Why: Weather trading had become too quiet while also repeatedly reattempting the same unfillable FOK buys; the strategy now retries thin-book misses less aggressively and leans a bit harder into the highest-quality NOAA cities without loosening conservative cities.
 
 ### 2026-03-21
 - Area: `crates/pa-monitor/src/api.rs`, `crates/pa-strategy/src/crypto_alpha.rs`

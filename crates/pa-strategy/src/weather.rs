@@ -2514,7 +2514,7 @@ impl WeatherAlphaStrategy {
                 0
             });
         let after_preferred = if Self::uses_preferred_city_overlay(location) {
-            base.saturating_sub(50)
+            base.saturating_sub(75)
         } else {
             base
         };
@@ -2555,6 +2555,8 @@ impl WeatherAlphaStrategy {
     fn effective_max_entry_price(&self, location: &str) -> Decimal {
         if Self::uses_conservative_city_overlay(location) {
             self.config.max_entry_price.min(dec!(0.30))
+        } else if Self::uses_preferred_city_overlay(location) {
+            self.config.max_entry_price.max(dec!(0.40))
         } else {
             self.config.max_entry_price
         }
@@ -2577,7 +2579,7 @@ impl WeatherAlphaStrategy {
         let base = if Self::uses_conservative_city_overlay(location) {
             self.config.max_position_usdc * dec!(0.75)
         } else if Self::uses_preferred_city_overlay(location) {
-            self.config.max_position_usdc * dec!(1.10)
+            self.config.max_position_usdc * dec!(1.15)
         } else {
             self.config.max_position_usdc
         };
@@ -6652,7 +6654,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_price_ceiling_rejects_expensive() {
-        // Token priced at 0.20, max_entry_price=0.15 → should reject
+        // Token priced at 0.20, max_entry_price=0.15 on a non-preferred city → should reject
         let token_id = U256::from(1u64);
         let mut books = HashMap::new();
         books.insert(token_id, make_weather_book(token_id, dec!(0.20)));
@@ -6697,7 +6699,7 @@ mod tests {
         );
 
         // Pre-populate cache: model says 80% (strong edge over 0.20 ask)
-        let question = "Will the temperature in NYC exceed 50°F on March 5?";
+        let question = "Will the temperature in Phoenix exceed 50°F on March 5?";
         let cache_key = WeatherAlphaStrategy::question_hash(question);
         {
             let mut cache = strategy.forecast_cache.lock().unwrap();
@@ -6724,13 +6726,13 @@ mod tests {
         let result = strategy.detect_weather_opportunity(&market, &parsed).await;
         assert!(
             result.is_none(),
-            "Token at 0.20 should be rejected (max_entry_price=0.15)"
+            "Token at 0.20 should be rejected on a non-preferred city (max_entry_price=0.15)"
         );
     }
 
     #[tokio::test]
     async fn test_price_ceiling_accepts_cheap() {
-        // Token ask priced at 0.10 (bid=0.08), max_entry_price=0.15 → should accept
+        // Token ask priced at 0.10 (bid=0.08), max_entry_price=0.15 on a non-preferred city → should accept
         let token_id = U256::from(1u64);
         let mut books = HashMap::new();
         books.insert(token_id, make_weather_book(token_id, dec!(0.08)));
@@ -6775,7 +6777,7 @@ mod tests {
         );
 
         // Pre-populate cache: model says 80% (strong edge over 0.10 ask)
-        let question = "Will the temperature in NYC exceed 50°F on March 5?";
+        let question = "Will the temperature in Phoenix exceed 50°F on March 5?";
         let cache_key = WeatherAlphaStrategy::question_hash(question);
         {
             let mut cache = strategy.forecast_cache.lock().unwrap();
@@ -6802,7 +6804,7 @@ mod tests {
         let result = strategy.detect_weather_opportunity(&market, &parsed).await;
         assert!(
             result.is_some(),
-            "Token at 0.10 should be accepted (max_entry_price=0.15)"
+            "Token at 0.10 should be accepted on a non-preferred city (max_entry_price=0.15)"
         );
 
         // Regression: max_position_usdc=100 should size by shares at ask=0.10 => 1000 shares.
@@ -7166,7 +7168,7 @@ mod tests {
         );
         assert_eq!(
             strategy.effective_min_edge_bps("Miami"),
-            strategy.config.min_edge_bps.saturating_sub(50)
+            strategy.config.min_edge_bps.saturating_sub(75)
         );
     }
 
@@ -7188,8 +7190,8 @@ mod tests {
             },
         );
 
-        assert_eq!(strategy.effective_max_entry_price("Miami"), dec!(0.35));
-        assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(4.40));
+        assert_eq!(strategy.effective_max_entry_price("Miami"), dec!(0.40));
+        assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(4.60));
 
         assert_eq!(strategy.effective_max_entry_price("Chicago"), dec!(0.30));
         assert_eq!(strategy.effective_max_position_usdc("Chicago"), dec!(3.00));
@@ -7240,20 +7242,20 @@ mod tests {
 
         assert_eq!(
             strategy.effective_min_edge_bps_for_resolution("Miami", Some(30)),
-            500
+            425
         );
         assert_eq!(
             strategy.effective_max_entry_price_for_resolution("Miami", Some(30)),
-            dec!(0.35)
+            dec!(0.40)
         );
         assert_eq!(
             strategy.effective_max_position_usdc_for_resolution("Miami", Some(30)),
-            dec!(4)
+            dec!(4.60)
         );
 
         assert_eq!(
             strategy.effective_min_edge_bps_for_resolution("Miami", Some(24)),
-            550
+            475
         );
         assert_eq!(
             strategy.effective_max_entry_price_for_resolution("Miami", Some(24)),
@@ -7261,12 +7263,12 @@ mod tests {
         );
         assert_eq!(
             strategy.effective_max_position_usdc_for_resolution("Miami", Some(24)),
-            dec!(3.40)
+            dec!(3.910)
         );
 
         assert_eq!(
             strategy.effective_min_edge_bps_for_resolution("Miami", Some(12)),
-            600
+            525
         );
         assert_eq!(
             strategy.effective_max_entry_price_for_resolution("Miami", Some(12)),
@@ -7274,7 +7276,7 @@ mod tests {
         );
         assert_eq!(
             strategy.effective_max_position_usdc_for_resolution("Miami", Some(12)),
-            dec!(3.00)
+            dec!(3.450)
         );
     }
 
@@ -7342,12 +7344,12 @@ mod tests {
             },
         );
 
-        assert_eq!(strategy.effective_min_edge_bps("Miami"), 400);
-        assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(4.40));
+        assert_eq!(strategy.effective_min_edge_bps("Miami"), 375);
+        assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(4.60));
 
         strategy.record_city_feedback("Miami", 2);
-        assert_eq!(strategy.effective_min_edge_bps("Miami"), 375);
-        assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(4.84));
+        assert_eq!(strategy.effective_min_edge_bps("Miami"), 350);
+        assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(5.060));
 
         assert_eq!(strategy.effective_min_edge_bps("Chicago"), 500);
         assert_eq!(strategy.effective_max_position_usdc("Chicago"), dec!(3.00));

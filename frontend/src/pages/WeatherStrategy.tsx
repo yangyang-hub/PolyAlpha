@@ -86,6 +86,7 @@ export default function WeatherStrategy() {
   const totalCost = (positions ?? []).reduce((s, p) => s + Number(p.cost_basis), 0);
   const totalPnl = (positions ?? []).reduce((s, p) => s + Number(p.unrealized_pnl ?? 0), 0);
   const marketCount = new Set((positions ?? []).map((p) => p.condition_id).filter(Boolean)).size;
+  const strategyAccounts = status?.accounts.filter((account) => account.strategies.includes("weather")) ?? [];
 
   if (loading && !positions) {
     return (
@@ -155,12 +156,12 @@ export default function WeatherStrategy() {
               </div>
               <div>
                 <div className="opacity-60 text-xs">账户</div>
-                <div>{status.accounts.map((account) => account.name).join(", ") || "-"}</div>
+                <div>{strategyAccounts.map((account) => account.name).join(", ") || "-"}</div>
               </div>
               <div>
                 <div className="opacity-60 text-xs">代理钱包</div>
                 <div className="font-mono text-xs break-all">
-                  {status.accounts.map((account) => account.proxy_wallet || "(EOA)").join(", ") || "-"}
+                  {strategyAccounts.map((account) => account.proxy_wallet || "(EOA)").join(", ") || "-"}
                 </div>
               </div>
             </div>
