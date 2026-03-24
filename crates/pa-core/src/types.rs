@@ -276,6 +276,18 @@ pub struct TradingOpportunity {
     /// `min_size_retention_ratio` during execution freshness checks.
     #[serde(default)]
     pub min_size_retention_ratio_multiplier: Option<Decimal>,
+    /// Optional strategy-local multiplier applied to the global execution-quality
+    /// profit-retention weight during buy-side ranking.
+    #[serde(default)]
+    pub execution_quality_profit_weight_multiplier: Option<Decimal>,
+    /// Optional strategy-local multiplier applied to the global execution-quality
+    /// size-retention weight during buy-side ranking.
+    #[serde(default)]
+    pub execution_quality_size_weight_multiplier: Option<Decimal>,
+    /// Optional strategy-local multiplier applied to the global execution-quality
+    /// slippage-quality weight during buy-side ranking.
+    #[serde(default)]
+    pub execution_quality_slippage_weight_multiplier: Option<Decimal>,
     pub detected_at: DateTime<Utc>,
     pub execution_plan: ExecutionPlan,
 }

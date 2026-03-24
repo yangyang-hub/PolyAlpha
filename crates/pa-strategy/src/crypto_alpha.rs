@@ -1092,7 +1092,12 @@ impl CryptoAlphaStrategy {
         let mut max_spread_bps = self.config.max_spread_bps;
 
         let (horizon_edge_multiplier, horizon_spread_multiplier) =
-            if days_to_resolution <= self.config.short_horizon_max_days {
+            if self.is_same_day_resolution(days_to_resolution) {
+                (
+                    self.config.same_day_min_edge_multiplier,
+                    self.config.same_day_max_spread_multiplier,
+                )
+            } else if self.is_short_horizon_resolution(days_to_resolution) {
                 (
                     self.config.short_horizon_min_edge_multiplier,
                     self.config.short_horizon_max_spread_multiplier,
@@ -1408,8 +1413,18 @@ impl CryptoAlphaStrategy {
             .max(Decimal::ZERO)
     }
 
+    fn is_same_day_resolution(&self, days_to_resolution: u32) -> bool {
+        days_to_resolution == 0
+    }
+
+    fn is_short_horizon_resolution(&self, days_to_resolution: u32) -> bool {
+        days_to_resolution > 0 && days_to_resolution <= self.config.short_horizon_max_days
+    }
+
     fn effective_horizon_size_multiplier(&self, days_to_resolution: u32) -> Decimal {
-        if days_to_resolution <= self.config.short_horizon_max_days {
+        if self.is_same_day_resolution(days_to_resolution) {
+            self.config.same_day_size_multiplier
+        } else if self.is_short_horizon_resolution(days_to_resolution) {
             self.config.short_horizon_size_multiplier
         } else if days_to_resolution <= self.config.medium_horizon_max_days {
             self.config.medium_horizon_size_multiplier
@@ -1451,7 +1466,7 @@ impl CryptoAlphaStrategy {
                     })
                     .min()
             })
-            .and_then(|days| (days > 0).then_some(days as u32))
+            .and_then(|days| (days >= 0).then_some(days as u32))
     }
 
     fn calibration_override_value(
@@ -1531,7 +1546,9 @@ impl CryptoAlphaStrategy {
             "ETHUSDT" => self.config.eth_probability_calibration,
             _ => self.config.alt_probability_calibration,
         };
-        let horizon_factor = if days_to_resolution <= self.config.short_horizon_max_days {
+        let horizon_factor = if self.is_same_day_resolution(days_to_resolution) {
+            self.config.same_day_probability_calibration
+        } else if self.is_short_horizon_resolution(days_to_resolution) {
             self.config.short_horizon_probability_calibration
         } else if days_to_resolution <= self.config.medium_horizon_max_days {
             self.config.medium_horizon_probability_calibration
@@ -1845,7 +1862,13 @@ impl CryptoAlphaStrategy {
         event_subtype: Option<CryptoEventSubtype>,
     ) -> (Decimal, Decimal) {
         let (mut capital_efficiency_threshold, mut exit_buffer) =
-            if days_to_resolution <= self.config.short_horizon_max_days {
+            if self.is_same_day_resolution(days_to_resolution) {
+                (
+                    self.config.same_day_capital_efficiency_threshold,
+                    (Decimal::from(self.config.exit_buffer_bps) / dec!(10000))
+                        * self.config.same_day_exit_buffer_multiplier,
+                )
+            } else if self.is_short_horizon_resolution(days_to_resolution) {
                 (
                     self.config.short_horizon_capital_efficiency_threshold,
                     (Decimal::from(self.config.exit_buffer_bps) / dec!(10000))
@@ -1896,7 +1919,9 @@ impl CryptoAlphaStrategy {
         market_type: CryptoMarketType,
         event_subtype: Option<CryptoEventSubtype>,
     ) -> Decimal {
-        let mut multiplier = if days_to_resolution <= self.config.short_horizon_max_days {
+        let mut multiplier = if self.is_same_day_resolution(days_to_resolution) {
+            self.config.same_day_hold_edge_multiplier
+        } else if self.is_short_horizon_resolution(days_to_resolution) {
             self.config.short_horizon_hold_edge_multiplier
         } else if days_to_resolution <= self.config.medium_horizon_max_days {
             self.config.medium_horizon_hold_edge_multiplier
@@ -1924,7 +1949,9 @@ impl CryptoAlphaStrategy {
         market_type: CryptoMarketType,
         event_subtype: Option<CryptoEventSubtype>,
     ) -> Decimal {
-        let mut multiplier = if days_to_resolution <= self.config.short_horizon_max_days {
+        let mut multiplier = if self.is_same_day_resolution(days_to_resolution) {
+            self.config.same_day_edge_decay_exit_multiplier
+        } else if self.is_short_horizon_resolution(days_to_resolution) {
             self.config.short_horizon_edge_decay_exit_multiplier
         } else if days_to_resolution <= self.config.medium_horizon_max_days {
             self.config.medium_horizon_edge_decay_exit_multiplier
@@ -2038,7 +2065,9 @@ impl CryptoAlphaStrategy {
         market_type: CryptoMarketType,
         event_subtype: Option<CryptoEventSubtype>,
     ) -> u64 {
-        let horizon_multiplier = if days_to_resolution <= self.config.short_horizon_max_days {
+        let horizon_multiplier = if self.is_same_day_resolution(days_to_resolution) {
+            self.config.same_day_edge_decay_cooldown_multiplier
+        } else if self.is_short_horizon_resolution(days_to_resolution) {
             self.config.short_horizon_edge_decay_cooldown_multiplier
         } else if days_to_resolution <= self.config.medium_horizon_max_days {
             self.config.medium_horizon_edge_decay_cooldown_multiplier
@@ -2094,7 +2123,9 @@ impl CryptoAlphaStrategy {
         market_type: CryptoMarketType,
         event_subtype: Option<CryptoEventSubtype>,
     ) -> u32 {
-        let base = if days_to_resolution <= self.config.short_horizon_max_days {
+        let base = if self.is_same_day_resolution(days_to_resolution) {
+            self.config.same_day_edge_decay_confirmation_scans
+        } else if self.is_short_horizon_resolution(days_to_resolution) {
             self.config.short_horizon_edge_decay_confirmation_scans
         } else if days_to_resolution <= self.config.medium_horizon_max_days {
             self.config.medium_horizon_edge_decay_confirmation_scans
@@ -2148,7 +2179,10 @@ impl CryptoAlphaStrategy {
         market_type: CryptoMarketType,
         event_subtype: Option<CryptoEventSubtype>,
     ) -> u64 {
-        let horizon_multiplier = if days_to_resolution <= self.config.short_horizon_max_days {
+        let horizon_multiplier = if self.is_same_day_resolution(days_to_resolution) {
+            self.config
+                .same_day_edge_decay_confirmation_window_multiplier
+        } else if self.is_short_horizon_resolution(days_to_resolution) {
             self.config
                 .short_horizon_edge_decay_confirmation_window_multiplier
         } else if days_to_resolution <= self.config.medium_horizon_max_days {
@@ -2186,6 +2220,10 @@ impl CryptoAlphaStrategy {
 
     fn max_edge_decay_confirmation_window_secs(&self) -> u64 {
         let max_horizon_multiplier = Decimal::ONE
+            .max(
+                self.config
+                    .same_day_edge_decay_confirmation_window_multiplier,
+            )
             .max(
                 self.config
                     .medium_horizon_edge_decay_confirmation_window_multiplier,
@@ -3137,9 +3175,24 @@ impl CryptoAlphaStrategy {
     }
 
     fn entry_execution_quality_score(&self, opp: &TradingOpportunity) -> Decimal {
-        let profit_weight = self.execution_quality_profit_weight.max(Decimal::ZERO);
-        let size_weight = self.execution_quality_size_weight.max(Decimal::ZERO);
-        let slippage_weight = self.execution_quality_slippage_weight.max(Decimal::ZERO);
+        let profit_weight = (self.execution_quality_profit_weight
+            * opp
+                .execution_quality_profit_weight_multiplier
+                .unwrap_or(Decimal::ONE)
+                .max(Decimal::ZERO))
+        .max(Decimal::ZERO);
+        let size_weight = (self.execution_quality_size_weight
+            * opp
+                .execution_quality_size_weight_multiplier
+                .unwrap_or(Decimal::ONE)
+                .max(Decimal::ZERO))
+        .max(Decimal::ZERO);
+        let slippage_weight = (self.execution_quality_slippage_weight
+            * opp
+                .execution_quality_slippage_weight_multiplier
+                .unwrap_or(Decimal::ONE)
+                .max(Decimal::ZERO))
+        .max(Decimal::ZERO);
         let weight_sum = profit_weight + size_weight + slippage_weight;
         if weight_sum <= Decimal::ZERO {
             return Decimal::ONE;
@@ -3169,6 +3222,31 @@ impl CryptoAlphaStrategy {
         .unwrap_or(Decimal::ZERO)
         .min(Decimal::ONE)
         .max(Decimal::ZERO)
+    }
+
+    fn execution_quality_weight_multipliers(
+        &self,
+        days_to_resolution: u32,
+    ) -> (Decimal, Decimal, Decimal) {
+        if self.is_same_day_resolution(days_to_resolution) {
+            (
+                self.config
+                    .same_day_execution_quality_profit_weight_multiplier,
+                self.config
+                    .same_day_execution_quality_size_weight_multiplier,
+                self.config
+                    .same_day_execution_quality_slippage_weight_multiplier,
+            )
+        } else if self.is_short_horizon_resolution(days_to_resolution) {
+            (
+                self.config.short_execution_quality_profit_weight_multiplier,
+                self.config.short_execution_quality_size_weight_multiplier,
+                self.config
+                    .short_execution_quality_slippage_weight_multiplier,
+            )
+        } else {
+            (Decimal::ONE, Decimal::ONE, Decimal::ONE)
+        }
     }
 
     fn keep_better_entry(
@@ -3707,7 +3785,7 @@ impl CryptoAlphaStrategy {
         let target_date = question.target_date?;
         let now_date = Utc::now().date_naive();
         let days = (target_date - now_date).num_days();
-        if days <= 0 {
+        if days < 0 {
             return None;
         }
         if !self.within_entry_horizon(days as u32) {
@@ -4033,6 +4111,11 @@ impl CryptoAlphaStrategy {
                 event_subtype_enum,
             )
             .unwrap_or(Decimal::ONE);
+        let (
+            execution_quality_profit_weight_multiplier,
+            execution_quality_size_weight_multiplier,
+            execution_quality_slippage_weight_multiplier,
+        ) = self.execution_quality_weight_multipliers(days as u32);
 
         Some(CryptoEntryCandidate {
             opportunity: TradingOpportunity {
@@ -4046,6 +4129,15 @@ impl CryptoAlphaStrategy {
                 min_profit_retention_ratio_multiplier: Some(profit_retention_multiplier),
                 max_slippage_bps_multiplier: Some(slippage_multiplier),
                 min_size_retention_ratio_multiplier: Some(size_retention_multiplier),
+                execution_quality_profit_weight_multiplier: Some(
+                    execution_quality_profit_weight_multiplier,
+                ),
+                execution_quality_size_weight_multiplier: Some(
+                    execution_quality_size_weight_multiplier,
+                ),
+                execution_quality_slippage_weight_multiplier: Some(
+                    execution_quality_slippage_weight_multiplier,
+                ),
                 detected_at: Utc::now(),
                 execution_plan: ExecutionPlan::DirectionalBuy {
                     token_id,
@@ -4426,6 +4518,11 @@ impl CryptoAlphaStrategy {
                 event_subtype_enum,
             )
             .unwrap_or(Decimal::ONE);
+        let (
+            execution_quality_profit_weight_multiplier,
+            execution_quality_size_weight_multiplier,
+            execution_quality_slippage_weight_multiplier,
+        ) = self.execution_quality_weight_multipliers(days.ceil() as u32);
 
         Some(CryptoEntryCandidate {
             opportunity: TradingOpportunity {
@@ -4439,6 +4536,15 @@ impl CryptoAlphaStrategy {
                 min_profit_retention_ratio_multiplier: Some(profit_retention_multiplier),
                 max_slippage_bps_multiplier: Some(slippage_multiplier),
                 min_size_retention_ratio_multiplier: Some(size_retention_multiplier),
+                execution_quality_profit_weight_multiplier: Some(
+                    execution_quality_profit_weight_multiplier,
+                ),
+                execution_quality_size_weight_multiplier: Some(
+                    execution_quality_size_weight_multiplier,
+                ),
+                execution_quality_slippage_weight_multiplier: Some(
+                    execution_quality_slippage_weight_multiplier,
+                ),
                 detected_at: Utc::now(),
                 execution_plan: ExecutionPlan::DirectionalBuy {
                     token_id,
@@ -4529,7 +4635,7 @@ impl CryptoAlphaStrategy {
             };
             let now_date = Utc::now().date_naive();
             let days = (target_date - now_date).num_days();
-            if days <= 0 {
+            if days < 0 {
                 continue;
             }
             if !self.within_entry_horizon(days as u32) {
@@ -4741,7 +4847,7 @@ impl CryptoAlphaStrategy {
         let winner_question = parse_crypto_question(&market.question)?;
         let winner_target_date = winner_question.target_date?;
         let winner_days = (winner_target_date - Utc::now().date_naive()).num_days();
-        if winner_days <= 0 {
+        if winner_days < 0 {
             return None;
         }
         let winner_market_text = if group.title.is_empty() {
@@ -4911,6 +5017,11 @@ impl CryptoAlphaStrategy {
                 event_subtype_enum,
             )
             .unwrap_or(Decimal::ONE);
+        let (
+            execution_quality_profit_weight_multiplier,
+            execution_quality_size_weight_multiplier,
+            execution_quality_slippage_weight_multiplier,
+        ) = self.execution_quality_weight_multipliers(winner_days as u32);
 
         Some(CryptoEntryCandidate {
             opportunity: TradingOpportunity {
@@ -4924,6 +5035,15 @@ impl CryptoAlphaStrategy {
                 min_profit_retention_ratio_multiplier: Some(profit_retention_multiplier),
                 max_slippage_bps_multiplier: Some(slippage_multiplier),
                 min_size_retention_ratio_multiplier: Some(size_retention_multiplier),
+                execution_quality_profit_weight_multiplier: Some(
+                    execution_quality_profit_weight_multiplier,
+                ),
+                execution_quality_size_weight_multiplier: Some(
+                    execution_quality_size_weight_multiplier,
+                ),
+                execution_quality_slippage_weight_multiplier: Some(
+                    execution_quality_slippage_weight_multiplier,
+                ),
                 detected_at: Utc::now(),
                 execution_plan: ExecutionPlan::DirectionalBuy {
                     token_id,
@@ -4998,7 +5118,7 @@ impl CryptoAlphaStrategy {
             let days_to_resolution = if let Some(parsed) = parse_crypto_question(&market.question) {
                 parsed
                     .target_date
-                    .map(|d| (d - Utc::now().date_naive()).num_days().max(1) as u32)
+                    .map(|d| (d - Utc::now().date_naive()).num_days().max(0) as u32)
                     .unwrap_or(30)
             } else if let Some((_asset, target_date)) = market
                 .event_title
@@ -5006,7 +5126,7 @@ impl CryptoAlphaStrategy {
                 .and_then(parse_crypto_event_title)
             {
                 target_date
-                    .map(|d| (d - Utc::now().date_naive()).num_days().max(1) as u32)
+                    .map(|d| (d - Utc::now().date_naive()).num_days().max(0) as u32)
                     .unwrap_or(30)
             } else {
                 30
@@ -5096,6 +5216,7 @@ impl CryptoAlphaStrategy {
                     *size,
                     *avg_cost,
                     best_bid,
+                    None,
                     &token_to_market,
                 ));
                 continue;
@@ -5142,6 +5263,7 @@ impl CryptoAlphaStrategy {
                     *size,
                     *avg_cost,
                     best_bid,
+                    Some(dec!(5)),
                     &token_to_market,
                 ));
                 continue;
@@ -5353,6 +5475,7 @@ impl CryptoAlphaStrategy {
                     *size,
                     *avg_cost,
                     best_bid,
+                    None,
                     &token_to_market,
                 ));
             } else if model_prob_dec < best_bid + hold_edge_threshold {
@@ -5440,6 +5563,7 @@ impl CryptoAlphaStrategy {
                     edge_decay_exit_size,
                     *avg_cost,
                     best_bid,
+                    None,
                     &token_to_market,
                 ));
                 self.set_edge_decay_cooldown(
@@ -5475,6 +5599,7 @@ impl CryptoAlphaStrategy {
         size: Decimal,
         avg_cost: Decimal,
         best_bid: Decimal,
+        max_slippage_bps_multiplier: Option<Decimal>,
         token_to_market: &HashMap<U256, &MarketInfo>,
     ) -> TradingOpportunity {
         let market = token_to_market.get(&token_id);
@@ -5495,8 +5620,11 @@ impl CryptoAlphaStrategy {
             estimated_profit: est.net_profit,
             size,
             min_profit_retention_ratio_multiplier: None,
-            max_slippage_bps_multiplier: None,
+            max_slippage_bps_multiplier,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id,
@@ -6369,19 +6497,32 @@ mod tests {
             short_horizon_max_days: 1,
             medium_horizon_max_days: 7,
             max_entry_days: 3650,
+            same_day_probability_calibration: dec!(0.80),
             short_horizon_probability_calibration: dec!(0.85),
             medium_horizon_probability_calibration: dec!(0.92),
+            same_day_execution_quality_profit_weight_multiplier: dec!(0.80),
+            same_day_execution_quality_size_weight_multiplier: dec!(1.20),
+            same_day_execution_quality_slippage_weight_multiplier: dec!(1.30),
+            short_execution_quality_profit_weight_multiplier: dec!(1.15),
+            short_execution_quality_size_weight_multiplier: dec!(0.95),
+            short_execution_quality_slippage_weight_multiplier: dec!(0.90),
+            same_day_size_multiplier: dec!(0.45),
             short_horizon_size_multiplier: dec!(0.60),
             medium_horizon_size_multiplier: dec!(0.80),
+            same_day_min_edge_multiplier: dec!(1.70),
             short_horizon_min_edge_multiplier: dec!(1.50),
             medium_horizon_min_edge_multiplier: dec!(1.20),
+            same_day_max_spread_multiplier: dec!(0.65),
             short_horizon_max_spread_multiplier: dec!(0.75),
             medium_horizon_max_spread_multiplier: dec!(0.90),
+            same_day_capital_efficiency_threshold: dec!(0.90),
             short_horizon_capital_efficiency_threshold: dec!(0.92),
             medium_horizon_capital_efficiency_threshold: dec!(0.95),
+            same_day_exit_buffer_multiplier: dec!(0.40),
             short_horizon_exit_buffer_multiplier: dec!(0.50),
             medium_horizon_exit_buffer_multiplier: dec!(0.80),
             hold_min_edge_bps: 100,
+            same_day_hold_edge_multiplier: dec!(1.70),
             short_horizon_hold_edge_multiplier: dec!(1.50),
             medium_horizon_hold_edge_multiplier: dec!(1.20),
             edge_decay_exit_fraction: dec!(0.25),
@@ -6392,19 +6533,23 @@ mod tests {
             edge_decay_severe_exit_multiplier: dec!(1.50),
             edge_decay_moderate_cooldown_multiplier: dec!(0.75),
             edge_decay_severe_cooldown_multiplier: dec!(0.50),
+            same_day_edge_decay_exit_multiplier: dec!(1.80),
             short_horizon_edge_decay_exit_multiplier: dec!(1.50),
             medium_horizon_edge_decay_exit_multiplier: dec!(1.20),
             edge_decay_cooldown_secs: 1800,
             edge_decay_confirmation_scans: 2,
+            same_day_edge_decay_confirmation_scans: 1,
             short_horizon_edge_decay_confirmation_scans: 1,
             medium_horizon_edge_decay_confirmation_scans: 2,
             edge_decay_moderate_confirmation_scan_multiplier: dec!(0.75),
             edge_decay_severe_confirmation_scan_multiplier: dec!(0.50),
             edge_decay_confirmation_window_secs: 900,
+            same_day_edge_decay_confirmation_window_multiplier: dec!(0.40),
             short_horizon_edge_decay_confirmation_window_multiplier: dec!(0.50),
             medium_horizon_edge_decay_confirmation_window_multiplier: dec!(0.75),
             edge_decay_moderate_confirmation_window_multiplier: dec!(0.75),
             edge_decay_severe_confirmation_window_multiplier: dec!(0.50),
+            same_day_edge_decay_cooldown_multiplier: dec!(0.40),
             short_horizon_edge_decay_cooldown_multiplier: dec!(0.50),
             medium_horizon_edge_decay_cooldown_multiplier: dec!(0.75),
         };
@@ -6528,11 +6673,93 @@ mod tests {
         pa_monitor::diagnostics::clear_crypto_candidate_decisions();
     }
 
+    #[tokio::test]
+    async fn test_same_day_thresholds_use_same_day_bucket() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.config.min_edge_bps = 500;
+        strategy.config.max_spread_bps = 1500;
+        strategy.config.same_day_min_edge_multiplier = dec!(2.00);
+        strategy.config.same_day_max_spread_multiplier = dec!(0.50);
+        strategy.config.short_horizon_min_edge_multiplier = dec!(1.20);
+        strategy.config.short_horizon_max_spread_multiplier = dec!(0.90);
+
+        let (edge, spread) = strategy
+            .effective_entry_thresholds("Will Bitcoin exceed $90,000 by today?", 0)
+            .await;
+
+        assert_eq!(edge, 1000);
+        assert_eq!(spread, 750);
+        assert_eq!(strategy.effective_horizon_size_multiplier(0), dec!(0.45));
+    }
+
+    #[tokio::test]
+    async fn test_same_day_market_can_generate_new_entry() {
+        let yes_token = U256::from(93u64);
+        let no_token = U256::from(94u64);
+        let target_date = Utc::now().date_naive().format("%B %-d, %Y").to_string();
+        let market = market_with_token_ids(
+            make_crypto_market(&format!("Will Bitcoin exceed $90,000 by {}?", target_date)),
+            yes_token,
+            no_token,
+            B256::from([93u8; 32]),
+        );
+
+        let mut books = HashMap::new();
+        books.insert(
+            yes_token,
+            OrderBook {
+                token_id: yes_token,
+                bids: vec![PriceLevel {
+                    price: dec!(0.08),
+                    size: dec!(500),
+                }],
+                asks: vec![PriceLevel {
+                    price: dec!(0.09),
+                    size: dec!(500),
+                }],
+                timestamp: Utc::now(),
+            },
+        );
+        books.insert(
+            no_token,
+            OrderBook {
+                token_id: no_token,
+                bids: vec![PriceLevel {
+                    price: dec!(0.90),
+                    size: dec!(500),
+                }],
+                asks: vec![PriceLevel {
+                    price: dec!(0.91),
+                    size: dec!(500),
+                }],
+                timestamp: Utc::now(),
+            },
+        );
+
+        let mut strategy = make_crypto_strategy(books, vec![]);
+        strategy.config.min_edge_bps = 100;
+        strategy.config.same_day_min_edge_multiplier = Decimal::ONE;
+        strategy.config.same_day_max_spread_multiplier = Decimal::ONE;
+        seed_price_cache(&strategy, &CRYPTO_ASSETS[0], 95_000.0);
+
+        let opp = strategy
+            .detect_crypto_opportunity(&market, Decimal::ZERO, &HashMap::new())
+            .await;
+
+        assert!(
+            opp.is_some(),
+            "same-day crypto market should remain eligible for new entry generation"
+        );
+    }
+
     #[test]
     fn test_infer_neg_risk_entry_days_falls_back_to_market_end_date() {
         let strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        let now = Utc::now();
+        let end_date = now + chrono::Duration::hours(36);
+        let expected_days = (end_date.date_naive() - now.date_naive()).num_days() as u32;
         let mut market = make_crypto_market("$100,000 or above");
-        market.end_date = Some(Utc::now() + chrono::Duration::hours(36));
+        market.end_date = Some(end_date);
         let event = NegRiskEvent {
             neg_risk_market_id: B256::from([77u8; 32]),
             title: "Bitcoin price".into(),
@@ -6541,7 +6768,7 @@ mod tests {
         };
 
         let inferred = strategy.infer_neg_risk_entry_days(&event);
-        assert_eq!(inferred, Some(2));
+        assert_eq!(inferred, Some(expected_days));
     }
 
     #[tokio::test]
@@ -7307,19 +7534,32 @@ mod tests {
             short_horizon_max_days: 1,
             medium_horizon_max_days: 7,
             max_entry_days: 3650,
+            same_day_probability_calibration: dec!(0.80),
             short_horizon_probability_calibration: dec!(0.85),
             medium_horizon_probability_calibration: dec!(0.92),
+            same_day_execution_quality_profit_weight_multiplier: dec!(0.80),
+            same_day_execution_quality_size_weight_multiplier: dec!(1.20),
+            same_day_execution_quality_slippage_weight_multiplier: dec!(1.30),
+            short_execution_quality_profit_weight_multiplier: dec!(1.15),
+            short_execution_quality_size_weight_multiplier: dec!(0.95),
+            short_execution_quality_slippage_weight_multiplier: dec!(0.90),
+            same_day_size_multiplier: dec!(0.45),
             short_horizon_size_multiplier: dec!(0.60),
             medium_horizon_size_multiplier: dec!(0.80),
+            same_day_min_edge_multiplier: dec!(1.70),
             short_horizon_min_edge_multiplier: dec!(1.50),
             medium_horizon_min_edge_multiplier: dec!(1.20),
+            same_day_max_spread_multiplier: dec!(0.65),
             short_horizon_max_spread_multiplier: dec!(0.75),
             medium_horizon_max_spread_multiplier: dec!(0.90),
+            same_day_capital_efficiency_threshold: dec!(0.90),
             short_horizon_capital_efficiency_threshold: dec!(0.92),
             medium_horizon_capital_efficiency_threshold: dec!(0.95),
+            same_day_exit_buffer_multiplier: dec!(0.40),
             short_horizon_exit_buffer_multiplier: dec!(0.50),
             medium_horizon_exit_buffer_multiplier: dec!(0.80),
             hold_min_edge_bps: 100,
+            same_day_hold_edge_multiplier: dec!(1.70),
             short_horizon_hold_edge_multiplier: dec!(1.50),
             medium_horizon_hold_edge_multiplier: dec!(1.20),
             edge_decay_exit_fraction: dec!(0.25),
@@ -7330,19 +7570,23 @@ mod tests {
             edge_decay_severe_exit_multiplier: dec!(1.50),
             edge_decay_moderate_cooldown_multiplier: dec!(0.75),
             edge_decay_severe_cooldown_multiplier: dec!(0.50),
+            same_day_edge_decay_exit_multiplier: dec!(1.80),
             short_horizon_edge_decay_exit_multiplier: dec!(1.50),
             medium_horizon_edge_decay_exit_multiplier: dec!(1.20),
             edge_decay_cooldown_secs: 1800,
             edge_decay_confirmation_scans: 2,
+            same_day_edge_decay_confirmation_scans: 1,
             short_horizon_edge_decay_confirmation_scans: 1,
             medium_horizon_edge_decay_confirmation_scans: 2,
             edge_decay_moderate_confirmation_scan_multiplier: dec!(0.75),
             edge_decay_severe_confirmation_scan_multiplier: dec!(0.50),
             edge_decay_confirmation_window_secs: 900,
+            same_day_edge_decay_confirmation_window_multiplier: dec!(0.40),
             short_horizon_edge_decay_confirmation_window_multiplier: dec!(0.50),
             medium_horizon_edge_decay_confirmation_window_multiplier: dec!(0.75),
             edge_decay_moderate_confirmation_window_multiplier: dec!(0.75),
             edge_decay_severe_confirmation_window_multiplier: dec!(0.50),
+            same_day_edge_decay_cooldown_multiplier: dec!(0.40),
             short_horizon_edge_decay_cooldown_multiplier: dec!(0.50),
             medium_horizon_edge_decay_cooldown_multiplier: dec!(0.75),
         };
@@ -7992,19 +8236,32 @@ mod tests {
             short_horizon_max_days: 1,
             medium_horizon_max_days: 7,
             max_entry_days: 3650,
+            same_day_probability_calibration: dec!(0.80),
             short_horizon_probability_calibration: dec!(0.85),
             medium_horizon_probability_calibration: dec!(0.92),
+            same_day_execution_quality_profit_weight_multiplier: dec!(0.80),
+            same_day_execution_quality_size_weight_multiplier: dec!(1.20),
+            same_day_execution_quality_slippage_weight_multiplier: dec!(1.30),
+            short_execution_quality_profit_weight_multiplier: dec!(1.15),
+            short_execution_quality_size_weight_multiplier: dec!(0.95),
+            short_execution_quality_slippage_weight_multiplier: dec!(0.90),
+            same_day_size_multiplier: dec!(0.45),
             short_horizon_size_multiplier: dec!(0.60),
             medium_horizon_size_multiplier: dec!(0.80),
+            same_day_min_edge_multiplier: dec!(1.70),
             short_horizon_min_edge_multiplier: dec!(1.50),
             medium_horizon_min_edge_multiplier: dec!(1.20),
+            same_day_max_spread_multiplier: dec!(0.65),
             short_horizon_max_spread_multiplier: dec!(0.75),
             medium_horizon_max_spread_multiplier: dec!(0.90),
+            same_day_capital_efficiency_threshold: dec!(0.90),
             short_horizon_capital_efficiency_threshold: dec!(0.92),
             medium_horizon_capital_efficiency_threshold: dec!(0.95),
+            same_day_exit_buffer_multiplier: dec!(0.40),
             short_horizon_exit_buffer_multiplier: dec!(0.50),
             medium_horizon_exit_buffer_multiplier: dec!(0.80),
             hold_min_edge_bps: 100,
+            same_day_hold_edge_multiplier: dec!(1.70),
             short_horizon_hold_edge_multiplier: dec!(1.50),
             medium_horizon_hold_edge_multiplier: dec!(1.20),
             edge_decay_exit_fraction: dec!(0.25),
@@ -8015,19 +8272,23 @@ mod tests {
             edge_decay_severe_exit_multiplier: dec!(1.50),
             edge_decay_moderate_cooldown_multiplier: dec!(0.75),
             edge_decay_severe_cooldown_multiplier: dec!(0.50),
+            same_day_edge_decay_exit_multiplier: dec!(1.80),
             short_horizon_edge_decay_exit_multiplier: dec!(1.50),
             medium_horizon_edge_decay_exit_multiplier: dec!(1.20),
             edge_decay_cooldown_secs: 1800,
             edge_decay_confirmation_scans: 2,
+            same_day_edge_decay_confirmation_scans: 1,
             short_horizon_edge_decay_confirmation_scans: 1,
             medium_horizon_edge_decay_confirmation_scans: 2,
             edge_decay_moderate_confirmation_scan_multiplier: dec!(0.75),
             edge_decay_severe_confirmation_scan_multiplier: dec!(0.50),
             edge_decay_confirmation_window_secs: 900,
+            same_day_edge_decay_confirmation_window_multiplier: dec!(0.40),
             short_horizon_edge_decay_confirmation_window_multiplier: dec!(0.50),
             medium_horizon_edge_decay_confirmation_window_multiplier: dec!(0.75),
             edge_decay_moderate_confirmation_window_multiplier: dec!(0.75),
             edge_decay_severe_confirmation_window_multiplier: dec!(0.50),
+            same_day_edge_decay_cooldown_multiplier: dec!(0.40),
             short_horizon_edge_decay_cooldown_multiplier: dec!(0.50),
             medium_horizon_edge_decay_cooldown_multiplier: dec!(0.75),
         };
@@ -9632,6 +9893,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(1u64),
@@ -9659,6 +9923,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(2u64),
@@ -9692,6 +9959,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(4u64),
@@ -9726,6 +9996,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(3u64),
@@ -9801,6 +10074,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(21u64),
@@ -9828,6 +10104,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(22u64),
@@ -9896,6 +10175,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(31u64),
@@ -9923,6 +10205,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(32u64),
@@ -9991,6 +10276,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(35u64),
@@ -10018,6 +10306,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(36u64),
@@ -10092,6 +10383,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(33u64),
@@ -10119,6 +10413,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(34u64),

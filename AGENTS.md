@@ -82,6 +82,21 @@ This file records repository-specific working agreements, high-level project con
 
 ## Change Log
 
+### 2026-03-24
+- Area: `crates/pa-strategy/src/engine.rs`, `crates/pa-strategy/src/crypto_alpha.rs`
+- Change: Added sell-side freshness slippage-budget handling so exit orders can reprice down within an allowed bid fade instead of requiring the exact pre-check best bid to persist, and marked crypto `relative_stop_loss` exits with a looser local slippage multiplier so urgent stop-loss sells can tolerate modest book deterioration before being rejected.
+- Why: Live crypto stop-loss exits were repeatedly triggering in diagnostics while the positions stayed open, which indicated that sell-side execution was too brittle on thin books; exits now have a controlled way to cross slightly weaker bids instead of repeatedly failing as pure FOK-at-best-bid orders.
+
+### 2026-03-24
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-core/src/types.rs`, `crates/pa-strategy/src/engine.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added same-day versus next-day execution-quality weight multipliers for crypto entries, threaded per-opportunity profit/size/slippage weight multipliers from crypto entry generation into both engine-side prepared-opportunity scoring and crypto same-asset candidate ranking, and exposed the new bucket-specific execution-quality settings in default config and operator docs.
+- Why: After splitting crypto into same-day and next-day buckets, execution-quality scoring still used one global weight mix even though same-day markets should lean harder on retained size and slippage while next-day markets can tolerate slightly more execution drag in exchange for retained profit.
+
+### 2026-03-24
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `README.md`
+- Change: Split short-dated crypto handling into an explicit same-day (`days_to_resolution = 0`) bucket plus the existing next-day/short bucket (`days_to_resolution = 1`), added same-day-specific probability/entry/size/hold/exit/edge-decay config knobs and defaults, updated runtime horizon logic to apply those settings across entry sizing and post-entry management, and allowed same-day dated markets to remain eligible instead of rejecting `days == 0` as expired.
+- Why: After tightening crypto to day markets, the strategy was still treating all `<= 1d` contracts as one bucket and silently excluded same-day markets because date-diff `0` was handled as expired; separating same-day from next-day makes the strategy fit true day markets better without breaking existing short-horizon override semantics.
+
 ### 2026-03-23
 - Area: `src/app/tasks.rs`, `crates/pa-monitor/src/diagnostics.rs`, `frontend/src/pages/CryptoMarkets.tsx`
 - Change: Canonicalized strategy financial aggregation so accounts configured with the legacy `crypto` strategy bucket contribute wallet balances and realized PnL to the `crypto_alpha` financial snapshot used by the crypto page, added a short dedup window for identical recent crypto exit decisions to prevent `/api/crypto/exits` from recording the same capital-efficiency/model-reversal exit every scan tick, and made the frontend fall back to the legacy `crypto` bucket if a status payload still lacks `crypto_alpha` financials.

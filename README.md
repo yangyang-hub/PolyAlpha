@@ -699,19 +699,32 @@ override_multiplier_max_delta_bps = 2500
 short_horizon_max_days = 1
 medium_horizon_max_days = 7
 max_entry_days = 1
+same_day_probability_calibration = 0.80
 short_horizon_probability_calibration = 0.85
 medium_horizon_probability_calibration = 0.92
+same_day_execution_quality_profit_weight_multiplier = 0.80
+same_day_execution_quality_size_weight_multiplier = 1.20
+same_day_execution_quality_slippage_weight_multiplier = 1.30
+short_execution_quality_profit_weight_multiplier = 1.15
+short_execution_quality_size_weight_multiplier = 0.95
+short_execution_quality_slippage_weight_multiplier = 0.90
+same_day_size_multiplier = 0.45
 short_horizon_size_multiplier = 0.60
 medium_horizon_size_multiplier = 0.80
+same_day_min_edge_multiplier = 1.70
 short_horizon_min_edge_multiplier = 1.50
 medium_horizon_min_edge_multiplier = 1.20
+same_day_max_spread_multiplier = 0.65
 short_horizon_max_spread_multiplier = 0.75
 medium_horizon_max_spread_multiplier = 0.90
+same_day_capital_efficiency_threshold = 0.90
 short_horizon_capital_efficiency_threshold = 0.92
 medium_horizon_capital_efficiency_threshold = 0.95
+same_day_exit_buffer_multiplier = 0.40
 short_horizon_exit_buffer_multiplier = 0.50
 medium_horizon_exit_buffer_multiplier = 0.80
 hold_min_edge_bps = 100
+same_day_hold_edge_multiplier = 1.70
 short_horizon_hold_edge_multiplier = 1.50
 medium_horizon_hold_edge_multiplier = 1.20
 edge_decay_exit_fraction = 0.25
@@ -722,12 +735,23 @@ edge_decay_moderate_exit_multiplier = 1.25
 edge_decay_severe_exit_multiplier = 1.50
 edge_decay_moderate_cooldown_multiplier = 0.75
 edge_decay_severe_cooldown_multiplier = 0.50
+same_day_edge_decay_exit_multiplier = 1.80
 short_horizon_edge_decay_exit_multiplier = 1.50
+same_day_edge_decay_confirmation_scans = 1
+same_day_edge_decay_confirmation_window_multiplier = 0.40
+same_day_edge_decay_cooldown_multiplier = 0.40
 
 其中 `override_probability_blend` 和 `override_probability_max_delta_bps`
 是 runtime 护栏：命中 `calibration_overrides.probability_calibration` 时，系统会先把
 override 因子和默认 baseline 做混合，再限制它相对 baseline 的最大偏移，避免新校准
 一上线就把概率收缩拉得过头。
+
+当 `crypto_alpha.max_entry_days = 1` 时，crypto 策略现在会进一步把短盘拆成两档：
+- `same_day = 0`：当天结算
+- `short = 1`：次日结算
+
+也就是说，当前默认已经不是把所有 `<= 1d` 市场视为同一档，而是会对当天盘使用更保守的
+entry / sizing / hold / edge-decay 参数。
 `override_multiplier_blend` 和 `override_multiplier_max_delta_bps` 则对其他
 multiplier 类 override 做同样的运行时护栏，统一限制 sigma/size/entry/exit/execution
 乘数相对 `1.0` 的偏移幅度。
@@ -738,6 +762,8 @@ multiplier 类 override 做同样的运行时护栏，统一限制 sigma/size/en
 策略会先把目标下单量轻微压低，减少“先生成、再裁掉”的重复摩擦。
 `risk.execution_quality_*_weight` 则控制执行质量分数里 `profit retention / size retention /
 slippage quality` 三项的相对重要性；默认三者等权，此时排序语义与原先保持一致。
+`same_day_execution_quality_*_multiplier` 和 `short_execution_quality_*_multiplier`
+则分别让当天盘和次日盘在这三项之间做一次桶内重加权。
 max_slippage_bps = 50
 min_profit_retention_ratio = 0.50
 min_size_retention_ratio = 0.50

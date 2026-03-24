@@ -192,6 +192,9 @@ impl SmartMoneyStrategy {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: agg.token_id,
@@ -252,6 +255,9 @@ impl SmartMoneyStrategy {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: agg.token_id,
@@ -326,6 +332,9 @@ impl SmartMoneyStrategy {
                     min_profit_retention_ratio_multiplier: None,
                     max_slippage_bps_multiplier: None,
                     min_size_retention_ratio_multiplier: None,
+                    execution_quality_profit_weight_multiplier: None,
+                    execution_quality_size_weight_multiplier: None,
+                    execution_quality_slippage_weight_multiplier: None,
                     detected_at: Utc::now(),
                     execution_plan: ExecutionPlan::DirectionalBuy {
                         token_id: *token_id,

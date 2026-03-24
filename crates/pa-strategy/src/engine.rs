@@ -227,6 +227,11 @@ impl StrategyEngine {
             .min(Decimal::ONE)
     }
 
+    fn sell_freshness_floor_price(limit_price: Decimal, max_slippage_bps: u32) -> Decimal {
+        (limit_price * (Decimal::ONE - (Decimal::from(max_slippage_bps) / dec!(10000))))
+            .max(Decimal::ZERO)
+    }
+
     fn effective_max_slippage_bps(&self, opp: &TradingOpportunity) -> u32 {
         use rust_decimal::prelude::ToPrimitive;
 
@@ -286,6 +291,30 @@ impl StrategyEngine {
         (self.min_size_retention_ratio * multiplier)
             .min(Decimal::ONE)
             .max(Decimal::ZERO)
+    }
+
+    fn effective_execution_quality_profit_weight(&self, opp: &TradingOpportunity) -> Decimal {
+        let multiplier = opp
+            .execution_quality_profit_weight_multiplier
+            .unwrap_or(Decimal::ONE)
+            .max(Decimal::ZERO);
+        (self.execution_quality_profit_weight * multiplier).max(Decimal::ZERO)
+    }
+
+    fn effective_execution_quality_size_weight(&self, opp: &TradingOpportunity) -> Decimal {
+        let multiplier = opp
+            .execution_quality_size_weight_multiplier
+            .unwrap_or(Decimal::ONE)
+            .max(Decimal::ZERO);
+        (self.execution_quality_size_weight * multiplier).max(Decimal::ZERO)
+    }
+
+    fn effective_execution_quality_slippage_weight(&self, opp: &TradingOpportunity) -> Decimal {
+        let multiplier = opp
+            .execution_quality_slippage_weight_multiplier
+            .unwrap_or(Decimal::ONE)
+            .max(Decimal::ZERO);
+        (self.execution_quality_slippage_weight * multiplier).max(Decimal::ZERO)
     }
 
     fn buy_profit_retention_ratio(
@@ -626,6 +655,9 @@ impl StrategyEngine {
                         }
                     }
                     TradeSide::Sell => {
+                        let effective_max_slippage_bps = self.effective_max_slippage_bps(opp);
+                        let freshness_floor =
+                            Self::sell_freshness_floor_price(*price, effective_max_slippage_bps);
                         let best_bid = match book.best_bid() {
                             Some(level) => level.price,
                             None => {
@@ -638,7 +670,24 @@ impl StrategyEngine {
                             }
                         };
 
-                        let bid_depth = book.available_depth(TradeSide::Sell, best_bid);
+                        if best_bid < freshness_floor {
+                            tracing::debug!(
+                                id = %opp.id,
+                                token_id = %token_id,
+                                original_limit = %price,
+                                current_best_bid = %best_bid,
+                                freshness_floor = %freshness_floor,
+                                max_slippage_bps = effective_max_slippage_bps,
+                                "Freshness rejected: bid moved below sell slippage budget"
+                            );
+                            pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+                            pa_monitor::metrics::EXECUTION_FRESHNESS_REJECTIONS
+                                .with_label_values(&[strategy_label, "bid_below_slippage_budget"])
+                                .inc();
+                            return None;
+                        }
+
+                        let bid_depth = book.available_depth(TradeSide::Sell, freshness_floor);
                         let capped_size = (*size).min(bid_depth).round_dp(2);
                         if capped_size < dec!(0.01) {
                             tracing::debug!(
@@ -646,6 +695,7 @@ impl StrategyEngine {
                                 token_id = %token_id,
                                 best_bid = %best_bid,
                                 bid_depth = %bid_depth,
+                                freshness_floor = %freshness_floor,
                                 "Freshness rejected: no sellable bid depth"
                             );
                             pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
@@ -655,12 +705,35 @@ impl StrategyEngine {
                             return None;
                         }
 
+                        let walk = match book.walk_book(TradeSide::Sell, capped_size) {
+                            Some(walk) if walk.worst_price >= freshness_floor => walk,
+                            _ => {
+                                tracing::debug!(
+                                    id = %opp.id,
+                                    token_id = %token_id,
+                                    size = %capped_size,
+                                    limit = %price,
+                                    freshness_floor = %freshness_floor,
+                                    "Freshness rejected: sell walk exceeded slippage budget"
+                                );
+                                pa_monitor::metrics::DEPTH_VALIDATION_REJECTED.inc();
+                                pa_monitor::metrics::EXECUTION_FRESHNESS_REJECTIONS
+                                    .with_label_values(&[
+                                        strategy_label,
+                                        "bid_slippage_budget_exceeded",
+                                    ])
+                                    .inc();
+                                return None;
+                            }
+                        };
+
                         if capped_size < *size {
                             tracing::debug!(
                                 id = %opp.id,
                                 token_id = %token_id,
                                 original_size = %size,
                                 capped_size = %capped_size,
+                                repriced_limit = %walk.worst_price,
                                 "Freshness scaling exit to current bid depth"
                             );
                             pa_monitor::metrics::EXECUTION_FRESHNESS_SCALED
@@ -670,7 +743,18 @@ impl StrategyEngine {
                             adjusted.size = capped_size;
                         }
 
-                        *price = best_bid;
+                        if walk.worst_price != *price {
+                            tracing::debug!(
+                                id = %opp.id,
+                                token_id = %token_id,
+                                original_limit = %price,
+                                repriced_limit = %walk.worst_price,
+                                freshness_floor = %freshness_floor,
+                                "Freshness repricing sell within slippage budget"
+                            );
+                        }
+
+                        *price = walk.worst_price;
                         if !Self::is_executable_directional_order(TradeSide::Sell, *price, *size) {
                             tracing::debug!(
                                 id = %opp.id,
@@ -1152,9 +1236,9 @@ impl StrategyEngine {
             self.effective_max_slippage_bps(&pre_freshness_opp),
         );
         let execution_quality_score = Self::execution_quality_score(
-            self.execution_quality_profit_weight,
-            self.execution_quality_size_weight,
-            self.execution_quality_slippage_weight,
+            self.effective_execution_quality_profit_weight(&opp),
+            self.effective_execution_quality_size_weight(&opp),
+            self.effective_execution_quality_slippage_weight(&opp),
             profit_retention_ratio,
             size_retention_ratio,
             slippage_quality_ratio,
@@ -1608,6 +1692,9 @@ impl StrategyEngine {
                 min_profit_retention_ratio_multiplier: None,
                 max_slippage_bps_multiplier: None,
                 min_size_retention_ratio_multiplier: None,
+                execution_quality_profit_weight_multiplier: None,
+                execution_quality_size_weight_multiplier: None,
+                execution_quality_slippage_weight_multiplier: None,
                 detected_at: chrono::Utc::now(),
                 execution_plan: ExecutionPlan::DirectionalBuy {
                     token_id: pos.token_id,
@@ -1988,6 +2075,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(1u64),
@@ -2017,6 +2107,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(token_id),
@@ -2424,6 +2517,47 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_execution_freshness_reprices_sell_within_slippage_budget() {
+        let mut engine = make_engine(HashMap::from([(
+            U256::from(1u64),
+            make_book(
+                U256::from(1u64),
+                &[(dec!(0.39), dec!(3)), (dec!(0.38), dec!(2))],
+                &[(dec!(0.45), dec!(10))],
+            ),
+        )]));
+        engine.max_slippage_bps = 500;
+
+        let opp = make_opp(TradeSide::Sell, dec!(0.40), dec!(5));
+        let validated = engine.validate_execution_freshness(&opp, &[]).unwrap();
+        match validated.execution_plan {
+            ExecutionPlan::DirectionalBuy {
+                side, price, size, ..
+            } => {
+                assert_eq!(side, TradeSide::Sell);
+                assert_eq!(price, dec!(0.38));
+                assert_eq!(size, dec!(5));
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_execution_freshness_rejects_sell_below_slippage_budget() {
+        let mut engine = make_engine(HashMap::from([(
+            U256::from(1u64),
+            make_book(
+                U256::from(1u64),
+                &[(dec!(0.39), dec!(5))],
+                &[(dec!(0.45), dec!(10))],
+            ),
+        )]));
+        engine.max_slippage_bps = 100;
+
+        let opp = make_opp(TradeSide::Sell, dec!(0.40), dec!(5));
+        assert!(engine.validate_execution_freshness(&opp, &[]).is_none());
+    }
+
+    #[test]
     fn test_validate_execution_freshness_scales_buy_to_ask_depth() {
         let engine = make_engine(HashMap::from([(
             U256::from(1u64),
@@ -2656,6 +2790,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(1u64),
@@ -2676,6 +2813,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(2u64),
@@ -2776,6 +2916,9 @@ mod tests {
                     min_profit_retention_ratio_multiplier: None,
                     max_slippage_bps_multiplier: None,
                     min_size_retention_ratio_multiplier: None,
+                    execution_quality_profit_weight_multiplier: None,
+                    execution_quality_size_weight_multiplier: None,
+                    execution_quality_slippage_weight_multiplier: None,
                     detected_at: Utc::now(),
                     execution_plan: ExecutionPlan::DirectionalBuy {
                         token_id: U256::from(1u64),
@@ -2802,6 +2945,9 @@ mod tests {
                     min_profit_retention_ratio_multiplier: None,
                     max_slippage_bps_multiplier: None,
                     min_size_retention_ratio_multiplier: None,
+                    execution_quality_profit_weight_multiplier: None,
+                    execution_quality_size_weight_multiplier: None,
+                    execution_quality_slippage_weight_multiplier: None,
                     detected_at: Utc::now(),
                     execution_plan: ExecutionPlan::DirectionalBuy {
                         token_id: U256::from(2u64),
@@ -2843,6 +2989,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(1u64),
@@ -2863,6 +3012,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(2u64),
@@ -2996,6 +3148,9 @@ mod tests {
                     min_profit_retention_ratio_multiplier: None,
                     max_slippage_bps_multiplier: None,
                     min_size_retention_ratio_multiplier: None,
+                    execution_quality_profit_weight_multiplier: None,
+                    execution_quality_size_weight_multiplier: None,
+                    execution_quality_slippage_weight_multiplier: None,
                     detected_at: Utc::now(),
                     execution_plan: ExecutionPlan::DirectionalBuy {
                         token_id: U256::from(1u64),
@@ -3022,6 +3177,9 @@ mod tests {
                     min_profit_retention_ratio_multiplier: None,
                     max_slippage_bps_multiplier: None,
                     min_size_retention_ratio_multiplier: None,
+                    execution_quality_profit_weight_multiplier: None,
+                    execution_quality_size_weight_multiplier: None,
+                    execution_quality_slippage_weight_multiplier: None,
                     detected_at: Utc::now(),
                     execution_plan: ExecutionPlan::DirectionalBuy {
                         token_id: U256::from(2u64),
@@ -3065,6 +3223,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(5u64),
@@ -3085,6 +3246,9 @@ mod tests {
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
             min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
             detected_at: Utc::now(),
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: U256::from(6u64),
@@ -3217,6 +3381,9 @@ mod tests {
                     min_profit_retention_ratio_multiplier: None,
                     max_slippage_bps_multiplier: None,
                     min_size_retention_ratio_multiplier: None,
+                    execution_quality_profit_weight_multiplier: None,
+                    execution_quality_size_weight_multiplier: None,
+                    execution_quality_slippage_weight_multiplier: None,
                     detected_at: Utc::now(),
                     execution_plan: ExecutionPlan::DirectionalBuy {
                         token_id: U256::from(5u64),
@@ -3243,6 +3410,9 @@ mod tests {
                     min_profit_retention_ratio_multiplier: None,
                     max_slippage_bps_multiplier: None,
                     min_size_retention_ratio_multiplier: None,
+                    execution_quality_profit_weight_multiplier: None,
+                    execution_quality_size_weight_multiplier: None,
+                    execution_quality_slippage_weight_multiplier: None,
                     detected_at: Utc::now(),
                     execution_plan: ExecutionPlan::DirectionalBuy {
                         token_id: U256::from(6u64),
