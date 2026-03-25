@@ -2556,7 +2556,7 @@ impl WeatherAlphaStrategy {
         if Self::uses_conservative_city_overlay(location) {
             self.config.max_entry_price.min(dec!(0.30))
         } else if Self::uses_preferred_city_overlay(location) {
-            self.config.max_entry_price.max(dec!(0.40))
+            self.config.max_entry_price.max(dec!(0.42))
         } else {
             self.config.max_entry_price
         }
@@ -7226,7 +7226,7 @@ mod tests {
             },
         );
 
-        assert_eq!(strategy.effective_max_entry_price("Miami"), dec!(0.40));
+        assert_eq!(strategy.effective_max_entry_price("Miami"), dec!(0.42));
         assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(4.60));
 
         assert_eq!(strategy.effective_max_entry_price("Chicago"), dec!(0.30));
@@ -7282,7 +7282,7 @@ mod tests {
         );
         assert_eq!(
             strategy.effective_max_entry_price_for_resolution("Miami", Some(30)),
-            dec!(0.40)
+            dec!(0.42)
         );
         assert_eq!(
             strategy.effective_max_position_usdc_for_resolution("Miami", Some(30)),

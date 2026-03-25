@@ -83,6 +83,11 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-25
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Raised the preferred-city weather entry-price ceiling from `0.40` to `0.42` while leaving conservative and default-protected cities unchanged, and updated the overlay regression expectations accordingly.
+- Why: After restoring healthy websocket/trading readiness, live weather metrics still showed `price_above_max_entry` as the second-largest rejection bucket behind `spread_too_wide`, so the next safe loosening step is a small entry-price increase only for the highest-confidence NOAA cities.
+
+### 2026-03-25
 - Area: `crates/pa-market-data/src/ws_feed.rs`, `crates/pa-market-data/src/service.rs`, `src/app/bootstrap.rs`, `src/app/market_runtime.rs`
 - Change: Added shared tracking for the unix timestamp of the most recent successfully received WebSocket order-book message and changed the API-server websocket health check to stay healthy while either the socket is currently connected or a successful message has been received within the last 180 seconds.
 - Why: The old readiness/health path treated any temporary reconnect gap as a hard websocket outage, which kept `/health` degraded and `trading_ready = false` for long periods even when the feed had only briefly reconnected without yet receiving a fresh first message.
