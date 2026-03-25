@@ -4,7 +4,7 @@ use futures::StreamExt;
 use pa_core::config::Settings;
 use pa_core::types::{OrderBook, PriceLevel};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
@@ -28,6 +28,7 @@ pub struct WebSocketFeed {
     cancel_token: CancellationToken,
     tasks: Vec<JoinHandle<()>>,
     ws_connected: Arc<AtomicBool>,
+    ws_last_message_unix: Arc<AtomicI64>,
 }
 
 impl WebSocketFeed {
@@ -47,6 +48,7 @@ impl WebSocketFeed {
             cancel_token: CancellationToken::new(),
             tasks: Vec::new(),
             ws_connected: Arc::new(AtomicBool::new(false)),
+            ws_last_message_unix: Arc::new(AtomicI64::new(0)),
         })
     }
 
@@ -62,6 +64,7 @@ impl WebSocketFeed {
             cancel_token: CancellationToken::new(),
             tasks: Vec::new(),
             ws_connected: Arc::new(AtomicBool::new(false)),
+            ws_last_message_unix: Arc::new(AtomicI64::new(0)),
         }
     }
 
@@ -73,6 +76,11 @@ impl WebSocketFeed {
     /// Get the WebSocket connected status flag.
     pub fn ws_connected(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.ws_connected)
+    }
+
+    /// Get the unix timestamp of the most recent successfully received WS message.
+    pub fn ws_last_message_unix(&self) -> Arc<AtomicI64> {
+        Arc::clone(&self.ws_last_message_unix)
     }
 
     /// Subscribe to order book updates for the given token IDs.
@@ -108,6 +116,7 @@ impl WebSocketFeed {
         let update_tx = self.update_tx.clone();
         let cancel = self.cancel_token.clone();
         let ws_connected = Arc::clone(&self.ws_connected);
+        let ws_last_message_unix = Arc::clone(&self.ws_last_message_unix);
 
         let handle = tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
@@ -173,6 +182,8 @@ impl WebSocketFeed {
                                 Some(Ok(book_update)) => {
                                     awaiting_first = false;
                                     last_message = Instant::now();
+                                    ws_last_message_unix
+                                        .store(Utc::now().timestamp(), Ordering::Relaxed);
                                     total_messages += 1;
                                     if total_messages == 1 {
                                         ws_connected.store(true, Ordering::Relaxed);

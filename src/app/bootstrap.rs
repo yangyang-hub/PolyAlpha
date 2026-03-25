@@ -4,7 +4,7 @@
 //! loading, and API server startup.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result};
@@ -70,6 +70,7 @@ pub fn start_api_server(
     settings: &Settings,
     config_arc: Arc<ArcSwap<Settings>>,
     ws_connected: Arc<std::sync::atomic::AtomicBool>,
+    ws_last_message_unix: Arc<AtomicI64>,
     lr_runtime_status: Arc<tokio::sync::RwLock<LrRuntimeStatus>>,
     shared_positions: Arc<tokio::sync::RwLock<Vec<PositionApiEntry>>>,
     shared_positions_updated_at: Arc<tokio::sync::RwLock<Option<chrono::DateTime<Utc>>>>,
@@ -81,12 +82,20 @@ pub fn start_api_server(
     >,
     startup_ready: Arc<AtomicBool>,
 ) {
+    let websocket_health_grace_secs = 180i64;
     let api_state = Arc::new(ApiState {
         config: config_arc,
         start_time: Utc::now(),
         health_checks: vec![(
             "websocket",
-            Box::new(move || ws_connected.load(Ordering::Relaxed)),
+            Box::new(move || {
+                if ws_connected.load(Ordering::Relaxed) {
+                    return true;
+                }
+                let last_message_unix = ws_last_message_unix.load(Ordering::Relaxed);
+                last_message_unix > 0
+                    && (Utc::now().timestamp() - last_message_unix) <= websocket_health_grace_secs
+            }),
         )],
         lr_status: Some(lr_runtime_status),
         positions: shared_positions,

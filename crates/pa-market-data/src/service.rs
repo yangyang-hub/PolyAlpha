@@ -4,7 +4,7 @@ use pa_core::config::Settings;
 use pa_core::traits::MarketDataFeed;
 use pa_core::types::{MarketInfo, OrderBook};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 use tokio::sync::RwLock;
 
 use crate::cache::OrderBookCache;
@@ -81,6 +81,11 @@ impl MarketDataService {
     /// Get the WebSocket connected status flag.
     pub async fn ws_feed_ws_connected(&self) -> Arc<AtomicBool> {
         self.ws.read().await.ws_connected()
+    }
+
+    /// Get the unix timestamp of the most recent successfully received WS message.
+    pub async fn ws_feed_last_message_unix(&self) -> Arc<AtomicI64> {
+        self.ws.read().await.ws_last_message_unix()
     }
 }
 

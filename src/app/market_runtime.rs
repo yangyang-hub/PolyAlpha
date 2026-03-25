@@ -52,6 +52,7 @@ pub async fn initialize_market_runtime(
     tracing::info!("Market data service initialized");
 
     let ws_connected = market_data.ws_feed_ws_connected().await;
+    let ws_last_message_unix = market_data.ws_feed_last_message_unix().await;
     let lr_runtime_status: Arc<tokio::sync::RwLock<pa_monitor::api::LrRuntimeStatus>> = Arc::new(
         tokio::sync::RwLock::new(pa_monitor::api::LrRuntimeStatus::default()),
     );
@@ -66,6 +67,7 @@ pub async fn initialize_market_runtime(
         settings,
         config_arc,
         Arc::clone(&ws_connected),
+        Arc::clone(&ws_last_message_unix),
         Arc::clone(&lr_runtime_status),
         Arc::clone(&shared_positions),
         Arc::clone(&shared_positions_updated_at),
