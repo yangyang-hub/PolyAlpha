@@ -153,9 +153,7 @@ pub fn record_crypto_exit_decision(entry: CryptoExitDecision) {
             && latest.question == entry.question
             && latest.market_type == entry.market_type
             && latest.held_is_yes == entry.held_is_yes
-            && latest.modeled_prob == entry.modeled_prob
             && latest.days_to_resolution == entry.days_to_resolution
-            && latest.best_bid == entry.best_bid
             && latest.avg_cost == entry.avg_cost
             && latest.size == entry.size;
         if within_dedup_window && same_exit {
@@ -283,7 +281,20 @@ mod tests {
         record_crypto_exit_decision(changed_bid);
         record_crypto_exit_decision(sample_exit(now + Duration::seconds(6)));
         let exits = recent_crypto_exit_decisions();
-        assert_eq!(exits.len(), 3);
+        assert_eq!(exits.len(), 2);
+        clear_crypto_exit_decisions();
+    }
+
+    #[test]
+    fn record_crypto_exit_decision_keeps_distinct_reason_within_window() {
+        clear_crypto_exit_decisions();
+        let now = Utc::now();
+        record_crypto_exit_decision(sample_exit(now));
+        let mut changed_reason = sample_exit(now + Duration::seconds(1));
+        changed_reason.reason = "model_reversal".into();
+        record_crypto_exit_decision(changed_reason);
+        let exits = recent_crypto_exit_decisions();
+        assert_eq!(exits.len(), 2);
         clear_crypto_exit_decisions();
     }
 }

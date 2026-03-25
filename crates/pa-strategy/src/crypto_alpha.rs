@@ -1093,10 +1093,13 @@ impl CryptoAlphaStrategy {
 
         let (horizon_edge_multiplier, horizon_spread_multiplier) =
             if self.is_same_day_resolution(days_to_resolution) {
-                (
-                    self.config.same_day_min_edge_multiplier,
-                    self.config.same_day_max_spread_multiplier,
-                )
+                let mut edge_multiplier = self.config.same_day_min_edge_multiplier;
+                let mut spread_multiplier = self.config.same_day_max_spread_multiplier;
+                if self.is_same_day_range_market(days_to_resolution, market_type) {
+                    edge_multiplier *= self.config.same_day_range_min_edge_multiplier;
+                    spread_multiplier *= self.config.same_day_range_max_spread_multiplier;
+                }
+                (edge_multiplier, spread_multiplier)
             } else if self.is_short_horizon_resolution(days_to_resolution) {
                 (
                     self.config.short_horizon_min_edge_multiplier,
@@ -1399,7 +1402,8 @@ impl CryptoAlphaStrategy {
         let (event_multiplier, event_subtype) = self
             .effective_event_size_multiplier(asset, market_text)
             .await;
-        let horizon_multiplier = self.effective_horizon_size_multiplier(days_to_resolution);
+        let horizon_multiplier =
+            self.effective_horizon_size_multiplier(days_to_resolution, market_type);
         let override_multiplier = self
             .calibration_override_size_multiplier(
                 asset,
@@ -1417,13 +1421,30 @@ impl CryptoAlphaStrategy {
         days_to_resolution == 0
     }
 
+    fn is_same_day_range_market(
+        &self,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+    ) -> bool {
+        self.is_same_day_resolution(days_to_resolution)
+            && matches!(market_type, CryptoMarketType::Range)
+    }
+
     fn is_short_horizon_resolution(&self, days_to_resolution: u32) -> bool {
         days_to_resolution > 0 && days_to_resolution <= self.config.short_horizon_max_days
     }
 
-    fn effective_horizon_size_multiplier(&self, days_to_resolution: u32) -> Decimal {
+    fn effective_horizon_size_multiplier(
+        &self,
+        days_to_resolution: u32,
+        market_type: CryptoMarketType,
+    ) -> Decimal {
         if self.is_same_day_resolution(days_to_resolution) {
-            self.config.same_day_size_multiplier
+            let mut multiplier = self.config.same_day_size_multiplier;
+            if self.is_same_day_range_market(days_to_resolution, market_type) {
+                multiplier *= self.config.same_day_range_size_multiplier;
+            }
+            multiplier
         } else if self.is_short_horizon_resolution(days_to_resolution) {
             self.config.short_horizon_size_multiplier
         } else if days_to_resolution <= self.config.medium_horizon_max_days {
@@ -1547,7 +1568,11 @@ impl CryptoAlphaStrategy {
             _ => self.config.alt_probability_calibration,
         };
         let horizon_factor = if self.is_same_day_resolution(days_to_resolution) {
-            self.config.same_day_probability_calibration
+            let mut factor = self.config.same_day_probability_calibration;
+            if self.is_same_day_range_market(days_to_resolution, market_type) {
+                factor *= self.config.same_day_range_probability_multiplier;
+            }
+            factor
         } else if self.is_short_horizon_resolution(days_to_resolution) {
             self.config.short_horizon_probability_calibration
         } else if days_to_resolution <= self.config.medium_horizon_max_days {
@@ -1861,31 +1886,35 @@ impl CryptoAlphaStrategy {
         market_type: CryptoMarketType,
         event_subtype: Option<CryptoEventSubtype>,
     ) -> (Decimal, Decimal) {
-        let (mut capital_efficiency_threshold, mut exit_buffer) =
-            if self.is_same_day_resolution(days_to_resolution) {
-                (
-                    self.config.same_day_capital_efficiency_threshold,
-                    (Decimal::from(self.config.exit_buffer_bps) / dec!(10000))
-                        * self.config.same_day_exit_buffer_multiplier,
-                )
-            } else if self.is_short_horizon_resolution(days_to_resolution) {
-                (
-                    self.config.short_horizon_capital_efficiency_threshold,
-                    (Decimal::from(self.config.exit_buffer_bps) / dec!(10000))
-                        * self.config.short_horizon_exit_buffer_multiplier,
-                )
-            } else if days_to_resolution <= self.config.medium_horizon_max_days {
-                (
-                    self.config.medium_horizon_capital_efficiency_threshold,
-                    (Decimal::from(self.config.exit_buffer_bps) / dec!(10000))
-                        * self.config.medium_horizon_exit_buffer_multiplier,
-                )
-            } else {
-                (
-                    self.config.capital_efficiency_threshold,
-                    Decimal::from(self.config.exit_buffer_bps) / dec!(10000),
-                )
-            };
+        let (mut capital_efficiency_threshold, mut exit_buffer) = if self
+            .is_same_day_resolution(days_to_resolution)
+        {
+            let mut exit_buffer_multiplier = self.config.same_day_exit_buffer_multiplier;
+            if self.is_same_day_range_market(days_to_resolution, market_type) {
+                exit_buffer_multiplier *= self.config.same_day_range_exit_buffer_multiplier;
+            }
+            (
+                self.config.same_day_capital_efficiency_threshold,
+                (Decimal::from(self.config.exit_buffer_bps) / dec!(10000)) * exit_buffer_multiplier,
+            )
+        } else if self.is_short_horizon_resolution(days_to_resolution) {
+            (
+                self.config.short_horizon_capital_efficiency_threshold,
+                (Decimal::from(self.config.exit_buffer_bps) / dec!(10000))
+                    * self.config.short_horizon_exit_buffer_multiplier,
+            )
+        } else if days_to_resolution <= self.config.medium_horizon_max_days {
+            (
+                self.config.medium_horizon_capital_efficiency_threshold,
+                (Decimal::from(self.config.exit_buffer_bps) / dec!(10000))
+                    * self.config.medium_horizon_exit_buffer_multiplier,
+            )
+        } else {
+            (
+                self.config.capital_efficiency_threshold,
+                Decimal::from(self.config.exit_buffer_bps) / dec!(10000),
+            )
+        };
 
         if let Some(asset) = asset {
             if let Some(multiplier) = self.calibration_override_capital_efficiency_multiplier(
@@ -1920,7 +1949,11 @@ impl CryptoAlphaStrategy {
         event_subtype: Option<CryptoEventSubtype>,
     ) -> Decimal {
         let mut multiplier = if self.is_same_day_resolution(days_to_resolution) {
-            self.config.same_day_hold_edge_multiplier
+            let mut multiplier = self.config.same_day_hold_edge_multiplier;
+            if self.is_same_day_range_market(days_to_resolution, market_type) {
+                multiplier *= self.config.same_day_range_hold_edge_multiplier;
+            }
+            multiplier
         } else if self.is_short_horizon_resolution(days_to_resolution) {
             self.config.short_horizon_hold_edge_multiplier
         } else if days_to_resolution <= self.config.medium_horizon_max_days {
@@ -2695,7 +2728,12 @@ impl CryptoAlphaStrategy {
         } else {
             Decimal::ZERO
         };
-        let horizon_size_multiplier = self.effective_horizon_size_multiplier(days_to_resolution);
+        let horizon_size_multiplier = self.effective_horizon_size_multiplier(
+            days_to_resolution,
+            gate_context
+                .map(|ctx| ctx.market_type)
+                .unwrap_or(CryptoMarketType::Binary),
+        );
         let kelly_size = kelly_raw
             * self.config.kelly_fraction
             * event_size_multiplier
@@ -3227,16 +3265,29 @@ impl CryptoAlphaStrategy {
     fn execution_quality_weight_multipliers(
         &self,
         days_to_resolution: u32,
+        market_type: CryptoMarketType,
     ) -> (Decimal, Decimal, Decimal) {
         if self.is_same_day_resolution(days_to_resolution) {
-            (
+            let mut multipliers = (
                 self.config
                     .same_day_execution_quality_profit_weight_multiplier,
                 self.config
                     .same_day_execution_quality_size_weight_multiplier,
                 self.config
                     .same_day_execution_quality_slippage_weight_multiplier,
-            )
+            );
+            if self.is_same_day_range_market(days_to_resolution, market_type) {
+                multipliers.0 *= self
+                    .config
+                    .same_day_range_execution_quality_profit_weight_multiplier;
+                multipliers.1 *= self
+                    .config
+                    .same_day_range_execution_quality_size_weight_multiplier;
+                multipliers.2 *= self
+                    .config
+                    .same_day_range_execution_quality_slippage_weight_multiplier;
+            }
+            multipliers
         } else if self.is_short_horizon_resolution(days_to_resolution) {
             (
                 self.config.short_execution_quality_profit_weight_multiplier,
@@ -4115,7 +4166,7 @@ impl CryptoAlphaStrategy {
             execution_quality_profit_weight_multiplier,
             execution_quality_size_weight_multiplier,
             execution_quality_slippage_weight_multiplier,
-        ) = self.execution_quality_weight_multipliers(days as u32);
+        ) = self.execution_quality_weight_multipliers(days as u32, CryptoMarketType::Binary);
 
         Some(CryptoEntryCandidate {
             opportunity: TradingOpportunity {
@@ -4522,7 +4573,7 @@ impl CryptoAlphaStrategy {
             execution_quality_profit_weight_multiplier,
             execution_quality_size_weight_multiplier,
             execution_quality_slippage_weight_multiplier,
-        ) = self.execution_quality_weight_multipliers(days.ceil() as u32);
+        ) = self.execution_quality_weight_multipliers(days.ceil() as u32, CryptoMarketType::Range);
 
         Some(CryptoEntryCandidate {
             opportunity: TradingOpportunity {
@@ -5021,7 +5072,7 @@ impl CryptoAlphaStrategy {
             execution_quality_profit_weight_multiplier,
             execution_quality_size_weight_multiplier,
             execution_quality_slippage_weight_multiplier,
-        ) = self.execution_quality_weight_multipliers(winner_days as u32);
+        ) = self.execution_quality_weight_multipliers(winner_days as u32, CryptoMarketType::Binary);
 
         Some(CryptoEntryCandidate {
             opportunity: TradingOpportunity {
@@ -6498,31 +6549,40 @@ mod tests {
             medium_horizon_max_days: 7,
             max_entry_days: 3650,
             same_day_probability_calibration: dec!(0.80),
+            same_day_range_probability_multiplier: dec!(0.90),
             short_horizon_probability_calibration: dec!(0.85),
             medium_horizon_probability_calibration: dec!(0.92),
             same_day_execution_quality_profit_weight_multiplier: dec!(0.80),
+            same_day_range_execution_quality_profit_weight_multiplier: dec!(0.85),
             same_day_execution_quality_size_weight_multiplier: dec!(1.20),
+            same_day_range_execution_quality_size_weight_multiplier: dec!(1.10),
             same_day_execution_quality_slippage_weight_multiplier: dec!(1.30),
+            same_day_range_execution_quality_slippage_weight_multiplier: dec!(1.20),
             short_execution_quality_profit_weight_multiplier: dec!(1.15),
             short_execution_quality_size_weight_multiplier: dec!(0.95),
             short_execution_quality_slippage_weight_multiplier: dec!(0.90),
             same_day_size_multiplier: dec!(0.45),
+            same_day_range_size_multiplier: dec!(0.75),
             short_horizon_size_multiplier: dec!(0.60),
             medium_horizon_size_multiplier: dec!(0.80),
             same_day_min_edge_multiplier: dec!(1.70),
+            same_day_range_min_edge_multiplier: dec!(1.15),
             short_horizon_min_edge_multiplier: dec!(1.50),
             medium_horizon_min_edge_multiplier: dec!(1.20),
             same_day_max_spread_multiplier: dec!(0.65),
+            same_day_range_max_spread_multiplier: dec!(0.85),
             short_horizon_max_spread_multiplier: dec!(0.75),
             medium_horizon_max_spread_multiplier: dec!(0.90),
             same_day_capital_efficiency_threshold: dec!(0.90),
             short_horizon_capital_efficiency_threshold: dec!(0.92),
             medium_horizon_capital_efficiency_threshold: dec!(0.95),
             same_day_exit_buffer_multiplier: dec!(0.40),
+            same_day_range_exit_buffer_multiplier: dec!(0.85),
             short_horizon_exit_buffer_multiplier: dec!(0.50),
             medium_horizon_exit_buffer_multiplier: dec!(0.80),
             hold_min_edge_bps: 100,
             same_day_hold_edge_multiplier: dec!(1.70),
+            same_day_range_hold_edge_multiplier: dec!(1.10),
             short_horizon_hold_edge_multiplier: dec!(1.50),
             medium_horizon_hold_edge_multiplier: dec!(1.20),
             edge_decay_exit_fraction: dec!(0.25),
@@ -6689,7 +6749,38 @@ mod tests {
 
         assert_eq!(edge, 1000);
         assert_eq!(spread, 750);
-        assert_eq!(strategy.effective_horizon_size_multiplier(0), dec!(0.45));
+        assert_eq!(
+            strategy.effective_horizon_size_multiplier(0, CryptoMarketType::Binary),
+            dec!(0.45)
+        );
+    }
+
+    #[test]
+    fn test_same_day_range_market_uses_extra_tightening() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.config.same_day_size_multiplier = dec!(0.35);
+        strategy.config.same_day_range_size_multiplier = dec!(0.50);
+        strategy.config.same_day_probability_calibration = dec!(0.80);
+        strategy.config.same_day_range_probability_multiplier = dec!(0.90);
+
+        assert_eq!(
+            strategy.effective_horizon_size_multiplier(0, CryptoMarketType::Binary),
+            dec!(0.35)
+        );
+        assert_eq!(
+            strategy.effective_horizon_size_multiplier(0, CryptoMarketType::Range),
+            dec!(0.175)
+        );
+
+        let asset = &CRYPTO_ASSETS[0];
+        assert_eq!(
+            strategy.baseline_probability_calibration_factor(asset, 0, CryptoMarketType::Binary),
+            dec!(0.7372)
+        );
+        assert_eq!(
+            strategy.baseline_probability_calibration_factor(asset, 0, CryptoMarketType::Range),
+            dec!(0.6156)
+        );
     }
 
     #[tokio::test]
@@ -7535,31 +7626,40 @@ mod tests {
             medium_horizon_max_days: 7,
             max_entry_days: 3650,
             same_day_probability_calibration: dec!(0.80),
+            same_day_range_probability_multiplier: dec!(0.90),
             short_horizon_probability_calibration: dec!(0.85),
             medium_horizon_probability_calibration: dec!(0.92),
             same_day_execution_quality_profit_weight_multiplier: dec!(0.80),
+            same_day_range_execution_quality_profit_weight_multiplier: dec!(0.85),
             same_day_execution_quality_size_weight_multiplier: dec!(1.20),
+            same_day_range_execution_quality_size_weight_multiplier: dec!(1.10),
             same_day_execution_quality_slippage_weight_multiplier: dec!(1.30),
+            same_day_range_execution_quality_slippage_weight_multiplier: dec!(1.20),
             short_execution_quality_profit_weight_multiplier: dec!(1.15),
             short_execution_quality_size_weight_multiplier: dec!(0.95),
             short_execution_quality_slippage_weight_multiplier: dec!(0.90),
             same_day_size_multiplier: dec!(0.45),
+            same_day_range_size_multiplier: dec!(0.75),
             short_horizon_size_multiplier: dec!(0.60),
             medium_horizon_size_multiplier: dec!(0.80),
             same_day_min_edge_multiplier: dec!(1.70),
+            same_day_range_min_edge_multiplier: dec!(1.15),
             short_horizon_min_edge_multiplier: dec!(1.50),
             medium_horizon_min_edge_multiplier: dec!(1.20),
             same_day_max_spread_multiplier: dec!(0.65),
+            same_day_range_max_spread_multiplier: dec!(0.85),
             short_horizon_max_spread_multiplier: dec!(0.75),
             medium_horizon_max_spread_multiplier: dec!(0.90),
             same_day_capital_efficiency_threshold: dec!(0.90),
             short_horizon_capital_efficiency_threshold: dec!(0.92),
             medium_horizon_capital_efficiency_threshold: dec!(0.95),
             same_day_exit_buffer_multiplier: dec!(0.40),
+            same_day_range_exit_buffer_multiplier: dec!(0.85),
             short_horizon_exit_buffer_multiplier: dec!(0.50),
             medium_horizon_exit_buffer_multiplier: dec!(0.80),
             hold_min_edge_bps: 100,
             same_day_hold_edge_multiplier: dec!(1.70),
+            same_day_range_hold_edge_multiplier: dec!(1.10),
             short_horizon_hold_edge_multiplier: dec!(1.50),
             medium_horizon_hold_edge_multiplier: dec!(1.20),
             edge_decay_exit_fraction: dec!(0.25),
@@ -8237,31 +8337,40 @@ mod tests {
             medium_horizon_max_days: 7,
             max_entry_days: 3650,
             same_day_probability_calibration: dec!(0.80),
+            same_day_range_probability_multiplier: dec!(0.90),
             short_horizon_probability_calibration: dec!(0.85),
             medium_horizon_probability_calibration: dec!(0.92),
             same_day_execution_quality_profit_weight_multiplier: dec!(0.80),
+            same_day_range_execution_quality_profit_weight_multiplier: dec!(0.85),
             same_day_execution_quality_size_weight_multiplier: dec!(1.20),
+            same_day_range_execution_quality_size_weight_multiplier: dec!(1.10),
             same_day_execution_quality_slippage_weight_multiplier: dec!(1.30),
+            same_day_range_execution_quality_slippage_weight_multiplier: dec!(1.20),
             short_execution_quality_profit_weight_multiplier: dec!(1.15),
             short_execution_quality_size_weight_multiplier: dec!(0.95),
             short_execution_quality_slippage_weight_multiplier: dec!(0.90),
             same_day_size_multiplier: dec!(0.45),
+            same_day_range_size_multiplier: dec!(0.75),
             short_horizon_size_multiplier: dec!(0.60),
             medium_horizon_size_multiplier: dec!(0.80),
             same_day_min_edge_multiplier: dec!(1.70),
+            same_day_range_min_edge_multiplier: dec!(1.15),
             short_horizon_min_edge_multiplier: dec!(1.50),
             medium_horizon_min_edge_multiplier: dec!(1.20),
             same_day_max_spread_multiplier: dec!(0.65),
+            same_day_range_max_spread_multiplier: dec!(0.85),
             short_horizon_max_spread_multiplier: dec!(0.75),
             medium_horizon_max_spread_multiplier: dec!(0.90),
             same_day_capital_efficiency_threshold: dec!(0.90),
             short_horizon_capital_efficiency_threshold: dec!(0.92),
             medium_horizon_capital_efficiency_threshold: dec!(0.95),
             same_day_exit_buffer_multiplier: dec!(0.40),
+            same_day_range_exit_buffer_multiplier: dec!(0.85),
             short_horizon_exit_buffer_multiplier: dec!(0.50),
             medium_horizon_exit_buffer_multiplier: dec!(0.80),
             hold_min_edge_bps: 100,
             same_day_hold_edge_multiplier: dec!(1.70),
+            same_day_range_hold_edge_multiplier: dec!(1.10),
             short_horizon_hold_edge_multiplier: dec!(1.50),
             medium_horizon_hold_edge_multiplier: dec!(1.20),
             edge_decay_exit_fraction: dec!(0.25),
@@ -9004,9 +9113,18 @@ mod tests {
     #[test]
     fn test_crypto_horizon_size_scales_by_bucket() {
         let strategy = make_crypto_strategy(HashMap::new(), vec![]);
-        assert_eq!(strategy.effective_horizon_size_multiplier(30), Decimal::ONE);
-        assert_eq!(strategy.effective_horizon_size_multiplier(7), dec!(0.80));
-        assert_eq!(strategy.effective_horizon_size_multiplier(1), dec!(0.60));
+        assert_eq!(
+            strategy.effective_horizon_size_multiplier(30, CryptoMarketType::Binary),
+            Decimal::ONE
+        );
+        assert_eq!(
+            strategy.effective_horizon_size_multiplier(7, CryptoMarketType::Binary),
+            dec!(0.80)
+        );
+        assert_eq!(
+            strategy.effective_horizon_size_multiplier(1, CryptoMarketType::Binary),
+            dec!(0.60)
+        );
     }
 
     #[test]

@@ -695,6 +695,51 @@ profit_protect_min_gain_bps = 800
 profit_protect_drawdown_bps = 500
 max_drawdown_bps = 1200
 
+Use `smart_money_discover_leaders` to build `auto_discover_candidates` or `[[smart_money.wallets]]`
+from public Polymarket leaderboard plus active-market holder/position data:
+
+```bash
+cargo run --bin smart_money_discover_leaders -- \
+  --leaderboard-limit 200 \
+  --market-limit 50 \
+  --candidate-limit 100 \
+  --summary-output smart_money_discovery_summary.json \
+  --emit-auto-discover-candidates smart_money_candidates.toml \
+  --emit-wallets-toml smart_money_wallets.toml
+```
+
+If `PA_DATABASE__URL` or `--database-url` is set, discovered candidates are also upserted into the
+`smart_money_leader_candidates` table for later review. Once populated, the monitor exposes:
+
+- `/api/smart-money/leaders` for the full recent candidate list
+- `/api/status.smart_money_leader_discovery_summary` for a compact top-candidate snapshot
+
+The SmartMoney page renders this candidate pool directly so you can inspect discovery score, source
+mix, leaderboard rank, realized PnL, and recent chain activity without leaving the monitor UI.
+The page also supports promoting a candidate inside the repository and returns ready-to-copy
+`[[smart_money.wallets]]` / `auto_discover_candidates` snippets. Promotion also updates the
+monitor-side `smart_money` config view and persists the section into `app_config` /
+`config_history`, but running smart-money workers still keep their startup config snapshot until
+restart or future hot-reload support is added.
+
+To supplement leaderboard/API discovery with recent Conditional Tokens transfer activity on Polygon,
+add a recent-block scan:
+
+```bash
+cargo run --bin smart_money_discover_leaders -- \
+  --leaderboard-limit 200 \
+  --market-limit 50 \
+  --candidate-limit 100 \
+  --onchain-lookback-blocks 5000 \
+  --onchain-max-logs 5000 \
+  --rpc-url https://polygon-rpc.com \
+  --summary-output smart_money_discovery_summary.json
+```
+
+This first chain supplement is a recent-block address seed, not a full historical chain backfill.
+It helps catch active wallets that are currently moving size on Conditional Tokens but have not yet
+surfaced strongly in the public leaderboard slice.
+
 [crypto_alpha]
 min_edge_bps = 100
 max_position_pct = 0.50
@@ -746,21 +791,37 @@ short_horizon_max_days = 1
 medium_horizon_max_days = 7
 max_entry_days = 1
 same_day_probability_calibration = 0.80
+same_day_range_probability_multiplier = 0.90
 short_horizon_probability_calibration = 0.85
 medium_horizon_probability_calibration = 0.92
 same_day_execution_quality_profit_weight_multiplier = 0.70
+same_day_range_execution_quality_profit_weight_multiplier = 0.85
 same_day_execution_quality_size_weight_multiplier = 1.30
+same_day_range_execution_quality_size_weight_multiplier = 1.10
 same_day_execution_quality_slippage_weight_multiplier = 1.50
+same_day_range_execution_quality_slippage_weight_multiplier = 1.20
 short_execution_quality_profit_weight_multiplier = 1.15
 short_execution_quality_size_weight_multiplier = 0.95
 short_execution_quality_slippage_weight_multiplier = 0.90
 same_day_size_multiplier = 0.35
+same_day_range_size_multiplier = 0.75
 short_horizon_size_multiplier = 0.60
 medium_horizon_size_multiplier = 0.80
 same_day_min_edge_multiplier = 1.90
+same_day_range_min_edge_multiplier = 1.15
 short_horizon_min_edge_multiplier = 1.50
+same_day_max_spread_multiplier = 0.55
+same_day_range_max_spread_multiplier = 0.85
+same_day_exit_buffer_multiplier = 0.30
+same_day_range_exit_buffer_multiplier = 0.85
+same_day_hold_edge_multiplier = 1.90
+same_day_range_hold_edge_multiplier = 1.10
 
 ### Smart Money Replay CLI
+
+The discovery CLI above is the fastest way to bootstrap a wider smart-money candidate set from
+official API-visible wallets, with an optional recent-block chain supplement. Full historical
+chain backfill and entity clustering are still a separate follow-up problem.
 
 If your raw JSONL omits optional replay fields such as `source`, `fee_rate_bps`, `liquidity`,
 or top-of-book sizes, normalize it first:

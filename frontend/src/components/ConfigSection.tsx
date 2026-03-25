@@ -114,14 +114,21 @@ const FIELD_HINTS: Record<string, Record<string, string>> = {
     medium_horizon_max_days: "中期期限桶最大天数",
     max_entry_days: "新开仓允许的最大到期天数",
     same_day_probability_calibration: "当日期限概率校准收缩系数",
+    same_day_range_probability_multiplier: "当日期限区间盘额外概率收缩乘数",
     short_horizon_probability_calibration: "短期期限概率校准收缩系数",
     medium_horizon_probability_calibration: "中期期限概率校准收缩系数",
     same_day_execution_quality_profit_weight_multiplier:
       "当日期限执行质量里的利润保真权重乘数",
+    same_day_range_execution_quality_profit_weight_multiplier:
+      "当日期限区间盘额外利润保真权重乘数",
     same_day_execution_quality_size_weight_multiplier:
       "当日期限执行质量里的数量保真权重乘数",
+    same_day_range_execution_quality_size_weight_multiplier:
+      "当日期限区间盘额外数量保真权重乘数",
     same_day_execution_quality_slippage_weight_multiplier:
       "当日期限执行质量里的滑点质量权重乘数",
+    same_day_range_execution_quality_slippage_weight_multiplier:
+      "当日期限区间盘额外滑点质量权重乘数",
     short_execution_quality_profit_weight_multiplier:
       "次日期限执行质量里的利润保真权重乘数",
     short_execution_quality_size_weight_multiplier:
@@ -129,22 +136,27 @@ const FIELD_HINTS: Record<string, Record<string, string>> = {
     short_execution_quality_slippage_weight_multiplier:
       "次日期限执行质量里的滑点质量权重乘数",
     same_day_size_multiplier: "当日期限仓位乘数",
+    same_day_range_size_multiplier: "当日期限区间盘额外仓位乘数",
     short_horizon_size_multiplier: "短期期限仓位乘数",
     medium_horizon_size_multiplier: "中期期限仓位乘数",
     same_day_min_edge_multiplier: "当日期限最小 edge 乘数",
+    same_day_range_min_edge_multiplier: "当日期限区间盘额外最小 edge 乘数",
     short_horizon_min_edge_multiplier: "短期期限最小 edge 乘数",
     medium_horizon_min_edge_multiplier: "中期期限最小 edge 乘数",
     same_day_max_spread_multiplier: "当日期限最大价差乘数",
+    same_day_range_max_spread_multiplier: "当日期限区间盘额外最大价差乘数",
     short_horizon_max_spread_multiplier: "短期期限最大价差乘数",
     medium_horizon_max_spread_multiplier: "中期期限最大价差乘数",
     same_day_capital_efficiency_threshold: "当日期限资金效率止盈阈值",
     short_horizon_capital_efficiency_threshold: "短期期限资金效率止盈阈值",
     medium_horizon_capital_efficiency_threshold: "中期期限资金效率止盈阈值",
     same_day_exit_buffer_multiplier: "当日期限模型反转退出缓冲乘数",
+    same_day_range_exit_buffer_multiplier: "当日期限区间盘额外模型反转缓冲乘数",
     short_horizon_exit_buffer_multiplier: "短期期限模型反转退出缓冲乘数",
     medium_horizon_exit_buffer_multiplier: "中期期限模型反转退出缓冲乘数",
     hold_min_edge_bps: "持仓继续保留所需的最小 edge（基点）",
     same_day_hold_edge_multiplier: "当日期限持仓最小 edge 乘数",
+    same_day_range_hold_edge_multiplier: "当日期限区间盘额外持仓最小 edge 乘数",
     short_horizon_hold_edge_multiplier: "短期期限持仓最小 edge 乘数",
     medium_horizon_hold_edge_multiplier: "中期期限持仓最小 edge 乘数",
     edge_decay_exit_fraction: "edge 衰减退出的基础减仓比例",

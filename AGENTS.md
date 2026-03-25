@@ -83,6 +83,41 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-25
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `crates/pa-monitor/src/diagnostics.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added a same-day `range/NegRisk` tightening layer on top of the existing day-market bucket so same-day range entries now use extra probability shrink, smaller size, higher min-edge, tighter spread acceptance, more slippage/size-focused execution weights, and tighter hold/reversal thresholds than same-day directional binaries; also simplified crypto exit deduplication so short-window repeats ignore jittery `best_bid`/`modeled_prob` changes and only record genuinely distinct exit reasons or stale repeats.
+- Why: Live crypto losses were clustering in thin same-day range markets where spread and fast model flips overwhelmed the available edge, and `/api/crypto/exits` was still noisy because tiny price/model changes kept re-emitting the same stop-loss/model-reversal event as if it were new.
+
+### 2026-03-25
+- Area: `crates/pa-storage/src/repository.rs`, `crates/pa-monitor/src/api.rs`, `README.md`
+- Change: Extended smart-money leader promotion so the monitor now appends promoted candidates into the in-memory `smart_money` config view, persists the updated section plus audit history into `app_config`/`config_history`, and explicitly reports that live smart-money workers still require restart or future hot-reload support to consume the new wallet list.
+- Why: Returning TOML snippets alone was useful for operators, but the next practical step was to make promotion write through the repository-backed config store and the monitor's current config state instead of remaining a pure UI-side suggestion.
+
+### 2026-03-25
+- Area: `crates/pa-storage/src/repository.rs`, `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/SmartMoney.tsx`, `README.md`
+- Change: Added a repository-backed smart-money leader promotion flow so the monitor can mark discovered candidates as `promoted`, expose a `/api/smart-money/leaders/promote` action, and show operator-ready `[[smart_money.wallets]]` plus `auto_discover_candidates` snippets in the SmartMoney UI after promotion.
+- Why: Once discovery candidates were visible in the monitor, the next operational gap was turning review into an action without pretending that live config hot-reload already existed; promotion now records operator intent and produces the exact config fragments needed for immediate follow-up.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/SmartMoney.tsx`, `README.md`
+- Change: Exposed discovered smart-money leader candidates through a dedicated `/api/smart-money/leaders` endpoint plus a compact `smart_money_leader_discovery_summary` on `/api/status`, and surfaced the candidate pool on the SmartMoney page with discovery score, source tags, leaderboard rank, realized PnL, and chain-activity context.
+- Why: Discovery output is only operationally useful if it can be reviewed in the running monitor, otherwise candidate promotion and quality checks still require jumping between ad hoc CLI output files and the database.
+
+### 2026-03-25
+- Area: `src/bin/smart_money_discover_leaders.rs`, `README.md`
+- Change: Extended the smart-money discovery CLI with an optional Polygon RPC supplement that scans recent Conditional Tokens `TransferSingle` logs, seeds additional active wallet candidates from chain activity, folds recent transfer count/volume into candidate metadata and scoring, and documented the new `--onchain-lookback-blocks` workflow.
+- Why: Leaderboard plus active-market API discovery is useful but still has blind spots, so the next pragmatic step is to catch currently active wallets directly from recent Conditional Tokens transfers without committing to a full historical chain indexer yet.
+
+### 2026-03-25
+- Area: `crates/pa-core/src/traits.rs`, `crates/pa-risk/src/position.rs`, `crates/pa-risk/src/manager.rs`, `crates/pa-strategy/src/engine.rs`
+- Change: Added average-cost lookup support to the risk-manager trait, threaded current position cost basis out of `pa-risk`, and populated sell-side `ExecutionResult.realized_profit` inside the strategy engine from filled sell trades before the risk manager updates positions, with focused engine regression coverage proving realized PnL is now computed from cost basis instead of staying zero.
+- Why: Runtime status and persisted opportunity history were still reporting `realized_pnl = 0` even though the new crypto trade-history API showed real small realized gains/losses, because execution results never carried true sell-side PnL.
+
+### 2026-03-25
+- Area: `migrations/011_create_smart_money_leader_candidates.sql`, `crates/pa-storage/src/models.rs`, `crates/pa-storage/src/repository.rs`, `src/bin/smart_money_discover_leaders.rs`, `README.md`
+- Change: Added a first-pass global smart-money leader discovery pipeline that crawls public Polymarket leaderboard and active-market holder/position APIs, enriches candidate wallets with public-profile/open-position/closed-position/activity data, scores them for copy-trading suitability, persists the resulting candidate pool in PostgreSQL, and can emit TOML snippets for `auto_discover_candidates` or `[[smart_money.wallets]]`.
+- Why: The smart-money stack could already score and follow wallets once a candidate list existed, but it still lacked a repository-native way to discover strong leader wallets from the broader Polymarket surface instead of relying on manually curated address lists.
+
+### 2026-03-25
 - Area: `crates/pa-core/src/config.rs`, `crates/pa-market-data/src/wallet_tracker.rs`, `crates/pa-strategy/src/smart_money.rs`, `crates/pa-monitor/src/api.rs`, `crates/pa-monitor/src/diagnostics.rs`, `config/default.toml`, `frontend/src/api.ts`, `frontend/src/components/ConfigSection.tsx`, `frontend/src/pages/SmartMoney.tsx`, `README.md`
 - Change: Added Phase 1 smart-money entry hardening with configurable signal/depth/spread/liquidity gates, wallet-signal dedup plus optional on-chain confirmation, recent accept/reject diagnostics for smart-money entries in the status API, and frontend/config/docs surfacing for the new controls and summaries.
 - Why: The original smart-money path followed wallet position changes too mechanically and lacked visibility into whether misses were caused by stale/noisy leader signals or by poor market quality at the time of follow.

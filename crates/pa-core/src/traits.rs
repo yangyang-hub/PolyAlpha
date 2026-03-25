@@ -1,5 +1,6 @@
 use alloy::primitives::U256;
 use async_trait::async_trait;
+use rust_decimal::Decimal;
 
 use crate::Result;
 use crate::types::{
@@ -61,6 +62,11 @@ pub trait RiskManager: Send + Sync {
 
     /// Update internal state after a trade execution.
     fn update_position(&self, result: &ExecutionResult);
+
+    /// Average cost for a currently held token position.
+    fn avg_cost(&self, _token_id: &U256) -> Decimal {
+        Decimal::ZERO
+    }
 
     /// Whether the circuit breaker has been triggered.
     fn is_circuit_broken(&self) -> bool;

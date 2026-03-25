@@ -2,10 +2,11 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use rust_decimal::Decimal;
+use serde_json::Value as JsonValue;
 
 use crate::models::{
-    MarketRow, OpportunityRow, OrderBookSnapshotRow, PositionRow, TokenRow, TradeHistoryRow,
-    TradeRow, WeatherForecastSnapshotRow,
+    MarketRow, OpportunityRow, OrderBookSnapshotRow, PositionRow, SmartMoneyLeaderCandidateRow,
+    TokenRow, TradeHistoryRow, TradeRow, WeatherForecastSnapshotRow,
 };
 
 /// Repository for database operations.
@@ -444,5 +445,169 @@ impl Repository {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row)
+    }
+
+    /// Insert or update a discovered smart-money leader candidate.
+    pub async fn upsert_smart_money_leader_candidate(
+        &self,
+        row: &SmartMoneyLeaderCandidateRow,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"INSERT INTO smart_money_leader_candidates
+            (address, label, source_tags, first_seen_at, last_seen_at, leaderboard_rank,
+             leaderboard_volume, leaderboard_pnl, open_positions_count, open_notional,
+             closed_positions_count, closed_total_bought, closed_realized_pnl, sampled_markets,
+             market_position_count, holder_position_count, activity_volume, activity_pnl,
+             verified, discovery_score, promoted, metadata, updated_at)
+            VALUES
+            ($1, $2, $3, $4, $5, $6,
+             $7, $8, $9, $10,
+             $11, $12, $13, $14,
+             $15, $16, $17, $18,
+             $19, $20, $21, $22, NOW())
+            ON CONFLICT (address) DO UPDATE
+            SET label = EXCLUDED.label,
+                source_tags = EXCLUDED.source_tags,
+                first_seen_at = LEAST(smart_money_leader_candidates.first_seen_at, EXCLUDED.first_seen_at),
+                last_seen_at = GREATEST(smart_money_leader_candidates.last_seen_at, EXCLUDED.last_seen_at),
+                leaderboard_rank = EXCLUDED.leaderboard_rank,
+                leaderboard_volume = EXCLUDED.leaderboard_volume,
+                leaderboard_pnl = EXCLUDED.leaderboard_pnl,
+                open_positions_count = EXCLUDED.open_positions_count,
+                open_notional = EXCLUDED.open_notional,
+                closed_positions_count = EXCLUDED.closed_positions_count,
+                closed_total_bought = EXCLUDED.closed_total_bought,
+                closed_realized_pnl = EXCLUDED.closed_realized_pnl,
+                sampled_markets = EXCLUDED.sampled_markets,
+                market_position_count = EXCLUDED.market_position_count,
+                holder_position_count = EXCLUDED.holder_position_count,
+                activity_volume = EXCLUDED.activity_volume,
+                activity_pnl = EXCLUDED.activity_pnl,
+                verified = EXCLUDED.verified,
+                discovery_score = EXCLUDED.discovery_score,
+                promoted = EXCLUDED.promoted,
+                metadata = EXCLUDED.metadata,
+                updated_at = NOW()"#,
+        )
+        .bind(&row.address)
+        .bind(&row.label)
+        .bind(&row.source_tags)
+        .bind(row.first_seen_at)
+        .bind(row.last_seen_at)
+        .bind(row.leaderboard_rank)
+        .bind(row.leaderboard_volume)
+        .bind(row.leaderboard_pnl)
+        .bind(row.open_positions_count)
+        .bind(row.open_notional)
+        .bind(row.closed_positions_count)
+        .bind(row.closed_total_bought)
+        .bind(row.closed_realized_pnl)
+        .bind(row.sampled_markets)
+        .bind(row.market_position_count)
+        .bind(row.holder_position_count)
+        .bind(row.activity_volume)
+        .bind(row.activity_pnl)
+        .bind(row.verified)
+        .bind(row.discovery_score)
+        .bind(row.promoted)
+        .bind(&row.metadata)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Load top discovered smart-money leader candidates ordered by score.
+    pub async fn load_smart_money_leader_candidates(
+        &self,
+        limit: i64,
+    ) -> anyhow::Result<Vec<SmartMoneyLeaderCandidateRow>> {
+        let rows = sqlx::query_as::<_, SmartMoneyLeaderCandidateRow>(
+            r#"SELECT address, label, source_tags, first_seen_at, last_seen_at, leaderboard_rank,
+                      leaderboard_volume, leaderboard_pnl, open_positions_count, open_notional,
+                      closed_positions_count, closed_total_bought, closed_realized_pnl, sampled_markets,
+                      market_position_count, holder_position_count, activity_volume, activity_pnl,
+                      verified, discovery_score, promoted, metadata, updated_at
+               FROM smart_money_leader_candidates
+               ORDER BY discovery_score DESC, last_seen_at DESC
+               LIMIT $1"#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Update the promoted flag for a discovered smart-money leader candidate.
+    pub async fn set_smart_money_leader_candidate_promoted(
+        &self,
+        address: &str,
+        promoted: bool,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"UPDATE smart_money_leader_candidates
+               SET promoted = $2,
+                   updated_at = NOW()
+               WHERE lower(address) = lower($1)"#,
+        )
+        .bind(address)
+        .bind(promoted)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Load one discovered smart-money leader candidate by address.
+    pub async fn load_smart_money_leader_candidate(
+        &self,
+        address: &str,
+    ) -> anyhow::Result<Option<SmartMoneyLeaderCandidateRow>> {
+        let row = sqlx::query_as::<_, SmartMoneyLeaderCandidateRow>(
+            r#"SELECT address, label, source_tags, first_seen_at, last_seen_at, leaderboard_rank,
+                      leaderboard_volume, leaderboard_pnl, open_positions_count, open_notional,
+                      closed_positions_count, closed_total_bought, closed_realized_pnl, sampled_markets,
+                      market_position_count, holder_position_count, activity_volume, activity_pnl,
+                      verified, discovery_score, promoted, metadata, updated_at
+               FROM smart_money_leader_candidates
+               WHERE lower(address) = lower($1)
+               LIMIT 1"#,
+        )
+        .bind(address)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Upsert one config section into the config store and append a history row.
+    pub async fn upsert_config_section(
+        &self,
+        section: &str,
+        data: &JsonValue,
+        changed_by: &str,
+    ) -> anyhow::Result<()> {
+        let version_row: (i32,) = sqlx::query_as(
+            r#"INSERT INTO app_config (section, data, version, updated_at)
+               VALUES ($1, $2, 1, NOW())
+               ON CONFLICT (section) DO UPDATE
+               SET data = EXCLUDED.data,
+                   version = app_config.version + 1,
+                   updated_at = NOW()
+               RETURNING version"#,
+        )
+        .bind(section)
+        .bind(data)
+        .fetch_one(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r#"INSERT INTO config_history (section, data, version, changed_by, created_at)
+               VALUES ($1, $2, $3, $4, NOW())"#,
+        )
+        .bind(section)
+        .bind(data)
+        .bind(version_row.0)
+        .bind(changed_by)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 }

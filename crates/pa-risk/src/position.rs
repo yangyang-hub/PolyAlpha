@@ -100,6 +100,13 @@ impl PositionTracker {
         }
     }
 
+    pub fn get_avg_cost(&self, token_id: &U256) -> Decimal {
+        match self.positions.get(token_id) {
+            Some(entry) => entry.value().avg_cost,
+            None => Decimal::ZERO,
+        }
+    }
+
     /// Get total share size across all tokens in the same market (by condition_id).
     pub fn size_by_market(&self, condition_id: &B256) -> Decimal {
         let mut total = Decimal::ZERO;

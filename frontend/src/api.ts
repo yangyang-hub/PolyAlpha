@@ -139,6 +139,10 @@ export interface StatusResponse {
     total_exits: number;
     reason_counts: { label: string; count: number }[];
   };
+  smart_money_leader_discovery_summary?: {
+    candidate_count: number;
+    top_candidates: SmartMoneyLeaderCandidate[];
+  };
   smart_money_wallet_scores?: {
     address: string;
     label: string;
@@ -171,6 +175,40 @@ export interface StatusResponse {
     size: string;
   }[];
   accounts: AccountStatusEntry[];
+}
+
+export interface SmartMoneyLeaderCandidate {
+  address: string;
+  label: string;
+  source_tags: string[];
+  first_seen_at: string;
+  last_seen_at: string;
+  leaderboard_rank: number | null;
+  leaderboard_volume: string;
+  leaderboard_pnl: string;
+  open_positions_count: number;
+  open_notional: string;
+  closed_positions_count: number;
+  closed_total_bought: string;
+  closed_realized_pnl: string;
+  sampled_markets: number;
+  market_position_count: number;
+  holder_position_count: number;
+  activity_volume: string;
+  activity_pnl: string;
+  verified: boolean;
+  discovery_score: string;
+  promoted: boolean;
+  metadata?: Record<string, unknown> | null;
+  updated_at: string;
+}
+
+export interface PromoteSmartMoneyLeaderResponse {
+  candidate: SmartMoneyLeaderCandidate;
+  promoted: boolean;
+  wallets_toml: string;
+  auto_discover_candidate: string;
+  note: string;
 }
 
 export interface AccountStatusEntry {
@@ -313,6 +351,23 @@ export function fetchConfig(): Promise<Record<string, unknown>> {
 
 export function fetchSection(section: string): Promise<Record<string, unknown>> {
   return get(`/api/config/${section}`);
+}
+
+export function fetchSmartMoneyLeaders(): Promise<SmartMoneyLeaderCandidate[]> {
+  return get("/api/smart-money/leaders");
+}
+
+export async function promoteSmartMoneyLeader(address: string): Promise<PromoteSmartMoneyLeaderResponse> {
+  const res = await fetch(`${BASE}/api/smart-money/leaders/promote`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`${res.status}: ${body}`);
+  }
+  return res.json();
 }
 
 export function fetchCryptoAlphaConfig(): Promise<CryptoAlphaConfigSection> {

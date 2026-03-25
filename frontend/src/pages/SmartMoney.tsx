@@ -1,5 +1,15 @@
-import { useCallback } from "react";
-import { fetchPositions, fetchSection, fetchStatus, type PositionEntry, type StatusResponse } from "../api";
+import { useCallback, useState } from "react";
+import {
+  fetchPositions,
+  fetchSection,
+  fetchSmartMoneyLeaders,
+  fetchStatus,
+  promoteSmartMoneyLeader,
+  type PromoteSmartMoneyLeaderResponse,
+  type PositionEntry,
+  type SmartMoneyLeaderCandidate,
+  type StatusResponse,
+} from "../api";
 import { usePolling } from "../hooks/usePolling";
 
 interface Wallet {
@@ -12,9 +22,11 @@ export default function SmartMoney() {
   const posFetcher = useCallback(() => fetchPositions("smart_money"), []);
   const configFetcher = useCallback(() => fetchSection("smart_money"), []);
   const statusFetcher = useCallback(() => fetchStatus(), []);
+  const leadersFetcher = useCallback(() => fetchSmartMoneyLeaders(), []);
   const { data: positions, loading: posLoading } = usePolling<PositionEntry[]>(posFetcher, 15000);
   const { data: config } = usePolling<Record<string, unknown>>(configFetcher, 60000);
   const { data: status } = usePolling<StatusResponse>(statusFetcher, 15000);
+  const { data: leaderCandidates } = usePolling<SmartMoneyLeaderCandidate[]>(leadersFetcher, 30000);
   const strategyAccounts = status?.accounts.filter((account) => account.strategies.includes("smart_money")) ?? [];
   const wallets: Wallet[] = Array.isArray(config?.wallets) ? (config.wallets as Wallet[]) : [];
 
@@ -27,9 +39,27 @@ export default function SmartMoney() {
   const walletScores = status?.smart_money_wallet_scores ?? [];
   const recentDecisions = status?.smart_money_recent_decisions ?? [];
   const recentExits = status?.smart_money_recent_exits ?? [];
+  const discoverySummary = status?.smart_money_leader_discovery_summary;
+  const topLeaderCandidates = leaderCandidates?.length ? leaderCandidates : (discoverySummary?.top_candidates ?? []);
+  const [promotionResult, setPromotionResult] = useState<PromoteSmartMoneyLeaderResponse | null>(null);
+  const [promotionError, setPromotionError] = useState<string | null>(null);
+  const [promotingAddress, setPromotingAddress] = useState<string | null>(null);
   const acceptRate = signalSummary?.recent_entry_attempts
     ? (signalSummary.recent_entry_accepted / signalSummary.recent_entry_attempts) * 100
     : 0;
+
+  const handlePromote = useCallback(async (address: string) => {
+    try {
+      setPromotionError(null);
+      setPromotingAddress(address);
+      const result = await promoteSmartMoneyLeader(address);
+      setPromotionResult(result);
+    } catch (error) {
+      setPromotionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPromotingAddress(null);
+    }
+  }, []);
 
   if (posLoading && !positions) {
     return (
@@ -275,6 +305,91 @@ export default function SmartMoney() {
               </tbody>
             </table>
           </div>
+        </div>
+      </div>
+
+      <div className="card bg-base-200 shadow-sm">
+        <div className="card-body p-4">
+          <div className="flex items-center justify-between gap-4">
+            <h2 className="card-title text-base">发现候选 Leader</h2>
+            <div className="text-sm opacity-60">
+              候选池 {discoverySummary?.candidate_count ?? leaderCandidates?.length ?? 0} 个
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="table table-sm">
+              <thead>
+                <tr>
+                  <th>地址</th>
+                  <th>标签</th>
+                  <th>分数</th>
+                  <th>来源</th>
+                  <th>榜单</th>
+                  <th>已平仓收益</th>
+                  <th>链上活跃</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {topLeaderCandidates.slice(0, 12).map((candidate) => {
+                  const metadata = candidate.metadata as { onchain_transfer_count?: number } | null | undefined;
+                  return (
+                    <tr key={candidate.address}>
+                      <td className="font-mono text-xs">{candidate.address.slice(0, 10)}...{candidate.address.slice(-6)}</td>
+                      <td>{candidate.label || "-"}</td>
+                      <td>{Number(candidate.discovery_score).toFixed(3)}</td>
+                      <td className="max-w-64">
+                        <div className="flex flex-wrap gap-1">
+                          {(candidate.source_tags ?? []).slice(0, 3).map((tag) => (
+                            <span key={tag} className="badge badge-outline badge-xs">{tag}</span>
+                          ))}
+                        </div>
+                      </td>
+                      <td>{candidate.leaderboard_rank ? `#${candidate.leaderboard_rank}` : "-"}</td>
+                      <td className={Number(candidate.closed_realized_pnl) >= 0 ? "text-success" : "text-error"}>
+                        ${Number(candidate.closed_realized_pnl).toFixed(0)}
+                      </td>
+                      <td>{metadata?.onchain_transfer_count ?? 0}</td>
+                      <td>
+                        {candidate.promoted ? (
+                          <span className="badge badge-success badge-sm">promoted</span>
+                        ) : (
+                          <button
+                            className="btn btn-xs btn-outline"
+                            onClick={() => void handlePromote(candidate.address)}
+                            disabled={promotingAddress === candidate.address}
+                          >
+                            {promotingAddress === candidate.address ? "..." : "晋升"}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {topLeaderCandidates.length === 0 && (
+                  <tr><td colSpan={8} className="text-center opacity-50">暂无候选池数据，需要先运行 smart_money_discover_leaders</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          {(promotionResult || promotionError) && (
+            <div className="mt-4 space-y-2">
+              {promotionError && <div className="alert alert-error py-2 text-sm">{promotionError}</div>}
+              {promotionResult && (
+                <div className="space-y-2">
+                  <div className="alert alert-info py-2 text-sm">{promotionResult.note}</div>
+                  <div>
+                    <div className="opacity-60 text-xs mb-1">`[[smart_money.wallets]]` 片段</div>
+                    <pre className="bg-base-300 rounded-box p-3 text-xs overflow-x-auto">{promotionResult.wallets_toml}</pre>
+                  </div>
+                  <div>
+                    <div className="opacity-60 text-xs mb-1">`auto_discover_candidates` 条目</div>
+                    <pre className="bg-base-300 rounded-box p-3 text-xs overflow-x-auto">{promotionResult.auto_discover_candidate}</pre>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 

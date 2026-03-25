@@ -4,7 +4,10 @@ use std::sync::atomic::AtomicBool;
 use arc_swap::ArcSwap;
 use axum::extract::{Path, Query, State};
 use axum::response::Json;
-use axum::{Router, routing::get};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -13,6 +16,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
 use pa_core::config::Settings;
+use pa_core::config::TrackedWalletConfig;
 use pa_storage::repository::Repository;
 
 type HealthCheck = Box<dyn Fn() -> bool + Send + Sync>;
@@ -130,6 +134,11 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
         .route("/api/config/meta/{section}", get(get_section_meta))
         .route("/api/config/{section}", get(get_section))
         .route("/api/trades", get(get_trades))
+        .route("/api/smart-money/leaders", get(get_smart_money_leaders))
+        .route(
+            "/api/smart-money/leaders/promote",
+            post(promote_smart_money_leader),
+        )
         .route("/api/crypto/trades", get(get_crypto_trades))
         .route("/api/crypto/decisions", get(get_crypto_candidate_decisions))
         .route("/api/crypto/exits", get(get_crypto_exit_decisions))
@@ -543,6 +552,13 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
     let recent_candidate_decisions = crate::diagnostics::recent_crypto_candidate_decisions();
     let recent_smart_money_decisions = crate::diagnostics::recent_smart_money_decisions();
     let recent_smart_money_exits = crate::diagnostics::recent_smart_money_exit_decisions();
+    let smart_money_leader_candidates = if let Some(repo) = &state.repository {
+        repo.load_smart_money_leader_candidates(24)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let mut smart_money_wallet_scores = crate::diagnostics::smart_money_wallet_scores();
     smart_money_wallet_scores.sort_by(|a, b| {
         b.effective_weight
@@ -1526,6 +1542,10 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
             "total_exits": recent_smart_money_exits.len(),
             "reason_counts": sorted_count_entries(&smart_money_exit_reason_counts),
         },
+        "smart_money_leader_discovery_summary": {
+            "candidate_count": smart_money_leader_candidates.len(),
+            "top_candidates": smart_money_leader_candidates.iter().take(8).map(smart_money_leader_candidate_json).collect::<Vec<_>>(),
+        },
         "smart_money_wallet_scores": smart_money_wallet_scores,
         "smart_money_recent_decisions": smart_money_recent_decisions,
         "smart_money_recent_exits": smart_money_recent_exits,
@@ -1545,6 +1565,11 @@ struct TradesQuery {
     strategy: Option<String>,
     account_name: Option<String>,
     proxy_wallet: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PromoteSmartMoneyLeaderRequest {
+    address: String,
 }
 
 /// GET /api/positions — current positions, optionally filtered by strategy.
@@ -1686,6 +1711,118 @@ async fn get_crypto_trades(
     .await
 }
 
+/// GET /api/smart-money/leaders — recent discovered smart-money leader candidates.
+async fn get_smart_money_leaders(State(state): State<Arc<ApiState>>) -> Json<Value> {
+    let rows = if let Some(repo) = &state.repository {
+        repo.load_smart_money_leader_candidates(200)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    Json(json!(
+        rows.iter()
+            .map(smart_money_leader_candidate_json)
+            .collect::<Vec<_>>()
+    ))
+}
+
+/// POST /api/smart-money/leaders/promote — mark a discovered leader as promoted and return config snippets.
+async fn promote_smart_money_leader(
+    State(state): State<Arc<ApiState>>,
+    axum::Json(body): axum::Json<PromoteSmartMoneyLeaderRequest>,
+) -> (axum::http::StatusCode, Json<Value>) {
+    let Some(repo) = &state.repository else {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "repository not configured"})),
+        );
+    };
+
+    let address = body.address.trim().to_lowercase();
+    let row = match repo.load_smart_money_leader_candidate(&address).await {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("unknown smart-money leader candidate: {address}")})),
+            );
+        }
+        Err(e) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("failed to load leader candidate: {e}")})),
+            );
+        }
+    };
+
+    if let Err(e) = repo
+        .set_smart_money_leader_candidate_promoted(&address, true)
+        .await
+    {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("failed to update promoted flag: {e}")})),
+        );
+    }
+
+    let label = smart_money_leader_label(&row);
+    let mut updated_settings = state.config.load().as_ref().clone();
+    if !updated_settings
+        .smart_money
+        .wallets
+        .iter()
+        .any(|wallet| wallet.address.eq_ignore_ascii_case(&row.address))
+    {
+        updated_settings.smart_money.wallets.push(TrackedWalletConfig {
+            address: row.address.clone(),
+            label: label.clone(),
+            weight: Decimal::ONE,
+        });
+    }
+    if !updated_settings
+        .smart_money
+        .auto_discover_candidates
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(&row.address))
+    {
+        updated_settings
+            .smart_money
+            .auto_discover_candidates
+            .push(row.address.clone());
+    }
+    state
+        .config
+        .store(Arc::new(updated_settings.clone()));
+    if let Err(e) = repo
+        .upsert_config_section(
+            "smart_money",
+            &serde_json::to_value(&updated_settings.smart_money).unwrap_or_else(|_| json!({})),
+            "smart_money_promote_api",
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "failed to persist promoted smart-money config section");
+    }
+
+    let wallets_toml = format!(
+        "[[smart_money.wallets]]\naddress = \"{}\"\nlabel = \"{}\"\nweight = 1.0\n",
+        row.address,
+        label.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+
+    (
+        axum::http::StatusCode::OK,
+        Json(json!({
+            "candidate": smart_money_leader_candidate_json(&row),
+            "promoted": true,
+            "wallets_toml": wallets_toml,
+            "auto_discover_candidate": format!("\"{}\"", row.address),
+            "note": "Candidate marked as promoted, appended to the monitor/config-store smart_money section, and snippets generated. The running smart-money workers still use their startup config snapshot until restart or future hot-reload support."
+        })),
+    )
+}
+
 /// GET /api/lr/status — LR runtime status.
 async fn get_lr_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
     match &state.lr_status {
@@ -1708,5 +1845,44 @@ fn extract_section(settings: &pa_core::config::Settings, section: &str) -> anyho
         "liquidity_rewards" => Ok(serde_json::to_value(&settings.liquidity_rewards)?),
         "smart_money" => Ok(serde_json::to_value(&settings.smart_money)?),
         _ => Err(anyhow::anyhow!("Unknown config section: {}", section)),
+    }
+}
+
+fn smart_money_leader_candidate_json(
+    row: &pa_storage::models::SmartMoneyLeaderCandidateRow,
+) -> Value {
+    json!({
+        "address": row.address,
+        "label": row.label,
+        "source_tags": row.source_tags,
+        "first_seen_at": row.first_seen_at,
+        "last_seen_at": row.last_seen_at,
+        "leaderboard_rank": row.leaderboard_rank,
+        "leaderboard_volume": row.leaderboard_volume,
+        "leaderboard_pnl": row.leaderboard_pnl,
+        "open_positions_count": row.open_positions_count,
+        "open_notional": row.open_notional,
+        "closed_positions_count": row.closed_positions_count,
+        "closed_total_bought": row.closed_total_bought,
+        "closed_realized_pnl": row.closed_realized_pnl,
+        "sampled_markets": row.sampled_markets,
+        "market_position_count": row.market_position_count,
+        "holder_position_count": row.holder_position_count,
+        "activity_volume": row.activity_volume,
+        "activity_pnl": row.activity_pnl,
+        "verified": row.verified,
+        "discovery_score": row.discovery_score,
+        "promoted": row.promoted,
+        "metadata": row.metadata,
+        "updated_at": row.updated_at,
+    })
+}
+
+fn smart_money_leader_label(row: &pa_storage::models::SmartMoneyLeaderCandidateRow) -> String {
+    let label = row.label.trim();
+    if !label.is_empty() {
+        label.to_string()
+    } else {
+        format!("leader_{}", &row.address[2..10.min(row.address.len())])
     }
 }

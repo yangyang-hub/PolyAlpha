@@ -286,6 +286,23 @@ impl StrategyEngine {
         }
     }
 
+    fn populate_realized_profit(&self, result: &mut pa_core::types::ExecutionResult) {
+        let realized = result
+            .trades
+            .iter()
+            .filter(|trade| matches!(trade.side, TradeSide::Sell))
+            .map(|trade| {
+                let avg_cost = self.risk_manager.avg_cost(&trade.token_id);
+                if avg_cost <= Decimal::ZERO || trade.filled_size <= Decimal::ZERO {
+                    Decimal::ZERO
+                } else {
+                    ((trade.price - avg_cost) * trade.filled_size) - trade.fee
+                }
+            })
+            .sum();
+        result.realized_profit = realized;
+    }
+
     fn refresh_estimated_profit(
         original: &TradingOpportunity,
         adjusted: &mut TradingOpportunity,
@@ -1441,8 +1458,9 @@ impl StrategyEngine {
         let is_exit = opp.execution_plan.is_exit();
         let timer = pa_monitor::metrics::EXECUTION_LATENCY.start_timer();
         match self.executor.execute(opp).await {
-            Ok(result) => {
+            Ok(mut result) => {
                 timer.observe_duration();
+                self.populate_realized_profit(&mut result);
                 self.persist_execution_result(opp, &result).await;
                 tracing::info!(
                     id = %opp.id,
@@ -2113,6 +2131,24 @@ mod tests {
         }
     }
 
+    struct FixedFillExecutor {
+        result: ExecutionResult,
+    }
+
+    #[async_trait]
+    impl Executor for FixedFillExecutor {
+        async fn execute(
+            &self,
+            _opportunity: &TradingOpportunity,
+        ) -> pa_core::Result<ExecutionResult> {
+            Ok(self.result.clone())
+        }
+
+        async fn cancel_all(&self) -> pa_core::Result<()> {
+            Ok(())
+        }
+    }
+
     struct NoopRiskManager;
 
     impl RiskManager for NoopRiskManager {
@@ -2121,6 +2157,10 @@ mod tests {
         }
 
         fn update_position(&self, _result: &ExecutionResult) {}
+
+        fn avg_cost(&self, _token_id: &U256) -> Decimal {
+            Decimal::ZERO
+        }
 
         fn is_circuit_broken(&self) -> bool {
             false
@@ -2141,6 +2181,10 @@ mod tests {
         }
 
         fn update_position(&self, _result: &ExecutionResult) {}
+
+        fn avg_cost(&self, _token_id: &U256) -> Decimal {
+            Decimal::ZERO
+        }
 
         fn is_circuit_broken(&self) -> bool {
             false
@@ -2263,6 +2307,38 @@ mod tests {
                 condition_id: B256::from([token_id as u8; 32]),
             },
         }
+    }
+
+    struct AvgCostRecordingRiskManager {
+        avg_costs: HashMap<U256, Decimal>,
+        updates: Arc<StdMutex<Vec<ExecutionResult>>>,
+    }
+
+    impl RiskManager for AvgCostRecordingRiskManager {
+        fn check_pre_trade(&self, _opportunity: &TradingOpportunity) -> RiskDecision {
+            RiskDecision::Approve
+        }
+
+        fn update_position(&self, result: &ExecutionResult) {
+            self.updates.lock().unwrap().push(result.clone());
+        }
+
+        fn avg_cost(&self, token_id: &U256) -> Decimal {
+            self.avg_costs
+                .get(token_id)
+                .copied()
+                .unwrap_or(Decimal::ZERO)
+        }
+
+        fn is_circuit_broken(&self) -> bool {
+            false
+        }
+
+        fn total_exposure(&self) -> Decimal {
+            Decimal::ZERO
+        }
+
+        fn reset_daily(&self) {}
     }
 
     #[test]
@@ -2920,6 +2996,107 @@ mod tests {
             .await;
         assert!(!handled);
         assert_eq!(budget_remaining, dec!(100));
+    }
+
+    #[tokio::test]
+    async fn test_process_opportunity_populates_realized_profit_from_avg_cost_before_risk_update() {
+        let updates = Arc::new(StdMutex::new(Vec::<ExecutionResult>::new()));
+        let token_id = U256::from(42u64);
+        let condition_id = B256::from([42u8; 32]);
+        let books = Arc::new(HashMap::from([(
+            token_id,
+            make_book(
+                token_id,
+                &[(dec!(0.60), dec!(10))],
+                &[(dec!(0.61), dec!(10))],
+            ),
+        )]));
+
+        let engine = StrategyEngine::new(
+            vec![Box::new(NoopStrategy)],
+            Arc::new(FixedFillExecutor {
+                result: ExecutionResult {
+                    opportunity_id: Uuid::now_v7(),
+                    strategy_type: StrategyType::CryptoAlpha,
+                    status: ExecutionStatus::Success,
+                    trades: vec![TradeRecord {
+                        id: Uuid::now_v7(),
+                        order_id: Some("test-order".into()),
+                        token_id,
+                        condition_id,
+                        side: TradeSide::Sell,
+                        price: dec!(0.60),
+                        size: dec!(2),
+                        filled_size: dec!(2),
+                        fee: Decimal::ZERO,
+                        tx_type: TxType::ClobOrder,
+                        tx_hash: None,
+                    }],
+                    realized_profit: Decimal::ZERO,
+                    total_fees: Decimal::ZERO,
+                    total_gas: Decimal::ZERO,
+                    executed_at: Utc::now(),
+                },
+            }),
+            Arc::new(AvgCostRecordingRiskManager {
+                avg_costs: HashMap::from([(token_id, dec!(0.40))]),
+                updates: updates.clone(),
+            }),
+            StrategyEngineDeps {
+                get_orderbook: Box::new(move |tid| books.get(&tid).cloned()),
+                get_available_capital: Box::new(|| dec!(1000)),
+                get_all_positions: Box::new(Vec::new),
+                repository: None,
+                account_name: "test".into(),
+                proxy_wallet: "0xtest".into(),
+            },
+            StrategyEngineOptions {
+                scan_interval_ms: 1000,
+                event_calendar: None,
+                min_order_usdc: dec!(1),
+                max_market_end_days: None,
+                max_slippage_bps: 500,
+                min_profit_retention_ratio: dec!(0.50),
+                min_size_retention_ratio: dec!(0.50),
+                execution_quality_profit_weight: Decimal::ONE,
+                execution_quality_size_weight: Decimal::ONE,
+                execution_quality_slippage_weight: Decimal::ONE,
+            },
+        );
+
+        let opportunity = TradingOpportunity {
+            id: Uuid::now_v7(),
+            strategy_type: StrategyType::CryptoAlpha,
+            condition_id,
+            question: "sell-realized-profit".into(),
+            spread: dec!(0.05),
+            estimated_profit: dec!(0.10),
+            size: dec!(2),
+            min_profit_retention_ratio_multiplier: None,
+            max_slippage_bps_multiplier: None,
+            min_size_retention_ratio_multiplier: None,
+            execution_quality_profit_weight_multiplier: None,
+            execution_quality_size_weight_multiplier: None,
+            execution_quality_slippage_weight_multiplier: None,
+            detected_at: Utc::now(),
+            execution_plan: ExecutionPlan::DirectionalBuy {
+                token_id,
+                side: TradeSide::Sell,
+                price: dec!(0.60),
+                size: dec!(2),
+                condition_id,
+            },
+        };
+
+        let mut budget_remaining = dec!(100);
+        let handled = engine
+            .handle_opportunity(opportunity, &[], &mut budget_remaining)
+            .await;
+        assert!(handled);
+
+        let recorded = updates.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].realized_profit, dec!(0.40));
     }
 
     #[tokio::test]

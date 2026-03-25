@@ -152,6 +152,10 @@ impl RiskManager for RiskManagerImpl {
         }
     }
 
+    fn avg_cost(&self, token_id: &U256) -> Decimal {
+        self.positions.get_avg_cost(token_id)
+    }
+
     fn is_circuit_broken(&self) -> bool {
         self.circuit_breaker.is_broken()
     }

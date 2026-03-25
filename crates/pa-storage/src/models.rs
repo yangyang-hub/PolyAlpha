@@ -140,3 +140,31 @@ pub struct WeatherForecastSnapshotRow {
     pub values: serde_json::Value,
     pub dates: serde_json::Value,
 }
+
+/// Database model for discovered smart-money leader candidates.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct SmartMoneyLeaderCandidateRow {
+    pub address: String,
+    pub label: String,
+    pub source_tags: serde_json::Value,
+    pub first_seen_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub leaderboard_rank: Option<i32>,
+    pub leaderboard_volume: Decimal,
+    pub leaderboard_pnl: Decimal,
+    pub open_positions_count: i32,
+    pub open_notional: Decimal,
+    pub closed_positions_count: i32,
+    pub closed_total_bought: Decimal,
+    pub closed_realized_pnl: Decimal,
+    pub sampled_markets: i32,
+    pub market_position_count: i32,
+    pub holder_position_count: i32,
+    pub activity_volume: Decimal,
+    pub activity_pnl: Decimal,
+    pub verified: bool,
+    pub discovery_score: Decimal,
+    pub promoted: bool,
+    pub metadata: Option<serde_json::Value>,
+    pub updated_at: DateTime<Utc>,
+}
