@@ -541,6 +541,15 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         .load(std::sync::atomic::Ordering::Relaxed);
     let health_ready = state.health_checks.iter().all(|(_, check)| check());
     let recent_candidate_decisions = crate::diagnostics::recent_crypto_candidate_decisions();
+    let recent_smart_money_decisions = crate::diagnostics::recent_smart_money_decisions();
+    let recent_smart_money_exits = crate::diagnostics::recent_smart_money_exit_decisions();
+    let mut smart_money_wallet_scores = crate::diagnostics::smart_money_wallet_scores();
+    smart_money_wallet_scores.sort_by(|a, b| {
+        b.effective_weight
+            .cmp(&a.effective_weight)
+            .then_with(|| a.label.cmp(&b.label))
+            .then_with(|| a.address.cmp(&b.address))
+    });
     let recent_gate_rejects: Vec<_> = recent_candidate_decisions
         .iter()
         .filter(|decision| decision.action == "gate_reject")
@@ -721,6 +730,97 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
     let recent_exits: Vec<_> = crate::diagnostics::recent_crypto_exit_decisions()
         .into_iter()
         .take(24)
+        .collect();
+    let smart_money_recent_entries: Vec<_> = recent_smart_money_decisions
+        .iter()
+        .filter(|decision| matches!(decision.signal_type.as_str(), "entry" | "increase"))
+        .take(48)
+        .cloned()
+        .collect();
+    let smart_money_recent_rejections: Vec<_> = smart_money_recent_entries
+        .iter()
+        .filter(|decision| !decision.accepted)
+        .cloned()
+        .collect();
+    let mut smart_money_reject_reason_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut smart_money_wallet_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut smart_money_source_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for decision in &smart_money_recent_entries {
+        *smart_money_wallet_counts
+            .entry(format!("{} wallets", decision.wallet_count))
+            .or_insert(0) += 1;
+        match (decision.source_data_api, decision.source_onchain) {
+            (true, true) => {
+                *smart_money_source_counts
+                    .entry("data_api+onchain".into())
+                    .or_insert(0) += 1;
+            }
+            (true, false) => {
+                *smart_money_source_counts
+                    .entry("data_api".into())
+                    .or_insert(0) += 1;
+            }
+            (false, true) => {
+                *smart_money_source_counts
+                    .entry("onchain".into())
+                    .or_insert(0) += 1;
+            }
+            (false, false) => {}
+        }
+    }
+    for decision in &smart_money_recent_rejections {
+        if let Some(reason) = &decision.reject_reason {
+            *smart_money_reject_reason_counts
+                .entry(reason.clone())
+                .or_insert(0) += 1;
+        }
+    }
+    let smart_money_reason_counts = sorted_count_entries(&smart_money_reject_reason_counts);
+    let smart_money_wallet_counts = sorted_count_entries(&smart_money_wallet_counts);
+    let smart_money_source_counts = sorted_count_entries(&smart_money_source_counts);
+    let smart_money_recent_decisions: Vec<_> = smart_money_recent_entries
+        .iter()
+        .take(12)
+        .map(|decision| {
+            json!({
+                "recorded_at": decision.recorded_at.to_rfc3339(),
+                "token_id": decision.token_id,
+                "condition_id": decision.condition_id,
+                "signal_type": decision.signal_type,
+                "accepted": decision.accepted,
+                "reject_reason": decision.reject_reason,
+                "wallet_count": decision.wallet_count,
+                "max_wallet_weight": decision.max_wallet_weight,
+                "source_data_api": decision.source_data_api,
+                "source_onchain": decision.source_onchain,
+            })
+        })
+        .collect();
+    let mut smart_money_exit_reason_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for exit in &recent_smart_money_exits {
+        *smart_money_exit_reason_counts
+            .entry(exit.reason.clone())
+            .or_insert(0) += 1;
+    }
+    let smart_money_recent_exits: Vec<_> = recent_smart_money_exits
+        .iter()
+        .take(12)
+        .map(|exit| {
+            json!({
+                "recorded_at": exit.recorded_at.to_rfc3339(),
+                "token_id": exit.token_id,
+                "condition_id": exit.condition_id,
+                "reason": exit.reason,
+                "question": exit.question,
+                "best_bid": exit.best_bid,
+                "avg_cost": exit.avg_cost,
+                "size": exit.size,
+            })
+        })
         .collect();
     let mut crypto_entry_tuning_hints = Vec::new();
     let mut crypto_override_suggestions = Vec::new();
@@ -1410,6 +1510,25 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         "crypto_override_suggestions": crypto_override_suggestions,
         "crypto_post_entry_tuning_hints": crypto_post_entry_tuning_hints,
         "crypto_post_entry_override_suggestions": crypto_post_entry_override_suggestions,
+        "smart_money_signal_summary": {
+            "recent_signal_count": smart_money_recent_entries.len(),
+            "recent_entry_attempts": smart_money_recent_entries.len(),
+            "recent_entry_accepted": smart_money_recent_entries.iter().filter(|decision| decision.accepted).count(),
+            "recent_entry_rejected": smart_money_recent_rejections.len(),
+            "wallet_counts": smart_money_wallet_counts,
+            "source_counts": smart_money_source_counts,
+        },
+        "smart_money_gate_reject_summary": {
+            "total_rejected": smart_money_recent_rejections.len(),
+            "reason_counts": smart_money_reason_counts,
+        },
+        "smart_money_exit_summary": {
+            "total_exits": recent_smart_money_exits.len(),
+            "reason_counts": sorted_count_entries(&smart_money_exit_reason_counts),
+        },
+        "smart_money_wallet_scores": smart_money_wallet_scores,
+        "smart_money_recent_decisions": smart_money_recent_decisions,
+        "smart_money_recent_exits": smart_money_recent_exits,
         "accounts": account_status,
     }))
 }

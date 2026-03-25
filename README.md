@@ -649,6 +649,52 @@ kelly_fraction = 0.25
 exit_buffer_bps = 50
 capital_efficiency_threshold = 0.98
 
+[smart_money]
+wallets = []
+follow_ratio = 0.10
+max_position_usdc = 100.0
+poll_interval_secs = 30
+signal_ttl_secs = 300
+exit_buffer_bps = 50
+capital_efficiency_threshold = 0.98
+onchain_enabled = false
+onchain_poll_secs = 4
+auto_discover_enabled = false
+auto_discover_candidates = []
+auto_discover_interval_secs = 3600
+min_wallet_score = 0.05
+min_wallet_volume_usdc = 250.0
+max_wallets = 20
+wallet_profile_blend = 0.50
+wallet_signal_bonus_per_event = 0.05
+wallet_signal_bonus_cap = 0.25
+wallet_underperform_decay_step = 0.10
+wallet_min_effective_weight = 0.25
+wallet_max_effective_weight = 1.50
+wallet_signal_lookback_secs = 86400
+min_signal_notional_usdc = 25.0
+min_signal_delta_shares = 20.0
+min_wallet_weight = 0.5
+min_consensus_wallets = 1
+max_signal_age_secs = 90
+max_entry_price = 0.85
+max_spread_bps = 300
+min_top_level_depth_usdc = 50.0
+min_market_liquidity = 500.0
+confirm_onchain_with_data_api = true
+dedup_window_secs = 45
+consensus_bonus_per_wallet = 0.10
+consensus_bonus_cap = 0.30
+freshness_half_life_secs = 45
+leader_delta_ratio_floor = 0.20
+position_concentration_soft_cap_usdc = 60.0
+position_concentration_min_multiplier = 0.25
+leader_exit_min_delta_ratio = 0.25
+max_hold_secs = 21600
+profit_protect_min_gain_bps = 800
+profit_protect_drawdown_bps = 500
+max_drawdown_bps = 1200
+
 [crypto_alpha]
 min_edge_bps = 100
 max_position_pct = 0.50
@@ -668,7 +714,7 @@ exit_buffer_bps = 50
 capital_efficiency_threshold = 0.98
 drift_decay = 0.0
 max_spread_bps = 1500
-relative_stop_loss_ratio = 0.80
+relative_stop_loss_ratio = 0.85
 max_exposure_per_asset_pct = 0.75
 max_exposure_per_asset_direction_pct = 0.45
 low_event_min_edge_multiplier = 1.20
@@ -702,29 +748,84 @@ max_entry_days = 1
 same_day_probability_calibration = 0.80
 short_horizon_probability_calibration = 0.85
 medium_horizon_probability_calibration = 0.92
-same_day_execution_quality_profit_weight_multiplier = 0.80
-same_day_execution_quality_size_weight_multiplier = 1.20
-same_day_execution_quality_slippage_weight_multiplier = 1.30
+same_day_execution_quality_profit_weight_multiplier = 0.70
+same_day_execution_quality_size_weight_multiplier = 1.30
+same_day_execution_quality_slippage_weight_multiplier = 1.50
 short_execution_quality_profit_weight_multiplier = 1.15
 short_execution_quality_size_weight_multiplier = 0.95
 short_execution_quality_slippage_weight_multiplier = 0.90
-same_day_size_multiplier = 0.45
+same_day_size_multiplier = 0.35
 short_horizon_size_multiplier = 0.60
 medium_horizon_size_multiplier = 0.80
-same_day_min_edge_multiplier = 1.70
+same_day_min_edge_multiplier = 1.90
 short_horizon_min_edge_multiplier = 1.50
+
+### Smart Money Replay CLI
+
+If your raw JSONL omits optional replay fields such as `source`, `fee_rate_bps`, `liquidity`,
+or top-of-book sizes, normalize it first:
+
+```bash
+cargo run --bin smart_money_prepare_replay -- \
+  --input raw_smart_money_samples.jsonl \
+  --output smart_money_samples.jsonl \
+  --summary-output smart_money_prepare_summary.json
+```
+
+Use `smart_money_replay` to replay newline-delimited JSON market snapshots through the current
+smart-money strategy logic, including entry gates, dynamic sizing, and multi-route exits.
+
+```bash
+cargo run --bin smart_money_replay -- \
+  --input smart_money_samples.jsonl \
+  --initial-balance 1000 \
+  --output json \
+  --summary-output smart_money_replay_summary.json \
+  --trace-output smart_money_replay_trace.json
+```
+
+Each JSONL row should provide a market snapshot and may optionally include one smart-money signal:
+
+```json
+{
+  "timestamp": "2026-03-25T09:30:00Z",
+  "token_id": "42",
+  "condition_id": "0x0000000000000000000000000000000000000000000000000000000000000042",
+  "question": "Will BTC finish above $110k today?",
+  "signal_type": "entry",
+  "wallet_address": "0xabc...",
+  "wallet_label": "leader_1",
+  "wallet_weight": "1.0",
+  "wallet_size": "500",
+  "delta": "500",
+  "source": "data_api",
+  "best_bid": "0.59",
+  "best_bid_size": "500",
+  "best_ask": "0.60",
+  "best_ask_size": "500",
+  "fee_rate_bps": 200,
+  "liquidity": "1500"
+}
+```
+
+Rows without `signal_type` still update the order book and let the replay trigger strategy-managed exits
+such as `stale_follow`, `profit_protect`, `drawdown`, and `capital_efficiency`.
+
+`--summary-output` writes aggregate replay stats plus recent decision/exit snippets, while
+`--trace-output` writes a per-row execution trace that includes generated opportunities, simulated
+buys/sells, ending cash, realized PnL, and open-position count after each snapshot.
 medium_horizon_min_edge_multiplier = 1.20
-same_day_max_spread_multiplier = 0.65
+same_day_max_spread_multiplier = 0.55
 short_horizon_max_spread_multiplier = 0.75
 medium_horizon_max_spread_multiplier = 0.90
 same_day_capital_efficiency_threshold = 0.90
 short_horizon_capital_efficiency_threshold = 0.92
 medium_horizon_capital_efficiency_threshold = 0.95
-same_day_exit_buffer_multiplier = 0.40
+same_day_exit_buffer_multiplier = 0.30
 short_horizon_exit_buffer_multiplier = 0.50
 medium_horizon_exit_buffer_multiplier = 0.80
 hold_min_edge_bps = 100
-same_day_hold_edge_multiplier = 1.70
+same_day_hold_edge_multiplier = 1.90
 short_horizon_hold_edge_multiplier = 1.50
 medium_horizon_hold_edge_multiplier = 1.20
 edge_decay_exit_fraction = 0.25

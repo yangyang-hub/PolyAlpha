@@ -83,6 +83,51 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-25
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-market-data/src/wallet_tracker.rs`, `crates/pa-strategy/src/smart_money.rs`, `crates/pa-monitor/src/api.rs`, `crates/pa-monitor/src/diagnostics.rs`, `config/default.toml`, `frontend/src/api.ts`, `frontend/src/components/ConfigSection.tsx`, `frontend/src/pages/SmartMoney.tsx`, `README.md`
+- Change: Added Phase 1 smart-money entry hardening with configurable signal/depth/spread/liquidity gates, wallet-signal dedup plus optional on-chain confirmation, recent accept/reject diagnostics for smart-money entries in the status API, and frontend/config/docs surfacing for the new controls and summaries.
+- Why: The original smart-money path followed wallet position changes too mechanically and lacked visibility into whether misses were caused by stale/noisy leader signals or by poor market quality at the time of follow.
+
+### 2026-03-25
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-market-data/src/wallet_tracker.rs`, `crates/pa-monitor/src/api.rs`, `crates/pa-monitor/src/diagnostics.rs`, `config/default.toml`, `frontend/src/api.ts`, `frontend/src/components/ConfigSection.tsx`, `frontend/src/pages/SmartMoney.tsx`, `README.md`
+- Change: Added Phase 2 smart-money wallet scoring with runtime `effective_weight` recomputation from profile score plus recent signal activity, stronger volume-aware auto-discovery scoring, published wallet-score snapshots through diagnostics/status API, and surfaced the dynamic wallet leaderboard in the SmartMoney page and config/docs.
+- Why: After adding entry gates, the next practical gap was still static wallet weighting, which made the strategy unable to lean into consistently active high-quality leaders or back away from weak profiles without manual retuning.
+
+### 2026-03-25
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/smart_money.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added Phase 3 smart-money dynamic sizing controls so copied entry size now scales with multi-wallet consensus, signal freshness decay, leader delta-ratio conviction, and existing-position concentration; also added focused regression coverage for the new sizing multipliers.
+- Why: Even after dynamic wallet scoring, copied entry size was still a mostly linear projection of leader holdings, which over-followed stale or crowded adds and under-reacted when multiple strong leaders moved together.
+
+### 2026-03-25
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/smart_money.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added Phase 4 smart-money exit controls with minimum leader-decrease follow thresholds, stale-follow timeout exits, profit-protect exits that trail off the observed peak bid, drawdown exits off average cost, and focused regression tests covering the richer exit path.
+- Why: After strengthening wallet selection and entry sizing, the next gap was that smart-money exits were still mostly limited to proportional leader reductions and capital-efficiency sells, which left copied positions without enough protection against stale holds, profit giveback, or deeper adverse moves.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/diagnostics.rs`, `crates/pa-monitor/src/api.rs`, `crates/pa-strategy/src/smart_money.rs`, `frontend/src/api.ts`, `frontend/src/pages/SmartMoney.tsx`
+- Change: Added Phase 5 smart-money observability with recorded strategy exit decisions, recent smart-money decision and exit payloads on `/api/status`, exit-reason summaries, and SmartMoney page panels for recent decisions, recent exits, and richer runtime diagnostics.
+- Why: After upgrading entry and exit logic, operators still lacked a compact way to inspect which smart-money signals were being accepted or rejected, and which exit reasons were actually closing copied positions in live runtime.
+
+### 2026-03-25
+- Area: `src/bin/smart_money_replay.rs`, `crates/pa-strategy/src/smart_money.rs`, `src/app/account_runtime.rs`, `README.md`
+- Change: Added a `smart_money_replay` JSONL replay CLI that drives the real smart-money strategy against historical market snapshots/signals, injected a configurable strategy clock so replay can honor historical signal/hold timing, and documented the replay input schema and usage.
+- Why: After hardening live smart-money behavior and observability, the remaining gap was an offline calibration loop for testing current copy-trading parameters against recorded leader-signal flows without running the full bot stack.
+
+### 2026-03-25
+- Area: `src/bin/smart_money_replay.rs`, `README.md`
+- Change: Extended `smart_money_replay` with richer JSON summary output including recent decision/exit snippets and added optional `--trace-output` so replay runs can emit a per-snapshot execution trace with simulated fills, cash, realized PnL, and open-position counts.
+- Why: A replay summary alone is useful for coarse parameter comparison, but actual tuning needs step-by-step traces to understand exactly where the strategy accepted, rejected, or exited across a historical signal stream.
+
+### 2026-03-25
+- Area: `src/bin/smart_money_prepare_replay.rs`, `README.md`
+- Change: Added a `smart_money_prepare_replay` CLI that normalizes raw smart-money JSONL into canonical replay input by backfilling default source/fee/liquidity/top-of-book sizes, sorting rows chronologically, and emitting a small preparation summary.
+- Why: The replay loop is only practical if operators can quickly turn partial or hand-collected smart-money samples into valid replay input without manually filling every optional field on every row.
+
+### 2026-03-25
+- Area: `config/default.toml`, `README.md`
+- Change: Tightened the default same-day crypto profile by raising `relative_stop_loss_ratio` from `0.80` to `0.85`, lowering `same_day_size_multiplier` from `0.45` to `0.35`, raising `same_day_min_edge_multiplier` from `1.70` to `1.90`, lowering `same_day_max_spread_multiplier` from `0.65` to `0.55`, shifting same-day execution-quality weights further toward retained size/slippage, and tightening same-day `model_reversal`/hold behavior via lower `same_day_exit_buffer_multiplier` and higher `same_day_hold_edge_multiplier`.
+- Why: Live same-day crypto fills were showing a small cluster of quick buy-then-reversal losses where the model edge did not survive thin-book spread and rapid post-entry flips, so the safest next move is to make same-day entries rarer, smaller, and faster to abandon once the signal deteriorates.
+
+### 2026-03-25
 - Area: `migrations/010_drop_opportunities_condition_id_fk.sql`, `crates/pa-core/src/types.rs`, `crates/pa-execution/src/orchestrator.rs`, `crates/pa-storage/src/repository.rs`, `src/app/tasks.rs`, `src/app/market_runtime.rs`
 - Change: Removed the fragile `opportunities.condition_id -> markets.condition_id` foreign key, added live upsert persistence for discovered `markets` and `tokens` during both startup discovery and periodic refresh, and threaded the real CLOB `order_id` through `TradeRecord` into persisted trade history rows instead of leaving every archived trade with `order_id = NULL`.
 - Why: The first trade-history rollout still had two practical gaps: opportunity persistence could silently fail whenever archival market metadata lagged live discovery, and persisted trades lacked the external CLOB order identifier needed for later wallet/order reconciliation.

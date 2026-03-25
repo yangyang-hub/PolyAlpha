@@ -191,6 +191,7 @@ pub async fn spawn_account_runtime(
                     get_held_positions: Box::new(move || {
                         rm_held_sm.positions_by_strategy(pa_core::types::StrategyType::SmartMoney)
                     }),
+                    now: Box::new(chrono::Utc::now),
                     signals: sm_signals,
                     markets: Arc::clone(&sm_markets),
                 },

@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 const MAX_CRYPTO_DECISIONS: usize = 100;
 const MAX_CRYPTO_EXITS: usize = 100;
+const MAX_SMART_MONEY_DECISIONS: usize = 200;
+const MAX_SMART_MONEY_EXITS: usize = 100;
 const CRYPTO_EXIT_DEDUP_WINDOW_SECS: i64 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,9 +70,52 @@ pub struct CryptoExitDecision {
     pub size: Decimal,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmartMoneyDecision {
+    pub recorded_at: DateTime<Utc>,
+    pub token_id: String,
+    pub condition_id: String,
+    pub signal_type: String,
+    pub accepted: bool,
+    pub reject_reason: Option<String>,
+    pub wallet_count: usize,
+    pub max_wallet_weight: Decimal,
+    pub source_data_api: bool,
+    pub source_onchain: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmartMoneyWalletScoreEntry {
+    pub address: String,
+    pub label: String,
+    pub base_weight: Decimal,
+    pub effective_weight: Decimal,
+    pub profile_score: Decimal,
+    pub recent_signal_count: usize,
+    pub auto_discovered: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmartMoneyExitDecision {
+    pub recorded_at: DateTime<Utc>,
+    pub token_id: String,
+    pub condition_id: String,
+    pub reason: String,
+    pub question: String,
+    pub best_bid: Decimal,
+    pub avg_cost: Decimal,
+    pub size: Decimal,
+}
+
 static CRYPTO_CANDIDATE_DECISIONS: LazyLock<Mutex<VecDeque<CryptoCandidateDecision>>> =
     LazyLock::new(|| Mutex::new(VecDeque::new()));
 static CRYPTO_EXIT_DECISIONS: LazyLock<Mutex<VecDeque<CryptoExitDecision>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
+static SMART_MONEY_DECISIONS: LazyLock<Mutex<VecDeque<SmartMoneyDecision>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
+static SMART_MONEY_WALLET_SCORES: LazyLock<Mutex<Vec<SmartMoneyWalletScoreEntry>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+static SMART_MONEY_EXIT_DECISIONS: LazyLock<Mutex<VecDeque<SmartMoneyExitDecision>>> =
     LazyLock::new(|| Mutex::new(VecDeque::new()));
 
 pub fn record_crypto_candidate_decision(entry: CryptoCandidateDecision) {
@@ -134,6 +179,61 @@ pub fn recent_crypto_exit_decisions() -> Vec<CryptoExitDecision> {
 
 pub fn clear_crypto_exit_decisions() {
     CRYPTO_EXIT_DECISIONS.lock().unwrap().clear();
+}
+
+pub fn record_smart_money_decision(entry: SmartMoneyDecision) {
+    let mut entries = SMART_MONEY_DECISIONS.lock().unwrap();
+    entries.push_front(entry);
+    while entries.len() > MAX_SMART_MONEY_DECISIONS {
+        entries.pop_back();
+    }
+}
+
+pub fn recent_smart_money_decisions() -> Vec<SmartMoneyDecision> {
+    SMART_MONEY_DECISIONS
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect()
+}
+
+pub fn clear_smart_money_decisions() {
+    SMART_MONEY_DECISIONS.lock().unwrap().clear();
+}
+
+pub fn record_smart_money_wallet_scores(entries: Vec<SmartMoneyWalletScoreEntry>) {
+    let mut scores = SMART_MONEY_WALLET_SCORES.lock().unwrap();
+    *scores = entries;
+}
+
+pub fn smart_money_wallet_scores() -> Vec<SmartMoneyWalletScoreEntry> {
+    SMART_MONEY_WALLET_SCORES.lock().unwrap().clone()
+}
+
+pub fn clear_smart_money_wallet_scores() {
+    SMART_MONEY_WALLET_SCORES.lock().unwrap().clear();
+}
+
+pub fn record_smart_money_exit_decision(entry: SmartMoneyExitDecision) {
+    let mut entries = SMART_MONEY_EXIT_DECISIONS.lock().unwrap();
+    entries.push_front(entry);
+    while entries.len() > MAX_SMART_MONEY_EXITS {
+        entries.pop_back();
+    }
+}
+
+pub fn recent_smart_money_exit_decisions() -> Vec<SmartMoneyExitDecision> {
+    SMART_MONEY_EXIT_DECISIONS
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect()
+}
+
+pub fn clear_smart_money_exit_decisions() {
+    SMART_MONEY_EXIT_DECISIONS.lock().unwrap().clear();
 }
 
 #[cfg(test)]

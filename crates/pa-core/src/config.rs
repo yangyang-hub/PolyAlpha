@@ -1544,9 +1544,99 @@ pub struct SmartMoneyConfig {
     /// Minimum P&L-to-volume ratio to auto-track a wallet.
     #[serde(default = "default_sm_min_score")]
     pub min_wallet_score: Decimal,
+    /// Minimum lifetime volume required before a wallet's profile score is trusted.
+    #[serde(default = "default_sm_min_wallet_volume_usdc")]
+    pub min_wallet_volume_usdc: Decimal,
     /// Maximum number of wallets to track (manual + auto-discovered).
     #[serde(default = "default_sm_max_wallets")]
     pub max_wallets: usize,
+    /// How strongly profile score changes should alter the configured base wallet weight.
+    #[serde(default = "default_sm_wallet_profile_blend")]
+    pub wallet_profile_blend: Decimal,
+    /// Bonus added to effective weight for each recent actionable signal.
+    #[serde(default = "default_sm_wallet_signal_bonus_per_event")]
+    pub wallet_signal_bonus_per_event: Decimal,
+    /// Maximum total recency bonus added to a wallet's effective weight multiplier.
+    #[serde(default = "default_sm_wallet_signal_bonus_cap")]
+    pub wallet_signal_bonus_cap: Decimal,
+    /// Flat decay step applied when a tracked wallet underperforms its minimum score.
+    #[serde(default = "default_sm_wallet_underperform_decay_step")]
+    pub wallet_underperform_decay_step: Decimal,
+    /// Lower clamp for effective wallet weights after dynamic scoring.
+    #[serde(default = "default_sm_wallet_min_effective_weight")]
+    pub wallet_min_effective_weight: Decimal,
+    /// Upper clamp for effective wallet weights after dynamic scoring.
+    #[serde(default = "default_sm_wallet_max_effective_weight")]
+    pub wallet_max_effective_weight: Decimal,
+    /// Lookback window used to count recent wallet signal activity for recency bonuses.
+    #[serde(default = "default_sm_wallet_signal_lookback_secs")]
+    pub wallet_signal_lookback_secs: u64,
+    /// Minimum signal notional in USDC before a wallet move is considered actionable.
+    #[serde(default = "default_sm_min_signal_notional_usdc")]
+    pub min_signal_notional_usdc: Decimal,
+    /// Minimum share delta before a wallet move is considered actionable.
+    #[serde(default = "default_sm_min_signal_delta_shares")]
+    pub min_signal_delta_shares: Decimal,
+    /// Minimum configured wallet weight required for a signal to be considered.
+    #[serde(default = "default_sm_min_wallet_weight")]
+    pub min_wallet_weight: Decimal,
+    /// Minimum number of wallets agreeing on the same token to allow an entry.
+    #[serde(default = "default_sm_min_consensus_wallets")]
+    pub min_consensus_wallets: usize,
+    /// Maximum acceptable signal age for following an entry.
+    #[serde(default = "default_sm_max_signal_age_secs")]
+    pub max_signal_age_secs: u64,
+    /// Maximum entry price when following a leader into a market.
+    #[serde(default = "default_sm_max_entry_price")]
+    pub max_entry_price: Decimal,
+    /// Maximum best-bid / best-ask spread in bps for a follow entry.
+    #[serde(default = "default_sm_max_spread_bps")]
+    pub max_spread_bps: u32,
+    /// Minimum notional resting on the best ask before we follow.
+    #[serde(default = "default_sm_min_top_level_depth_usdc")]
+    pub min_top_level_depth_usdc: Decimal,
+    /// Minimum market liquidity required before we follow.
+    #[serde(default = "default_sm_min_market_liquidity")]
+    pub min_market_liquidity: Decimal,
+    /// Whether on-chain transfer signals must be confirmed by the next Data API snapshot.
+    #[serde(default = "default_sm_confirm_onchain_with_data_api")]
+    pub confirm_onchain_with_data_api: bool,
+    /// Window used to suppress duplicate same-wallet same-token signals.
+    #[serde(default = "default_sm_dedup_window_secs")]
+    pub dedup_window_secs: u64,
+    /// Additional sizing bonus applied per agreeing wallet beyond the first.
+    #[serde(default = "default_sm_consensus_bonus_per_wallet")]
+    pub consensus_bonus_per_wallet: Decimal,
+    /// Cap on the total consensus sizing bonus.
+    #[serde(default = "default_sm_consensus_bonus_cap")]
+    pub consensus_bonus_cap: Decimal,
+    /// Half-life for sizing decay as signals age.
+    #[serde(default = "default_sm_freshness_half_life_secs")]
+    pub freshness_half_life_secs: u64,
+    /// Floor applied to leader delta-ratio sizing so small adds do not vanish completely.
+    #[serde(default = "default_sm_leader_delta_ratio_floor")]
+    pub leader_delta_ratio_floor: Decimal,
+    /// Existing position notional above which new smart-money entries are scaled down.
+    #[serde(default = "default_sm_position_concentration_soft_cap_usdc")]
+    pub position_concentration_soft_cap_usdc: Decimal,
+    /// Lower bound for concentration-based sizing penalties.
+    #[serde(default = "default_sm_position_concentration_min_multiplier")]
+    pub position_concentration_min_multiplier: Decimal,
+    /// Minimum leader delta ratio required before a partial decrease triggers a follow exit.
+    #[serde(default = "default_sm_leader_exit_min_delta_ratio")]
+    pub leader_exit_min_delta_ratio: Decimal,
+    /// Maximum time to keep a smart-money position without a fresh exit trigger.
+    #[serde(default = "default_sm_max_hold_secs")]
+    pub max_hold_secs: u64,
+    /// Minimum profit in bps above average cost before profit-protect exits activate.
+    #[serde(default = "default_sm_profit_protect_min_gain_bps")]
+    pub profit_protect_min_gain_bps: u32,
+    /// Allowed drawdown from peak bid, in bps, once profit protection is active.
+    #[serde(default = "default_sm_profit_protect_drawdown_bps")]
+    pub profit_protect_drawdown_bps: u32,
+    /// Maximum tolerated drawdown from average cost before forcing an exit.
+    #[serde(default = "default_sm_max_drawdown_bps")]
+    pub max_drawdown_bps: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1579,11 +1669,101 @@ fn default_sm_discover_interval() -> u64 {
 fn default_sm_min_score() -> Decimal {
     Decimal::new(5, 2)
 } // 0.05
+fn default_sm_min_wallet_volume_usdc() -> Decimal {
+    Decimal::from(250)
+}
 fn default_sm_max_wallets() -> usize {
     20
 }
 fn default_sm_wallet_weight() -> Decimal {
     Decimal::ONE
+}
+fn default_sm_wallet_profile_blend() -> Decimal {
+    Decimal::new(5, 1)
+} // 0.5
+fn default_sm_wallet_signal_bonus_per_event() -> Decimal {
+    Decimal::new(5, 2)
+} // 0.05
+fn default_sm_wallet_signal_bonus_cap() -> Decimal {
+    Decimal::new(25, 2)
+} // 0.25
+fn default_sm_wallet_underperform_decay_step() -> Decimal {
+    Decimal::new(10, 2)
+} // 0.10
+fn default_sm_wallet_min_effective_weight() -> Decimal {
+    Decimal::new(25, 2)
+} // 0.25
+fn default_sm_wallet_max_effective_weight() -> Decimal {
+    Decimal::new(15, 1)
+} // 1.5
+fn default_sm_wallet_signal_lookback_secs() -> u64 {
+    86_400
+}
+fn default_sm_min_signal_notional_usdc() -> Decimal {
+    Decimal::from(25)
+}
+fn default_sm_min_signal_delta_shares() -> Decimal {
+    Decimal::from(20)
+}
+fn default_sm_min_wallet_weight() -> Decimal {
+    Decimal::new(5, 1)
+} // 0.5
+fn default_sm_min_consensus_wallets() -> usize {
+    1
+}
+fn default_sm_max_signal_age_secs() -> u64 {
+    90
+}
+fn default_sm_max_entry_price() -> Decimal {
+    Decimal::new(85, 2)
+} // 0.85
+fn default_sm_max_spread_bps() -> u32 {
+    300
+}
+fn default_sm_min_top_level_depth_usdc() -> Decimal {
+    Decimal::from(50)
+}
+fn default_sm_min_market_liquidity() -> Decimal {
+    Decimal::from(500)
+}
+fn default_sm_confirm_onchain_with_data_api() -> bool {
+    true
+}
+fn default_sm_dedup_window_secs() -> u64 {
+    45
+}
+fn default_sm_consensus_bonus_per_wallet() -> Decimal {
+    Decimal::new(10, 2)
+} // 0.10
+fn default_sm_consensus_bonus_cap() -> Decimal {
+    Decimal::new(30, 2)
+} // 0.30
+fn default_sm_freshness_half_life_secs() -> u64 {
+    45
+}
+fn default_sm_leader_delta_ratio_floor() -> Decimal {
+    Decimal::new(20, 2)
+} // 0.20
+fn default_sm_position_concentration_soft_cap_usdc() -> Decimal {
+    Decimal::from(60)
+}
+fn default_sm_position_concentration_min_multiplier() -> Decimal {
+    Decimal::new(25, 2)
+} // 0.25
+fn default_sm_leader_exit_min_delta_ratio() -> Decimal {
+    Decimal::new(25, 2)
+} // 0.25
+fn default_sm_max_hold_secs() -> u64 {
+    21_600
+}
+fn default_sm_profit_protect_min_gain_bps() -> u32 {
+    800
+}
+fn default_sm_profit_protect_drawdown_bps() -> u32 {
+    500
+}
+fn default_sm_max_drawdown_bps() -> u32 {
+    1200
 }
 
 impl Default for SmartMoneyConfig {
@@ -1602,7 +1782,38 @@ impl Default for SmartMoneyConfig {
             auto_discover_candidates: vec![],
             auto_discover_interval_secs: default_sm_discover_interval(),
             min_wallet_score: default_sm_min_score(),
+            min_wallet_volume_usdc: default_sm_min_wallet_volume_usdc(),
             max_wallets: default_sm_max_wallets(),
+            wallet_profile_blend: default_sm_wallet_profile_blend(),
+            wallet_signal_bonus_per_event: default_sm_wallet_signal_bonus_per_event(),
+            wallet_signal_bonus_cap: default_sm_wallet_signal_bonus_cap(),
+            wallet_underperform_decay_step: default_sm_wallet_underperform_decay_step(),
+            wallet_min_effective_weight: default_sm_wallet_min_effective_weight(),
+            wallet_max_effective_weight: default_sm_wallet_max_effective_weight(),
+            wallet_signal_lookback_secs: default_sm_wallet_signal_lookback_secs(),
+            min_signal_notional_usdc: default_sm_min_signal_notional_usdc(),
+            min_signal_delta_shares: default_sm_min_signal_delta_shares(),
+            min_wallet_weight: default_sm_min_wallet_weight(),
+            min_consensus_wallets: default_sm_min_consensus_wallets(),
+            max_signal_age_secs: default_sm_max_signal_age_secs(),
+            max_entry_price: default_sm_max_entry_price(),
+            max_spread_bps: default_sm_max_spread_bps(),
+            min_top_level_depth_usdc: default_sm_min_top_level_depth_usdc(),
+            min_market_liquidity: default_sm_min_market_liquidity(),
+            confirm_onchain_with_data_api: default_sm_confirm_onchain_with_data_api(),
+            dedup_window_secs: default_sm_dedup_window_secs(),
+            consensus_bonus_per_wallet: default_sm_consensus_bonus_per_wallet(),
+            consensus_bonus_cap: default_sm_consensus_bonus_cap(),
+            freshness_half_life_secs: default_sm_freshness_half_life_secs(),
+            leader_delta_ratio_floor: default_sm_leader_delta_ratio_floor(),
+            position_concentration_soft_cap_usdc: default_sm_position_concentration_soft_cap_usdc(),
+            position_concentration_min_multiplier: default_sm_position_concentration_min_multiplier(
+            ),
+            leader_exit_min_delta_ratio: default_sm_leader_exit_min_delta_ratio(),
+            max_hold_secs: default_sm_max_hold_secs(),
+            profit_protect_min_gain_bps: default_sm_profit_protect_min_gain_bps(),
+            profit_protect_drawdown_bps: default_sm_profit_protect_drawdown_bps(),
+            max_drawdown_bps: default_sm_max_drawdown_bps(),
         }
     }
 }

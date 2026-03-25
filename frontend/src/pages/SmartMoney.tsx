@@ -21,6 +21,15 @@ export default function SmartMoney() {
   const totalCost = (positions ?? []).reduce((s, p) => s + Number(p.cost_basis), 0);
   const totalPnl = (positions ?? []).reduce((s, p) => s + Number(p.unrealized_pnl ?? 0), 0);
   const marketCount = new Set((positions ?? []).map((p) => p.condition_id).filter(Boolean)).size;
+  const signalSummary = status?.smart_money_signal_summary;
+  const rejectSummary = status?.smart_money_gate_reject_summary;
+  const exitSummary = status?.smart_money_exit_summary;
+  const walletScores = status?.smart_money_wallet_scores ?? [];
+  const recentDecisions = status?.smart_money_recent_decisions ?? [];
+  const recentExits = status?.smart_money_recent_exits ?? [];
+  const acceptRate = signalSummary?.recent_entry_attempts
+    ? (signalSummary.recent_entry_accepted / signalSummary.recent_entry_attempts) * 100
+    : 0;
 
   if (posLoading && !positions) {
     return (
@@ -113,6 +122,95 @@ export default function SmartMoney() {
         </div>
       </div>
 
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="card bg-base-200 shadow-sm">
+          <div className="card-body p-4">
+            <h2 className="card-title text-base">最近信号</h2>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div>
+                <div className="opacity-60 text-xs">总信号</div>
+                <div className="text-lg font-semibold">{signalSummary?.recent_signal_count ?? 0}</div>
+              </div>
+              <div>
+                <div className="opacity-60 text-xs">入场放行率</div>
+                <div className="text-lg font-semibold">{acceptRate.toFixed(0)}%</div>
+              </div>
+              <div>
+                <div className="opacity-60 text-xs">最近放行</div>
+                <div>{signalSummary?.recent_entry_accepted ?? 0}</div>
+              </div>
+              <div>
+                <div className="opacity-60 text-xs">最近拒绝</div>
+                <div>{signalSummary?.recent_entry_rejected ?? 0}</div>
+              </div>
+            </div>
+            <div className="mt-3 space-y-2 text-sm">
+              <div>
+                <div className="opacity-60 text-xs mb-1">共识钱包分布</div>
+                <div className="flex flex-wrap gap-2">
+                  {(signalSummary?.wallet_counts ?? []).slice(0, 4).map((entry) => (
+                    <span key={entry.label} className="badge badge-outline badge-sm">
+                      {entry.label}: {entry.count}
+                    </span>
+                  ))}
+                  {!(signalSummary?.wallet_counts?.length) && <span className="opacity-50">暂无</span>}
+                </div>
+              </div>
+              <div>
+                <div className="opacity-60 text-xs mb-1">信号来源</div>
+                <div className="flex flex-wrap gap-2">
+                  {(signalSummary?.source_counts ?? []).map((entry) => (
+                    <span key={entry.label} className="badge badge-outline badge-sm">
+                      {entry.label}: {entry.count}
+                    </span>
+                  ))}
+                  {!(signalSummary?.source_counts?.length) && <span className="opacity-50">暂无</span>}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="card bg-base-200 shadow-sm">
+          <div className="card-body p-4">
+            <h2 className="card-title text-base">最近拒绝原因</h2>
+            <div className="text-sm opacity-60 mb-3">
+              最近被 gate 拒绝 {rejectSummary?.total_rejected ?? 0} 条
+            </div>
+            <div className="space-y-2">
+              {(rejectSummary?.reason_counts ?? []).slice(0, 5).map((entry) => (
+                <div key={entry.label} className="flex items-center justify-between text-sm">
+                  <span>{entry.label}</span>
+                  <span className="badge badge-sm badge-outline">{entry.count}</span>
+                </div>
+              ))}
+              {!(rejectSummary?.reason_counts?.length) && (
+                <div className="text-sm opacity-50">暂无拒绝记录</div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="card bg-base-200 shadow-sm">
+        <div className="card-body p-4">
+          <h2 className="card-title text-base">最近退出原因</h2>
+          <div className="text-sm opacity-60 mb-3">
+            最近策略退出 {exitSummary?.total_exits ?? 0} 条
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {(exitSummary?.reason_counts ?? []).slice(0, 6).map((entry) => (
+              <span key={entry.label} className="badge badge-outline badge-sm">
+                {entry.label}: {entry.count}
+              </span>
+            ))}
+            {!(exitSummary?.reason_counts?.length) && (
+              <span className="opacity-50 text-sm">暂无退出记录</span>
+            )}
+          </div>
+        </div>
+      </div>
+
       {/* Tracked wallets (read-only from config) */}
       <div className="card bg-base-200 shadow-sm">
         <div className="card-body p-4">
@@ -139,6 +237,123 @@ export default function SmartMoney() {
                 )}
               </tbody>
             </table>
+          </div>
+        </div>
+      </div>
+
+      <div className="card bg-base-200 shadow-sm">
+        <div className="card-body p-4">
+          <h2 className="card-title text-base">钱包评分</h2>
+          <div className="overflow-x-auto">
+            <table className="table table-sm">
+              <thead>
+                <tr>
+                  <th>地址</th>
+                  <th>标签</th>
+                  <th>基础权重</th>
+                  <th>动态权重</th>
+                  <th>Profile Score</th>
+                  <th>最近信号</th>
+                  <th>来源</th>
+                </tr>
+              </thead>
+              <tbody>
+                {walletScores.map((wallet) => (
+                  <tr key={wallet.address}>
+                    <td className="font-mono text-xs">{wallet.address.slice(0, 10)}...{wallet.address.slice(-6)}</td>
+                    <td>{wallet.label || "-"}</td>
+                    <td>{Number(wallet.base_weight).toFixed(2)}</td>
+                    <td>{Number(wallet.effective_weight).toFixed(2)}</td>
+                    <td>{Number(wallet.profile_score).toFixed(3)}</td>
+                    <td>{wallet.recent_signal_count}</td>
+                    <td>{wallet.auto_discovered ? "auto" : "manual"}</td>
+                  </tr>
+                ))}
+                {walletScores.length === 0 && (
+                  <tr><td colSpan={7} className="text-center opacity-50">暂无钱包评分快照</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <div className="card bg-base-200 shadow-sm">
+          <div className="card-body p-4">
+            <h2 className="card-title text-base">最近决策流水</h2>
+            <div className="overflow-x-auto">
+              <table className="table table-sm">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>信号</th>
+                    <th>结果</th>
+                    <th>钱包数</th>
+                    <th>来源</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recentDecisions.map((decision) => (
+                    <tr key={`${decision.recorded_at}-${decision.token_id}-${decision.signal_type}`}>
+                      <td className="text-xs whitespace-nowrap">{new Date(decision.recorded_at).toLocaleTimeString()}</td>
+                      <td>{decision.signal_type}</td>
+                      <td>
+                        {decision.accepted ? (
+                          <span className="badge badge-success badge-sm">accepted</span>
+                        ) : (
+                          <span className="badge badge-error badge-sm">{decision.reject_reason ?? "rejected"}</span>
+                        )}
+                      </td>
+                      <td>{decision.wallet_count}</td>
+                      <td className="text-xs">
+                        {decision.source_data_api ? "data" : ""}
+                        {decision.source_data_api && decision.source_onchain ? "+" : ""}
+                        {decision.source_onchain ? "chain" : ""}
+                      </td>
+                    </tr>
+                  ))}
+                  {recentDecisions.length === 0 && (
+                    <tr><td colSpan={5} className="text-center opacity-50">暂无决策记录</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div className="card bg-base-200 shadow-sm">
+          <div className="card-body p-4">
+            <h2 className="card-title text-base">最近退出流水</h2>
+            <div className="overflow-x-auto">
+              <table className="table table-sm">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>原因</th>
+                    <th>市场</th>
+                    <th>Bid</th>
+                    <th>成本</th>
+                    <th>数量</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recentExits.map((exit) => (
+                    <tr key={`${exit.recorded_at}-${exit.token_id}-${exit.reason}`}>
+                      <td className="text-xs whitespace-nowrap">{new Date(exit.recorded_at).toLocaleTimeString()}</td>
+                      <td><span className="badge badge-outline badge-sm">{exit.reason}</span></td>
+                      <td className="max-w-xs truncate" title={exit.question}>{exit.question}</td>
+                      <td>{Number(exit.best_bid).toFixed(3)}</td>
+                      <td>{Number(exit.avg_cost).toFixed(3)}</td>
+                      <td>{Number(exit.size).toFixed(1)}</td>
+                    </tr>
+                  ))}
+                  {recentExits.length === 0 && (
+                    <tr><td colSpan={6} className="text-center opacity-50">暂无退出记录</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>

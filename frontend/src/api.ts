@@ -123,6 +123,53 @@ export interface StatusResponse {
     rationale: string;
     support_count?: number;
   }[];
+  smart_money_signal_summary?: {
+    recent_signal_count: number;
+    recent_entry_attempts: number;
+    recent_entry_accepted: number;
+    recent_entry_rejected: number;
+    wallet_counts: { label: string; count: number }[];
+    source_counts: { label: string; count: number }[];
+  };
+  smart_money_gate_reject_summary?: {
+    total_rejected: number;
+    reason_counts: { label: string; count: number }[];
+  };
+  smart_money_exit_summary?: {
+    total_exits: number;
+    reason_counts: { label: string; count: number }[];
+  };
+  smart_money_wallet_scores?: {
+    address: string;
+    label: string;
+    base_weight: string;
+    effective_weight: string;
+    profile_score: string;
+    recent_signal_count: number;
+    auto_discovered: boolean;
+  }[];
+  smart_money_recent_decisions?: {
+    recorded_at: string;
+    token_id: string;
+    condition_id: string;
+    signal_type: string;
+    accepted: boolean;
+    reject_reason: string | null;
+    wallet_count: number;
+    max_wallet_weight: string;
+    source_data_api: boolean;
+    source_onchain: boolean;
+  }[];
+  smart_money_recent_exits?: {
+    recorded_at: string;
+    token_id: string;
+    condition_id: string;
+    reason: string;
+    question: string;
+    best_bid: string;
+    avg_cost: string;
+    size: string;
+  }[];
   accounts: AccountStatusEntry[];
 }
 
