@@ -2575,6 +2575,14 @@ impl WeatherAlphaStrategy {
         }
     }
 
+    fn effective_max_spread_bps(&self, location: &str) -> u32 {
+        if Self::uses_preferred_city_overlay(location) {
+            self.config.max_spread_bps.saturating_add(300)
+        } else {
+            self.config.max_spread_bps
+        }
+    }
+
     fn effective_max_position_usdc(&self, location: &str) -> Decimal {
         let base = if Self::uses_conservative_city_overlay(location) {
             self.config.max_position_usdc * dec!(0.75)
@@ -2873,13 +2881,15 @@ impl WeatherAlphaStrategy {
                 Decimal::ONE
             };
             let spread_bps = (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX);
-            if spread_bps > self.config.max_spread_bps {
+            let max_spread_bps = self.effective_max_spread_bps(location);
+            if spread_bps > max_spread_bps {
                 Self::record_rejection("spread_too_wide");
                 tracing::debug!(
                     question = %question,
+                    location = %location,
                     side = side_name,
                     spread_bps,
-                    max_allowed = self.config.max_spread_bps,
+                    max_allowed = max_spread_bps,
                     "[Weather] Rejecting side: spread too wide"
                 );
                 return None;
@@ -7187,6 +7197,14 @@ mod tests {
         assert_eq!(
             strategy.effective_min_edge_bps("Miami"),
             strategy.config.min_edge_bps.saturating_sub(75)
+        );
+        assert_eq!(
+            strategy.effective_max_spread_bps("Miami"),
+            strategy.config.max_spread_bps + 300
+        );
+        assert_eq!(
+            strategy.effective_max_spread_bps("Chicago"),
+            strategy.config.max_spread_bps
         );
     }
 

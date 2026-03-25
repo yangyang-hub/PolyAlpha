@@ -83,6 +83,11 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-24
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Added a preferred-city weather spread overlay so high-confidence NOAA cities can tolerate an extra `300bps` of bid/ask spread beyond the global cap, applied that spread budget on the shared binary/NegRisk side-evaluation path, and added focused regression coverage proving the wider spread only unlocks preferred cities.
+- Why: Live weather trading was still being overwhelmingly blocked by `spread_too_wide`, so the next safe loosening step is to widen the spread gate only for the highest-confidence cities instead of relaxing all weather markets.
+
+### 2026-03-24
 - Area: `crates/pa-strategy/src/engine.rs`, `crates/pa-strategy/src/crypto_alpha.rs`
 - Change: Added sell-side freshness slippage-budget handling so exit orders can reprice down within an allowed bid fade instead of requiring the exact pre-check best bid to persist, and marked crypto `relative_stop_loss` exits with a looser local slippage multiplier so urgent stop-loss sells can tolerate modest book deterioration before being rejected.
 - Why: Live crypto stop-loss exits were repeatedly triggering in diagnostics while the positions stayed open, which indicated that sell-side execution was too brittle on thin books; exits now have a controlled way to cross slightly weaker bids instead of repeatedly failing as pure FOK-at-best-bid orders.
