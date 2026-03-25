@@ -56,6 +56,7 @@ impl<P: alloy::providers::Provider + Clone> HybridOrchestrator<P> {
 
         let trades = vec![TradeRecord {
             id: Uuid::now_v7(),
+            order_id: Some(order.order_id.clone()),
             token_id,
             condition_id,
             side,

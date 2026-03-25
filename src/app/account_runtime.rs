@@ -12,6 +12,7 @@ use rust_decimal_macros::dec;
 use pa_core::config::Settings;
 use pa_market_data::event_calendar::EventCalendarService;
 use pa_market_data::service::MarketDataService;
+use pa_storage::repository::Repository;
 use pa_strategy::engine::StrategyEngine;
 
 use crate::app::liquidity_rewards::spawn_liquidity_rewards_task;
@@ -39,6 +40,7 @@ pub async fn spawn_account_runtime(
     neg_risk_events: &[pa_core::types::NegRiskEvent],
     binary_event_groups: &[pa_core::types::BinaryEventGroup],
     lr_runtime_status: Arc<tokio::sync::RwLock<pa_monitor::api::LrRuntimeStatus>>,
+    repository: Option<Arc<Repository>>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> AccountRuntimeArtifacts {
     let acct_name = ctx.name.clone();
@@ -225,6 +227,9 @@ pub async fn spawn_account_runtime(
                             })
                             .collect()
                     }),
+                    repository: repository.clone(),
+                    account_name: ctx.name.clone(),
+                    proxy_wallet: format!("{:#x}", ctx.proxy_addr),
                 },
                 pa_strategy::engine::StrategyEngineOptions {
                     scan_interval_ms: settings.strategy.scan_interval_ms,

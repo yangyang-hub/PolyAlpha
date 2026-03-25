@@ -4,8 +4,8 @@ use sqlx::PgPool;
 use rust_decimal::Decimal;
 
 use crate::models::{
-    MarketRow, OpportunityRow, OrderBookSnapshotRow, PositionRow, TokenRow, TradeRow,
-    WeatherForecastSnapshotRow,
+    MarketRow, OpportunityRow, OrderBookSnapshotRow, PositionRow, TokenRow, TradeHistoryRow,
+    TradeRow, WeatherForecastSnapshotRow,
 };
 
 /// Repository for database operations.
@@ -59,6 +59,38 @@ impl Repository {
         Ok(())
     }
 
+    /// Insert or update a trading opportunity record keyed by `id`.
+    pub async fn upsert_opportunity(&self, row: &OpportunityRow) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"INSERT INTO opportunities
+            (id, strategy_type, condition_id, spread, estimated_profit, actual_profit, status, detected_at, executed_at, details)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (id) DO UPDATE
+            SET strategy_type = EXCLUDED.strategy_type,
+                condition_id = EXCLUDED.condition_id,
+                spread = EXCLUDED.spread,
+                estimated_profit = EXCLUDED.estimated_profit,
+                actual_profit = EXCLUDED.actual_profit,
+                status = EXCLUDED.status,
+                detected_at = EXCLUDED.detected_at,
+                executed_at = EXCLUDED.executed_at,
+                details = EXCLUDED.details"#,
+        )
+        .bind(row.id)
+        .bind(&row.strategy_type)
+        .bind(&row.condition_id)
+        .bind(row.spread)
+        .bind(row.estimated_profit)
+        .bind(row.actual_profit)
+        .bind(&row.status)
+        .bind(row.detected_at)
+        .bind(row.executed_at)
+        .bind(&row.details)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Insert a trade record.
     pub async fn insert_trade(&self, row: &TradeRow) -> anyhow::Result<()> {
         sqlx::query(
@@ -82,6 +114,121 @@ impl Repository {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Upsert a market metadata row from live discovery.
+    pub async fn upsert_market(
+        &self,
+        condition_id: &[u8],
+        question_id: &[u8],
+        question: &str,
+        neg_risk: bool,
+        neg_risk_market_id: Option<&[u8]>,
+        tick_size: Decimal,
+        fee_rate_bps: i32,
+        active: bool,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"INSERT INTO markets
+            (condition_id, question_id, question, neg_risk, neg_risk_market_id, tick_size, fee_rate_bps, active, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+            ON CONFLICT (condition_id) DO UPDATE
+            SET question_id = EXCLUDED.question_id,
+                question = EXCLUDED.question,
+                neg_risk = EXCLUDED.neg_risk,
+                neg_risk_market_id = EXCLUDED.neg_risk_market_id,
+                tick_size = EXCLUDED.tick_size,
+                fee_rate_bps = EXCLUDED.fee_rate_bps,
+                active = EXCLUDED.active,
+                updated_at = NOW()"#,
+        )
+        .bind(condition_id)
+        .bind(question_id)
+        .bind(question)
+        .bind(neg_risk)
+        .bind(neg_risk_market_id)
+        .bind(tick_size)
+        .bind(fee_rate_bps)
+        .bind(active)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Upsert a token metadata row from live discovery.
+    pub async fn upsert_token(
+        &self,
+        token_id: &str,
+        condition_id: &[u8],
+        outcome: &str,
+        complement_id: &str,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"INSERT INTO tokens
+            (token_id, condition_id, outcome, complement_id)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (token_id) DO UPDATE
+            SET condition_id = EXCLUDED.condition_id,
+                outcome = EXCLUDED.outcome,
+                complement_id = EXCLUDED.complement_id"#,
+        )
+        .bind(token_id)
+        .bind(condition_id)
+        .bind(outcome)
+        .bind(complement_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Load recent trade history, optionally filtered by strategy/account/proxy wallet.
+    pub async fn load_trade_history(
+        &self,
+        limit: i64,
+        strategy_type: Option<&str>,
+        account_name: Option<&str>,
+        proxy_wallet: Option<&str>,
+    ) -> anyhow::Result<Vec<TradeHistoryRow>> {
+        let rows = sqlx::query_as::<_, TradeHistoryRow>(
+            r#"SELECT
+                   t.id,
+                   t.opportunity_id,
+                   t.order_id,
+                   t.token_id,
+                   t.side,
+                   t.price,
+                   t.size,
+                   t.filled_size,
+                   t.fee,
+                   t.tx_type,
+                   t.tx_hash,
+                   t.status,
+                   t.created_at,
+                   o.strategy_type,
+                   o.condition_id,
+                   o.details ->> 'question' AS question,
+                   o.details ->> 'account_name' AS account_name,
+                   o.details ->> 'proxy_wallet' AS proxy_wallet,
+                   o.status AS opportunity_status,
+                   o.estimated_profit,
+                   o.actual_profit,
+                   o.detected_at,
+                   o.executed_at
+               FROM trades t
+               LEFT JOIN opportunities o ON o.id = t.opportunity_id
+               WHERE ($2::text IS NULL OR o.strategy_type = $2)
+                 AND ($3::text IS NULL OR o.details ->> 'account_name' = $3)
+                 AND ($4::text IS NULL OR lower(o.details ->> 'proxy_wallet') = lower($4))
+               ORDER BY t.created_at DESC
+               LIMIT $1"#,
+        )
+        .bind(limit)
+        .bind(strategy_type)
+        .bind(account_name)
+        .bind(proxy_wallet)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     /// Insert an order book snapshot (for backtesting).

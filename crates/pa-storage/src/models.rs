@@ -61,6 +61,34 @@ pub struct TradeRow {
     pub created_at: DateTime<Utc>,
 }
 
+/// Joined trade + opportunity history row for account-facing history APIs.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TradeHistoryRow {
+    pub id: Uuid,
+    pub opportunity_id: Option<Uuid>,
+    pub order_id: Option<String>,
+    pub token_id: String,
+    pub side: String,
+    pub price: Decimal,
+    pub size: Decimal,
+    pub filled_size: Option<Decimal>,
+    pub fee: Option<Decimal>,
+    pub tx_type: String,
+    pub tx_hash: Option<Vec<u8>>,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub strategy_type: Option<String>,
+    pub condition_id: Option<Vec<u8>>,
+    pub question: Option<String>,
+    pub account_name: Option<String>,
+    pub proxy_wallet: Option<String>,
+    pub opportunity_status: Option<String>,
+    pub estimated_profit: Option<Decimal>,
+    pub actual_profit: Option<Decimal>,
+    pub detected_at: Option<DateTime<Utc>>,
+    pub executed_at: Option<DateTime<Utc>>,
+}
+
 /// Database model for the `orderbook_snapshots` table.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct OrderBookSnapshotRow {

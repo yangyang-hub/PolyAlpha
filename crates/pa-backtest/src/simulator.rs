@@ -129,6 +129,7 @@ impl TradeSimulator {
 
         let trades = vec![TradeRecord {
             id: Uuid::now_v7(),
+            order_id: None,
             token_id,
             condition_id,
             side,

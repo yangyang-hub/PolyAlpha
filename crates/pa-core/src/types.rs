@@ -402,6 +402,7 @@ pub enum ExecutionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeRecord {
     pub id: Uuid,
+    pub order_id: Option<String>,
     pub token_id: U256,
     pub condition_id: B256,
     pub side: TradeSide,

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 pa-core = { workspace = true }
+pa-storage = { workspace = true }
 tokio = { workspace = true }
 prometheus = { workspace = true }
 axum = { workspace = true }

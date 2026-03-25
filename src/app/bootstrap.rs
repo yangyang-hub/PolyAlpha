@@ -4,8 +4,8 @@
 //! loading, and API server startup.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
@@ -16,6 +16,7 @@ use pa_core::config::{AccountConfig, Settings};
 use pa_core::traits::MarketDataFeed;
 use pa_market_data::service::MarketDataService;
 use pa_monitor::api::{ApiState, LrRuntimeStatus, PositionApiEntry};
+use pa_storage::repository::Repository;
 
 pub struct BootstrapArtifacts {
     pub settings: Settings,
@@ -80,6 +81,7 @@ pub fn start_api_server(
             std::collections::HashMap<String, pa_monitor::api::StrategyFinancialEntry>,
         >,
     >,
+    repository: Option<Arc<Repository>>,
     startup_ready: Arc<AtomicBool>,
 ) {
     let websocket_health_grace_secs = 180i64;
@@ -102,6 +104,7 @@ pub fn start_api_server(
         positions_updated_at: shared_positions_updated_at,
         wallet_balance,
         strategy_financials,
+        repository,
         startup_ready,
     });
     let health_port = settings.monitor.health_port;

@@ -13,6 +13,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 
 use pa_core::config::Settings;
+use pa_storage::repository::Repository;
 
 type HealthCheck = Box<dyn Fn() -> bool + Send + Sync>;
 
@@ -89,8 +90,37 @@ pub struct ApiState {
     /// Strategy-scoped wallet/portfolio snapshots derived from active accounts and positions.
     pub strategy_financials:
         Arc<tokio::sync::RwLock<std::collections::HashMap<String, StrategyFinancialEntry>>>,
+    /// Optional repository backing historical opportunities/trades.
+    pub repository: Option<Arc<Repository>>,
     /// True once startup has completed enough for the bot to be considered ready.
     pub startup_ready: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeHistoryApiEntry {
+    pub trade_id: String,
+    pub opportunity_id: Option<String>,
+    pub order_id: Option<String>,
+    pub token_id: String,
+    pub side: String,
+    pub price: Decimal,
+    pub size: Decimal,
+    pub filled_size: Option<Decimal>,
+    pub fee: Option<Decimal>,
+    pub tx_type: String,
+    pub tx_hash: Option<String>,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub strategy: Option<String>,
+    pub condition_id: Option<String>,
+    pub question: Option<String>,
+    pub account_name: Option<String>,
+    pub proxy_wallet: Option<String>,
+    pub opportunity_status: Option<String>,
+    pub estimated_profit: Option<Decimal>,
+    pub actual_profit: Option<Decimal>,
+    pub detected_at: Option<DateTime<Utc>>,
+    pub executed_at: Option<DateTime<Utc>>,
 }
 
 /// Build the full Axum router with health, metrics, config API, and SPA fallback.
@@ -99,6 +129,8 @@ pub fn build_router(state: Arc<ApiState>) -> Router {
         .route("/api/config", get(get_all_config))
         .route("/api/config/meta/{section}", get(get_section_meta))
         .route("/api/config/{section}", get(get_section))
+        .route("/api/trades", get(get_trades))
+        .route("/api/crypto/trades", get(get_crypto_trades))
         .route("/api/crypto/decisions", get(get_crypto_candidate_decisions))
         .route("/api/crypto/exits", get(get_crypto_exit_decisions))
         .route("/api/status", get(get_status))
@@ -1388,6 +1420,14 @@ struct PositionsQuery {
     strategy: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TradesQuery {
+    limit: Option<usize>,
+    strategy: Option<String>,
+    account_name: Option<String>,
+    proxy_wallet: Option<String>,
+}
+
 /// GET /api/positions — current positions, optionally filtered by strategy.
 async fn get_positions(
     State(state): State<Arc<ApiState>>,
@@ -1414,6 +1454,117 @@ async fn get_crypto_candidate_decisions() -> Json<Value> {
 /// GET /api/crypto/exits — recent crypto exit decisions.
 async fn get_crypto_exit_decisions() -> Json<Value> {
     Json(json!(crate::diagnostics::recent_crypto_exit_decisions()))
+}
+
+fn format_optional_bytes_hex(value: Option<&[u8]>) -> Option<String> {
+    value.and_then(|bytes| {
+        if bytes.len() == 32 {
+            Some(format!("{:#x}", alloy::primitives::B256::from_slice(bytes)))
+        } else {
+            None
+        }
+    })
+}
+
+fn format_optional_tx_hash(value: Option<&[u8]>) -> Option<String> {
+    value.and_then(|bytes| {
+        if bytes.len() == 32 {
+            Some(format!("{:#x}", alloy::primitives::B256::from_slice(bytes)))
+        } else {
+            None
+        }
+    })
+}
+
+async fn load_trade_history_response(
+    state: &ApiState,
+    strategy: Option<&str>,
+    account_name: Option<&str>,
+    proxy_wallet: Option<&str>,
+    limit: usize,
+) -> (axum::http::StatusCode, Json<Value>) {
+    let Some(repo) = &state.repository else {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "Trade history database not configured"})),
+        );
+    };
+
+    match repo
+        .load_trade_history(limit as i64, strategy, account_name, proxy_wallet)
+        .await
+    {
+        Ok(rows) => {
+            let entries: Vec<TradeHistoryApiEntry> = rows
+                .into_iter()
+                .map(|row| TradeHistoryApiEntry {
+                    trade_id: row.id.to_string(),
+                    opportunity_id: row.opportunity_id.map(|id| id.to_string()),
+                    order_id: row.order_id,
+                    token_id: row.token_id,
+                    side: row.side,
+                    price: row.price,
+                    size: row.size,
+                    filled_size: row.filled_size,
+                    fee: row.fee,
+                    tx_type: row.tx_type,
+                    tx_hash: format_optional_tx_hash(row.tx_hash.as_deref()),
+                    status: row.status,
+                    created_at: row.created_at,
+                    strategy: row.strategy_type,
+                    condition_id: format_optional_bytes_hex(row.condition_id.as_deref()),
+                    question: row.question,
+                    account_name: row.account_name,
+                    proxy_wallet: row.proxy_wallet,
+                    opportunity_status: row.opportunity_status,
+                    estimated_profit: row.estimated_profit,
+                    actual_profit: row.actual_profit,
+                    detected_at: row.detected_at,
+                    executed_at: row.executed_at,
+                })
+                .collect();
+            (
+                axum::http::StatusCode::OK,
+                Json(serde_json::to_value(entries).unwrap_or(json!([]))),
+            )
+        }
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("Failed to load trade history: {e}")})),
+        ),
+    }
+}
+
+/// GET /api/trades — recent persisted trade history with optional strategy/account filters.
+async fn get_trades(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<TradesQuery>,
+) -> (axum::http::StatusCode, Json<Value>) {
+    let limit = query.limit.unwrap_or(100).min(500);
+    load_trade_history_response(
+        state.as_ref(),
+        query.strategy.as_deref(),
+        query.account_name.as_deref(),
+        query.proxy_wallet.as_deref(),
+        limit,
+    )
+    .await
+}
+
+/// GET /api/crypto/trades — recent crypto trade history.
+async fn get_crypto_trades(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<TradesQuery>,
+) -> (axum::http::StatusCode, Json<Value>) {
+    let limit = query.limit.unwrap_or(100).min(500);
+    load_trade_history_response(
+        state.as_ref(),
+        Some("crypto_alpha"),
+        query.account_name.as_deref(),
+        query.proxy_wallet.as_deref(),
+        limit,
+    )
+    .await
 }
 
 /// GET /api/lr/status — LR runtime status.

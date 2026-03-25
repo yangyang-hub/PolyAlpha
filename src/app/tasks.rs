@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use pa_core::config::{DatabaseConfig, WeatherConfig};
 use pa_core::traits::{Executor, MarketDataFeed, RiskManager as _};
-use pa_core::types::{MarketInfo, NegRiskEvent};
+use pa_core::types::{MarketInfo, NegRiskEvent, Outcome};
 use pa_core::weather::{WEATHER_LOCATIONS, WeatherProvider};
 use pa_execution::ctf_executor::CtfExecutor;
 use pa_execution::safe_redeemer::SafeRedeemer;
@@ -98,6 +98,57 @@ fn compute_strategy_financials_from_state(
     }
 
     by_strategy
+}
+
+pub async fn persist_markets_snapshot(repo: &Repository, markets: &[MarketInfo]) {
+    for market in markets {
+        if let Err(e) = repo
+            .upsert_market(
+                market.condition_id.as_slice(),
+                market.question_id.as_slice(),
+                &market.question,
+                market.neg_risk,
+                market
+                    .neg_risk_market_id
+                    .map(|id| id.as_slice().to_vec())
+                    .as_deref(),
+                market.tick_size,
+                market.fee_rate_bps as i32,
+                market.active,
+            )
+            .await
+        {
+            tracing::debug!(
+                condition_id = %market.condition_id,
+                error = %e,
+                "Failed to persist market metadata"
+            );
+            continue;
+        }
+
+        for token in &market.tokens {
+            let outcome = match token.outcome {
+                Outcome::Yes => "yes",
+                Outcome::No => "no",
+            };
+            if let Err(e) = repo
+                .upsert_token(
+                    &token.token_id.to_string(),
+                    market.condition_id.as_slice(),
+                    outcome,
+                    &token.complement_id.to_string(),
+                )
+                .await
+            {
+                tracing::debug!(
+                    condition_id = %market.condition_id,
+                    token_id = %token.token_id,
+                    error = %e,
+                    "Failed to persist token metadata"
+                );
+            }
+        }
+    }
 }
 
 pub fn spawn_balance_refresh(
@@ -654,6 +705,7 @@ pub fn spawn_market_refresh(
     refresh_interval_secs: u64,
     shared_markets: Arc<tokio::sync::RwLock<Vec<MarketInfo>>>,
     market_data: Arc<MarketDataService>,
+    repository: Option<Arc<Repository>>,
     active_enabled_strategies: Vec<String>,
     ws_max_instruments: usize,
     risk_managers: Vec<Arc<RiskManagerImpl>>,
@@ -676,6 +728,7 @@ pub fn spawn_market_refresh(
                                 current.iter().map(|m| m.condition_id).collect();
 
                             let mut added = 0u32;
+                            let mut added_markets = Vec::new();
                             let refresh_cache = market_data.cache().as_ref().clone();
                             for m in new_all {
                                 if !old_ids.contains(&m.condition_id) {
@@ -688,6 +741,7 @@ pub fn spawn_market_refresh(
                                         }
                                     }
                                     seed_market_cache(&refresh_cache, &m);
+                                    added_markets.push(m.clone());
                                     current.push(m);
                                     added += 1;
                                 }
@@ -696,6 +750,9 @@ pub fn spawn_market_refresh(
                             if added > 0 {
                                 tracing::info!(added, total = current.len(), "New markets discovered");
                                 pa_monitor::metrics::MONITORED_MARKETS.set(current.len() as f64);
+                                if let Some(repo) = &repository {
+                                    persist_markets_snapshot(repo, &added_markets).await;
+                                }
 
                                 let mut held_tokens: Vec<U256> = Vec::new();
                                 for rm in &risk_managers {

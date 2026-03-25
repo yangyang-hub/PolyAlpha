@@ -7,9 +7,12 @@ use pa_core::types::{
     ExecutionPlan, MarketInfo, OrderBook, RiskDecision, StrategyType, TradeSide, TradingOpportunity,
 };
 use pa_market_data::event_calendar::EventCalendarService;
+use pa_storage::models::{OpportunityRow, TradeRow};
+use pa_storage::repository::Repository;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -39,6 +42,9 @@ pub struct StrategyEngineDeps {
     pub get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
     pub get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
     pub get_all_positions: Box<dyn Fn() -> Vec<StopLossPosition> + Send + Sync>,
+    pub repository: Option<Arc<Repository>>,
+    pub account_name: String,
+    pub proxy_wallet: String,
 }
 
 pub struct StrategyEngineOptions {
@@ -66,6 +72,9 @@ pub struct StrategyEngine {
     get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
     /// Get ALL positions for universal stop-loss scanning.
     get_all_positions: Box<dyn Fn() -> Vec<StopLossPosition> + Send + Sync>,
+    repository: Option<Arc<Repository>>,
+    account_name: String,
+    proxy_wallet: String,
     /// Minimum order size in USDC; opportunities below this after scaling are rejected.
     min_order_usdc: Decimal,
     /// Only trade markets ending within this many days. None = no filter.
@@ -158,6 +167,122 @@ impl StrategyEngine {
             StrategyType::CryptoAlpha => "crypto_alpha",
             StrategyType::LiquidityRewards => "liquidity_rewards",
             StrategyType::SmartMoney => "smart_money",
+        }
+    }
+
+    fn execution_status_label(status: pa_core::types::ExecutionStatus) -> &'static str {
+        match status {
+            pa_core::types::ExecutionStatus::Success => "success",
+            pa_core::types::ExecutionStatus::PartialFill => "partial_fill",
+            pa_core::types::ExecutionStatus::NoFill => "no_fill",
+            pa_core::types::ExecutionStatus::Failed => "failed",
+        }
+    }
+
+    fn execution_plan_details(plan: &ExecutionPlan) -> serde_json::Value {
+        match plan {
+            ExecutionPlan::DirectionalBuy {
+                token_id,
+                side,
+                price,
+                size,
+                condition_id,
+            } => json!({
+                "kind": "directional_buy",
+                "token_id": token_id.to_string(),
+                "side": match side {
+                    TradeSide::Buy => "buy",
+                    TradeSide::Sell => "sell",
+                },
+                "price": price,
+                "size": size,
+                "condition_id": format!("{condition_id:#x}"),
+            }),
+        }
+    }
+
+    fn build_opportunity_row(
+        &self,
+        opp: &TradingOpportunity,
+        status: &str,
+        actual_profit: Option<Decimal>,
+        executed_at: Option<chrono::DateTime<Utc>>,
+        error: Option<&str>,
+    ) -> OpportunityRow {
+        let details = json!({
+            "question": opp.question,
+            "account_name": self.account_name,
+            "proxy_wallet": self.proxy_wallet,
+            "execution_plan": Self::execution_plan_details(&opp.execution_plan),
+            "error": error,
+        });
+
+        OpportunityRow {
+            id: opp.id,
+            strategy_type: Self::strategy_metric_label(opp.strategy_type).to_string(),
+            condition_id: opp.condition_id.as_slice().to_vec(),
+            spread: opp.spread,
+            estimated_profit: opp.estimated_profit,
+            actual_profit,
+            status: status.to_string(),
+            detected_at: opp.detected_at,
+            executed_at,
+            details: Some(details),
+        }
+    }
+
+    async fn persist_opportunity_row(&self, row: OpportunityRow) {
+        let Some(repo) = &self.repository else {
+            return;
+        };
+        if let Err(e) = repo.upsert_opportunity(&row).await {
+            tracing::warn!(id = %row.id, error = %e, "Failed to persist opportunity");
+        }
+    }
+
+    async fn persist_execution_result(
+        &self,
+        opp: &TradingOpportunity,
+        result: &pa_core::types::ExecutionResult,
+    ) {
+        let Some(repo) = &self.repository else {
+            return;
+        };
+
+        let opp_row = self.build_opportunity_row(
+            opp,
+            Self::execution_status_label(result.status),
+            Some(result.realized_profit),
+            Some(result.executed_at),
+            None,
+        );
+        if let Err(e) = repo.upsert_opportunity(&opp_row).await {
+            tracing::warn!(id = %opp.id, error = %e, "Failed to persist executed opportunity");
+            return;
+        }
+
+        for trade in &result.trades {
+            let row = TradeRow {
+                id: trade.id,
+                opportunity_id: Some(result.opportunity_id),
+                order_id: trade.order_id.clone(),
+                token_id: trade.token_id.to_string(),
+                side: match trade.side {
+                    TradeSide::Buy => "buy".to_string(),
+                    TradeSide::Sell => "sell".to_string(),
+                },
+                price: trade.price,
+                size: trade.size,
+                filled_size: Some(trade.filled_size),
+                fee: Some(trade.fee),
+                tx_type: format!("{:?}", trade.tx_type),
+                tx_hash: trade.tx_hash.map(|hash| hash.as_slice().to_vec()),
+                status: Self::execution_status_label(result.status).to_string(),
+                created_at: result.executed_at,
+            };
+            if let Err(e) = repo.insert_trade(&row).await {
+                tracing::warn!(trade_id = %row.id, error = %e, "Failed to persist trade");
+            }
         }
     }
 
@@ -835,6 +960,9 @@ impl StrategyEngine {
             get_orderbook,
             get_available_capital,
             get_all_positions,
+            repository,
+            account_name,
+            proxy_wallet,
         } = deps;
 
         let StrategyEngineOptions {
@@ -859,6 +987,9 @@ impl StrategyEngine {
             get_orderbook,
             get_available_capital,
             get_all_positions,
+            repository,
+            account_name,
+            proxy_wallet,
             min_order_usdc,
             max_market_end_days,
             max_slippage_bps,
@@ -1312,6 +1443,7 @@ impl StrategyEngine {
         match self.executor.execute(opp).await {
             Ok(result) => {
                 timer.observe_duration();
+                self.persist_execution_result(opp, &result).await;
                 tracing::info!(
                     id = %opp.id,
                     status = ?result.status,
@@ -1347,6 +1479,14 @@ impl StrategyEngine {
             Err(e) => {
                 timer.observe_duration();
                 let err_msg = e.to_string();
+                self.persist_opportunity_row(self.build_opportunity_row(
+                    opp,
+                    "failed",
+                    None,
+                    Some(Utc::now()),
+                    Some(&err_msg),
+                ))
+                .await;
                 tracing::error!(id = %opp.id, error = %err_msg, "Execution failed");
                 pa_monitor::metrics::EXECUTION_ERRORS.inc();
                 pa_monitor::metrics::EXECUTION_ERRORS_BY_STRATEGY
@@ -1899,6 +2039,7 @@ mod tests {
                 status: ExecutionStatus::Success,
                 trades: vec![TradeRecord {
                     id: Uuid::now_v7(),
+                    order_id: None,
                     token_id: U256::from(1u64),
                     condition_id: B256::ZERO,
                     side: TradeSide::Buy,
@@ -2022,6 +2163,9 @@ mod tests {
                 get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
                 get_available_capital: Box::new(|| dec!(1000)),
                 get_all_positions: Box::new(Vec::new),
+                repository: None,
+                account_name: "test".into(),
+                proxy_wallet: "0xtest".into(),
             },
             StrategyEngineOptions {
                 scan_interval_ms: 1000,
@@ -2156,6 +2300,9 @@ mod tests {
                 get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
                 get_available_capital: Box::new(|| dec!(1000)),
                 get_all_positions: Box::new(Vec::new),
+                repository: None,
+                account_name: "test".into(),
+                proxy_wallet: "0xtest".into(),
             },
             StrategyEngineOptions {
                 scan_interval_ms: 1000,
@@ -2228,6 +2375,9 @@ mod tests {
                 get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
                 get_available_capital: Box::new(|| dec!(1000)),
                 get_all_positions: Box::new(Vec::new),
+                repository: None,
+                account_name: "test".into(),
+                proxy_wallet: "0xtest".into(),
             },
             StrategyEngineOptions {
                 scan_interval_ms: 1000,
@@ -2295,6 +2445,9 @@ mod tests {
                 get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
                 get_available_capital: Box::new(|| dec!(1000)),
                 get_all_positions: Box::new(Vec::new),
+                repository: None,
+                account_name: "test".into(),
+                proxy_wallet: "0xtest".into(),
             },
             StrategyEngineOptions {
                 scan_interval_ms: 1000,
@@ -2363,6 +2516,9 @@ mod tests {
                 get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
                 get_available_capital: Box::new(|| dec!(1000)),
                 get_all_positions: Box::new(Vec::new),
+                repository: None,
+                account_name: "test".into(),
+                proxy_wallet: "0xtest".into(),
             },
             StrategyEngineOptions {
                 scan_interval_ms: 1000,
@@ -2437,6 +2593,9 @@ mod tests {
                 get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
                 get_available_capital: Box::new(|| dec!(1000)),
                 get_all_positions: Box::new(Vec::new),
+                repository: None,
+                account_name: "test".into(),
+                proxy_wallet: "0xtest".into(),
             },
             StrategyEngineOptions {
                 scan_interval_ms: 1000,
@@ -2693,6 +2852,9 @@ mod tests {
                 get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
                 get_available_capital: Box::new(|| dec!(1000)),
                 get_all_positions: Box::new(Vec::new),
+                repository: None,
+                account_name: "test".into(),
+                proxy_wallet: "0xtest".into(),
             },
             StrategyEngineOptions {
                 scan_interval_ms: 1000,
@@ -2733,6 +2895,9 @@ mod tests {
                 get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
                 get_available_capital: Box::new(|| dec!(1000)),
                 get_all_positions: Box::new(Vec::new),
+                repository: None,
+                account_name: "test".into(),
+                proxy_wallet: "0xtest".into(),
             },
             StrategyEngineOptions {
                 scan_interval_ms: 1000,
@@ -2888,6 +3053,9 @@ mod tests {
                 get_orderbook: Box::new(move |token_id| books.get(&token_id).cloned()),
                 get_available_capital: Box::new(|| dec!(3.0)),
                 get_all_positions: Box::new(Vec::new),
+                repository: None,
+                account_name: "test".into(),
+                proxy_wallet: "0xtest".into(),
             },
             StrategyEngineOptions {
                 scan_interval_ms: 1000,
@@ -3120,6 +3288,9 @@ mod tests {
                 }),
                 get_available_capital: Box::new(|| dec!(2.60)),
                 get_all_positions: Box::new(Vec::new),
+                repository: None,
+                account_name: "test".into(),
+                proxy_wallet: "0xtest".into(),
             },
             StrategyEngineOptions {
                 scan_interval_ms: 1000,
@@ -3353,6 +3524,9 @@ mod tests {
                 }),
                 get_available_capital: Box::new(|| dec!(10.0)),
                 get_all_positions: Box::new(Vec::new),
+                repository: None,
+                account_name: "test".into(),
+                proxy_wallet: "0xtest".into(),
             },
             StrategyEngineOptions {
                 scan_interval_ms: 1000,

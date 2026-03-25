@@ -7,6 +7,7 @@ edition = "2024"
 pa-core = { workspace = true }
 pa-market-data = { workspace = true }
 pa-monitor = { workspace = true }
+pa-storage = { workspace = true }
 alloy = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
     let shared_markets = runtime.shared_markets;
     let neg_risk_events = runtime.neg_risk_events;
     let binary_event_groups = runtime.binary_event_groups;
+    let repository = runtime.repository;
 
     // --- Build per-account contexts ---
     let account_contexts = build_account_contexts(
@@ -102,6 +103,7 @@ async fn main() -> Result<()> {
             &neg_risk_events,
             &binary_event_groups,
             Arc::clone(&lr_runtime_status),
+            repository.clone(),
             cancel.clone(),
         )
         .await;
@@ -120,6 +122,7 @@ async fn main() -> Result<()> {
         &account_contexts,
         Arc::clone(&shared_markets),
         Arc::clone(&market_data),
+        repository.clone(),
         Arc::clone(&shared_positions),
         Arc::clone(&shared_positions_updated_at),
         Arc::clone(&wallet_balance),

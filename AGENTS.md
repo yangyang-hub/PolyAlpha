@@ -83,6 +83,16 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-25
+- Area: `migrations/010_drop_opportunities_condition_id_fk.sql`, `crates/pa-core/src/types.rs`, `crates/pa-execution/src/orchestrator.rs`, `crates/pa-storage/src/repository.rs`, `src/app/tasks.rs`, `src/app/market_runtime.rs`
+- Change: Removed the fragile `opportunities.condition_id -> markets.condition_id` foreign key, added live upsert persistence for discovered `markets` and `tokens` during both startup discovery and periodic refresh, and threaded the real CLOB `order_id` through `TradeRecord` into persisted trade history rows instead of leaving every archived trade with `order_id = NULL`.
+- Why: The first trade-history rollout still had two practical gaps: opportunity persistence could silently fail whenever archival market metadata lagged live discovery, and persisted trades lacked the external CLOB order identifier needed for later wallet/order reconciliation.
+
+### 2026-03-25
+- Area: `crates/pa-strategy/src/engine.rs`, `crates/pa-storage/src/repository.rs`, `crates/pa-storage/src/models.rs`, `crates/pa-monitor/src/api.rs`, `src/app/bootstrap.rs`, `src/app/market_runtime.rs`, `src/app/account_runtime.rs`
+- Change: Connected the shared PostgreSQL repository into runtime startup, strategy execution, and the monitor API; persisted executed/failed opportunities plus trade rows with account/proxy-wallet/question metadata in `opportunities.details`; added joined trade-history queries in `pa-storage`; and exposed `/api/trades` plus `/api/crypto/trades` with optional strategy/account/proxy-wallet filters so historical executions can be queried instead of relying only on process-local PnL and recent diagnostics.
+- Why: The live system previously exposed only current positions, recent candidate/exit diagnostics, and process-lifetime realized PnL, which made it impossible to inspect a wallet's full historical fills or attribute older account losses from the running monitor/API.
+
+### 2026-03-25
 - Area: `crates/pa-strategy/src/weather.rs`
 - Change: Raised the preferred-city weather entry-price ceiling from `0.40` to `0.42` while leaving conservative and default-protected cities unchanged, and updated the overlay regression expectations accordingly.
 - Why: After restoring healthy websocket/trading readiness, live weather metrics still showed `price_above_max_entry` as the second-largest rejection bucket behind `spread_too_wide`, so the next safe loosening step is a small entry-price increase only for the highest-confidence NOAA cities.

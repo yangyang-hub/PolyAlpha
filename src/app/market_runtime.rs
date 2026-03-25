@@ -15,6 +15,7 @@ use pa_core::traits::MarketDataFeed;
 use pa_market_data::data_api::PositionLoader;
 use pa_market_data::gamma_feed::GammaFeed;
 use pa_market_data::service::MarketDataService;
+use pa_storage::repository::Repository;
 
 use crate::app::bootstrap::start_api_server;
 use crate::app::helpers::{build_position_snapshot, build_ws_token_list, seed_market_cache};
@@ -22,6 +23,7 @@ use crate::app::types::AccountContext;
 
 pub struct MarketRuntimeArtifacts {
     pub market_data: Arc<MarketDataService>,
+    pub repository: Option<Arc<Repository>>,
     pub lr_runtime_status: Arc<tokio::sync::RwLock<pa_monitor::api::LrRuntimeStatus>>,
     pub shared_positions: Arc<tokio::sync::RwLock<Vec<pa_monitor::api::PositionApiEntry>>>,
     pub shared_positions_updated_at: Arc<tokio::sync::RwLock<Option<chrono::DateTime<Utc>>>>,
@@ -63,6 +65,24 @@ pub async fn initialize_market_runtime(
     let wallet_balance = Arc::new(tokio::sync::RwLock::new(rust_decimal::Decimal::ZERO));
     let strategy_financials = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     let startup_ready = Arc::new(AtomicBool::new(false));
+    let repository = if settings.database.url.trim().is_empty() {
+        None
+    } else {
+        match Repository::connect(&settings.database.url, settings.database.max_connections).await {
+            Ok(repo) => {
+                if let Err(e) = repo.migrate().await {
+                    tracing::warn!(error = %e, "Trade history archive disabled — failed to apply migrations");
+                    None
+                } else {
+                    Some(Arc::new(repo))
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Trade history archive disabled — failed to connect database");
+                None
+            }
+        }
+    };
     start_api_server(
         settings,
         config_arc,
@@ -73,6 +93,7 @@ pub async fn initialize_market_runtime(
         Arc::clone(&shared_positions_updated_at),
         Arc::clone(&wallet_balance),
         Arc::clone(&strategy_financials),
+        repository.clone(),
         Arc::clone(&startup_ready),
     );
 
@@ -106,6 +127,11 @@ pub async fn initialize_market_runtime(
     let shared_markets = Arc::new(tokio::sync::RwLock::new(markets));
 
     {
+        if let Some(repo) = &repository {
+            let markets_snapshot = shared_markets.read().await.clone();
+            crate::app::tasks::persist_markets_snapshot(repo, &markets_snapshot).await;
+        }
+
         let seed_cache = market_data.cache().clone();
         let markets_snapshot = shared_markets.read().await;
         let mut seeded = 0u32;
@@ -147,6 +173,7 @@ pub async fn initialize_market_runtime(
 
     Ok(Some(MarketRuntimeArtifacts {
         market_data,
+        repository,
         lr_runtime_status,
         shared_positions,
         shared_positions_updated_at,
@@ -196,6 +223,7 @@ pub fn spawn_shared_runtime_tasks(
     account_contexts: &[AccountContext],
     shared_markets: Arc<tokio::sync::RwLock<Vec<pa_core::types::MarketInfo>>>,
     market_data: Arc<MarketDataService>,
+    repository: Option<Arc<Repository>>,
     shared_positions: Arc<tokio::sync::RwLock<Vec<pa_monitor::api::PositionApiEntry>>>,
     shared_positions_updated_at: Arc<tokio::sync::RwLock<Option<chrono::DateTime<Utc>>>>,
     wallet_balance: Arc<tokio::sync::RwLock<rust_decimal::Decimal>>,
@@ -241,6 +269,7 @@ pub fn spawn_shared_runtime_tasks(
             refresh_interval,
             shared_markets,
             market_data,
+            repository,
             active_enabled_strategies,
             settings.market_filter.ws_max_instruments,
             refresh_risk_managers,
