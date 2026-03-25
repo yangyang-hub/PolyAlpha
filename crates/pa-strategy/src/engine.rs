@@ -7,6 +7,9 @@ use pa_core::types::{
     ExecutionPlan, MarketInfo, OrderBook, RiskDecision, StrategyType, TradeSide, TradingOpportunity,
 };
 use pa_market_data::event_calendar::EventCalendarService;
+use pa_monitor::diagnostics::{
+    smart_money_opportunity_attribution, take_smart_money_opportunity_attribution,
+};
 use pa_storage::models::{OpportunityRow, TradeRow};
 use pa_storage::repository::Repository;
 use rust_decimal::Decimal;
@@ -100,6 +103,14 @@ struct PreparedOpportunity {
     profit_retention_ratio: Decimal,
     size_retention_ratio: Decimal,
     execution_quality_score: Decimal,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct SmartMoneyTradeAttributionSlice {
+    leader: String,
+    actual_filled_size: Decimal,
+    actual_fee: Decimal,
+    actual_realized_profit: Decimal,
 }
 
 impl StrategyEngine {
@@ -209,11 +220,17 @@ impl StrategyEngine {
         executed_at: Option<chrono::DateTime<Utc>>,
         error: Option<&str>,
     ) -> OpportunityRow {
+        let smart_money_attribution = if matches!(opp.strategy_type, StrategyType::SmartMoney) {
+            smart_money_opportunity_attribution(&opp.id)
+        } else {
+            None
+        };
         let details = json!({
             "question": opp.question,
             "account_name": self.account_name,
             "proxy_wallet": self.proxy_wallet,
             "execution_plan": Self::execution_plan_details(&opp.execution_plan),
+            "smart_money_attribution": smart_money_attribution,
             "error": error,
         });
 
@@ -229,6 +246,44 @@ impl StrategyEngine {
             executed_at,
             details: Some(details),
         }
+    }
+
+    fn smart_money_trade_attribution(
+        &self,
+        opp: &TradingOpportunity,
+        trade: &pa_core::types::TradeRecord,
+        avg_cost: Decimal,
+    ) -> Option<Vec<SmartMoneyTradeAttributionSlice>> {
+        if !matches!(opp.strategy_type, StrategyType::SmartMoney) {
+            return None;
+        }
+        let attribution = smart_money_opportunity_attribution(&opp.id)?;
+        let total_estimated_size: Decimal =
+            attribution.iter().map(|slice| slice.estimated_size).sum();
+        if total_estimated_size <= Decimal::ZERO || trade.filled_size <= Decimal::ZERO {
+            return None;
+        }
+        let trade_realized_profit =
+            if matches!(trade.side, TradeSide::Sell) && avg_cost > Decimal::ZERO {
+                ((trade.price - avg_cost) * trade.filled_size) - trade.fee
+            } else {
+                Decimal::ZERO
+            };
+        Some(
+            attribution
+                .into_iter()
+                .filter(|slice| slice.estimated_size > Decimal::ZERO)
+                .map(|slice| {
+                    let share = slice.estimated_size / total_estimated_size;
+                    SmartMoneyTradeAttributionSlice {
+                        leader: slice.leader,
+                        actual_filled_size: trade.filled_size * share,
+                        actual_fee: trade.fee * share,
+                        actual_realized_profit: trade_realized_profit * share,
+                    }
+                })
+                .collect(),
+        )
     }
 
     async fn persist_opportunity_row(&self, row: OpportunityRow) {
@@ -262,6 +317,18 @@ impl StrategyEngine {
         }
 
         for trade in &result.trades {
+            let avg_cost = if matches!(trade.side, TradeSide::Sell) {
+                self.risk_manager.avg_cost(&trade.token_id)
+            } else {
+                Decimal::ZERO
+            };
+            let trade_details = self
+                .smart_money_trade_attribution(opp, trade, avg_cost)
+                .map(|attribution| {
+                    json!({
+                        "smart_money_trade_attribution": attribution,
+                    })
+                });
             let row = TradeRow {
                 id: trade.id,
                 opportunity_id: Some(result.opportunity_id),
@@ -279,10 +346,14 @@ impl StrategyEngine {
                 tx_hash: trade.tx_hash.map(|hash| hash.as_slice().to_vec()),
                 status: Self::execution_status_label(result.status).to_string(),
                 created_at: result.executed_at,
+                details: trade_details,
             };
             if let Err(e) = repo.insert_trade(&row).await {
                 tracing::warn!(trade_id = %row.id, error = %e, "Failed to persist trade");
             }
+        }
+        if matches!(opp.strategy_type, StrategyType::SmartMoney) {
+            let _ = take_smart_money_opportunity_attribution(&opp.id);
         }
     }
 
@@ -1505,6 +1576,9 @@ impl StrategyEngine {
                     Some(&err_msg),
                 ))
                 .await;
+                if matches!(opp.strategy_type, StrategyType::SmartMoney) {
+                    let _ = take_smart_money_opportunity_attribution(&opp.id);
+                }
                 tracing::error!(id = %opp.id, error = %err_msg, "Execution failed");
                 pa_monitor::metrics::EXECUTION_ERRORS.inc();
                 pa_monitor::metrics::EXECUTION_ERRORS_BY_STRATEGY

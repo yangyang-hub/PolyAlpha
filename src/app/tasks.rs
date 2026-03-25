@@ -263,17 +263,17 @@ pub fn spawn_positions_snapshot_refresh(
                                 if pe.size < dec!(0.1) {
                                     continue;
                                 }
-                                let (question, outcome, _cid, event_title) = markets_snapshot.iter()
+                                let (question, outcome, _cid, event_title, end_date) = markets_snapshot.iter()
                                     .find_map(|m| {
                                         m.tokens.iter().find(|t| t.token_id == token_id).map(|t| {
                                             let o = match t.outcome {
                                                 pa_core::types::Outcome::Yes => "YES",
                                                 pa_core::types::Outcome::No => "NO",
                                             };
-                                            (m.question.as_str(), o, m.condition_id, m.event_title.as_deref())
+                                            (m.question.as_str(), o, m.condition_id, m.event_title.as_deref(), m.end_date)
                                         })
                                     })
-                                    .unwrap_or(("", "", alloy::primitives::B256::ZERO, None));
+                                    .unwrap_or(("", "", alloy::primitives::B256::ZERO, None, None));
                                 let asset = pa_strategy::crypto_alpha::parse_crypto_question(question)
                                     .map(|parsed| parsed.asset.name.to_string())
                                     .or_else(|| {
@@ -290,10 +290,44 @@ pub fn spawn_positions_snapshot_refresh(
                                     )
                                     .map(str::to_string)
                                 };
+                                let resolution_bucket = pa_strategy::crypto_alpha::parse_crypto_question(question)
+                                    .and_then(|parsed| parsed.target_date)
+                                    .or_else(|| {
+                                        event_title
+                                            .and_then(pa_strategy::crypto_alpha::parse_crypto_event_title)
+                                            .and_then(|(_, date)| date)
+                                    })
+                                    .or_else(|| end_date.map(|dt| dt.date_naive()))
+                                    .map(|target_date| {
+                                        let days = (target_date - chrono::Utc::now().date_naive()).num_days();
+                                        if days <= 0 {
+                                            "same_day".to_string()
+                                        } else if days == 1 {
+                                            "next_day".to_string()
+                                        } else {
+                                            "legacy".to_string()
+                                        }
+                                    });
+                                let is_legacy = resolution_bucket.as_deref() == Some("legacy");
 
-                                let current_price = cache.get(&token_id)
-                                    .and_then(|ob| ob.bids.first().map(|b| b.price));
-                                let unrealized_pnl = current_price.map(|p| pe.size * (p - pe.avg_cost));
+                                let (bid_price, mid_price) = cache
+                                    .get(&token_id)
+                                    .map(|ob| {
+                                        let bid = ob.bids.first().map(|b| b.price);
+                                        let ask = ob.asks.first().map(|a| a.price);
+                                        let mid = match (bid, ask) {
+                                            (Some(b), Some(a)) => Some((a + b) / dec!(2)),
+                                            (Some(b), None) => Some(b),
+                                            (None, Some(a)) => Some(a),
+                                            (None, None) => None,
+                                        };
+                                        (bid, mid)
+                                    })
+                                    .unwrap_or((None, None));
+                                let unrealized_pnl_bid =
+                                    bid_price.map(|p| pe.size * (p - pe.avg_cost));
+                                let unrealized_pnl_mid =
+                                    mid_price.map(|p| pe.size * (p - pe.avg_cost));
 
                                 let strategy_name = pe.strategy_type.map(|st| match st {
                                     pa_core::types::StrategyType::Weather => "weather",
@@ -313,8 +347,14 @@ pub fn spawn_positions_snapshot_refresh(
                                     condition_id: pe.condition_id.map(|c| format!("{:#x}", c)),
                                     question: if question.is_empty() { None } else { Some(question.to_string()) },
                                     outcome: if outcome.is_empty() { None } else { Some(outcome.to_string()) },
-                                    current_price,
-                                    unrealized_pnl,
+                                    bid_price,
+                                    mid_price,
+                                    unrealized_pnl_bid,
+                                    unrealized_pnl_mid,
+                                    resolution_bucket,
+                                    is_legacy,
+                                    current_price: bid_price,
+                                    unrealized_pnl: unrealized_pnl_bid,
                                 });
                             }
                         }

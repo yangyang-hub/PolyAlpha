@@ -83,9 +83,89 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-25
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `src/bin/crypto_calibrate.rs`, `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added first-class crypto `resolution_bucket` selectors (`same_day` / `next_day` / `legacy`) to calibration overrides, runtime override matching, offline `crypto_calibrate` segment/output/merge logic, and runtime patch previews, so selected-shape patch export now carries true bucket-level TOML selectors instead of only annotating the source bucket in comments.
+- Why: After splitting crypto into day-market buckets and adding live patch previews, the remaining gap was that runtime suggestions still exported only shape-scoped `short` overrides, which made same-day versus next-day tuning previews less precise than the actual live bucket diagnostics.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/Cargo.toml`, `crates/pa-monitor/src/api.rs`, `crates/pa-monitor/src/diagnostics.rs`, `crates/pa-storage/src/models.rs`, `crates/pa-storage/src/repository.rs`, `crates/pa-strategy/src/engine.rs`, `crates/pa-strategy/src/smart_money.rs`, `frontend/src/api.ts`, `frontend/src/pages/SmartMoney.tsx`, `migrations/012_add_trade_details.sql`, `README.md`
+- Change: Persisted smart-money leader-attribution slices alongside smart-money opportunities by caching attribution per opportunity id during strategy generation, embedding that payload into `opportunities.details`, adding a `trades.details` JSONB column for per-fill smart-money attribution scaled by actual filled size/fee/realized profit, surfacing both fields through the trade-history API, and adding a backend-owned fill-confirmed leader attribution summary plus SmartMoney page tables for both trade-level and opportunity-level leader PnL.
+- Why: Runtime-only smart-money attribution was useful for the live dashboard, but it did not survive into historical trade views and could not distinguish raw opportunity mix from the portion that actually filled, paid fees, and realized PnL on persisted trades.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/SmartMoney.tsx`, `README.md`
+- Change: Added a backend-owned `smart_money_leader_health_summary` that blends recent accept rate, opportunity-level estimated PnL, and fill-confirmed trade attribution into simple `keep_or_promote` / `observe` / `degrade` / `block_candidate` suggestions, and surfaced that health table on the SmartMoney page.
+- Why: Once fill-confirmed leader attribution existed, the next operational gap was turning raw signal and PnL tables into an actionable review surface for deciding which leaders should be promoted, degraded, blocked, or simply watched longer.
+
+### 2026-03-25
+- Area: `frontend/src/pages/SmartMoney.tsx`
+- Change: Wired the SmartMoney leader-health table directly into the existing promote/degrade/block/restore actions so suggested operator actions can be executed in one click from the same review surface when a health row can be matched back to a discovered candidate by address or label.
+- Why: A health summary is useful, but forcing operators to manually cross-reference it against the candidate table slows the degrade/block/promote loop and makes the review workflow more error-prone once the candidate pool grows.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/SmartMoney.tsx`, `README.md`
+- Change: Added a backend-owned `smart_money_review_queue_summary` that merges leader-health suggestions with current candidate/config state to keep only pending promote/degrade/block/restore actions, and surfaced that queue on the SmartMoney page as a dedicated operator worklist with one-click execution.
+- Why: Once the health table existed, the next usability gap was separating true pending actions from already-satisfied recommendations so operators could work through a short review queue instead of repeatedly scanning every leader-health row.
+
+### 2026-03-25
+- Area: `crates/pa-storage/src/models.rs`, `crates/pa-storage/src/repository.rs`, `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/SmartMoney.tsx`, `README.md`
+- Change: Added a smart-money audit view backed by `config_history`, exposed via `/api/smart-money/audit`, and surfaced a recent-operator-actions table on the SmartMoney page showing who changed the smart-money section, which version was written, and the resulting wallet/candidate/degrade/block/route counts.
+- Why: Once the review queue could trigger live promote/degrade/block/restore actions, the remaining operational gap was a compact audit trail that let operators verify and reconstruct recent smart-money config changes without reading raw config-history rows in the database.
+
+### 2026-03-25
 - Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `crates/pa-monitor/src/diagnostics.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
 - Change: Added a same-day `range/NegRisk` tightening layer on top of the existing day-market bucket so same-day range entries now use extra probability shrink, smaller size, higher min-edge, tighter spread acceptance, more slippage/size-focused execution weights, and tighter hold/reversal thresholds than same-day directional binaries; also simplified crypto exit deduplication so short-window repeats ignore jittery `best_bid`/`modeled_prob` changes and only record genuinely distinct exit reasons or stale repeats.
 - Why: Live crypto losses were clustering in thin same-day range markets where spread and fast model flips overwhelmed the available edge, and `/api/crypto/exits` was still noisy because tiny price/model changes kept re-emitting the same stop-loss/model-reversal event as if it were new.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/diagnostics.rs`, `crates/pa-strategy/src/smart_money.rs`, `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/SmartMoney.tsx`, `README.md`
+- Change: Added smart-money leader signal attribution by carrying leader addresses/labels through recent smart-money decision records, aggregating accepted/rejected counts per leader in `/api/status`, and surfacing a top-leader attribution table on the SmartMoney page.
+- Why: After discovery, promotion, and hot-reload were in place, the next missing operational view was which leaders were actually generating high-quality followable signals versus mostly producing rejected or noisy activity.
+
+### 2026-03-25
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-market-data/src/wallet_tracker.rs`, `crates/pa-monitor/src/api.rs`, `config/default.toml`, `frontend/src/api.ts`, `frontend/src/components/ConfigSection.tsx`, `frontend/src/pages/SmartMoney.tsx`, `README.md`
+- Change: Added smart-money `blocked_wallets` and `degraded_wallets` config controls, taught the live wallet tracker to drop blocked addresses and apply per-wallet degrade multipliers to effective weight, exposed block/degrade actions in the SmartMoney candidate table and monitor API, and surfaced each candidate's blocked/degraded state in the UI/config/docs.
+- Why: Once discovery, promotion, and hot-reload were working, operators still lacked a direct way to suppress noisy leaders or keep watching them at reduced size without manually editing config files outside the runtime loop.
+
+### 2026-03-25
+- Area: `crates/pa-strategy/src/crypto_alpha.rs`
+- Change: Updated two `CryptoAlphaConfig` test initializers to fall back to `Default::default()` for newly added same-day alt/range fields so the `pa-strategy` test target compiles again under the expanded config shape.
+- Why: The smart-money verification pass surfaced unrelated compile breakage in existing crypto strategy tests after the config struct gained more horizon-specific fields.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/SmartMoney.tsx`, `README.md`
+- Change: Added a smart-money leader `restore` action that removes both block and degrade overrides, exposed it through the monitor API and SmartMoney candidate table, and documented the new recovery path for candidate-state management.
+- Why: After adding block/degrade controls, the candidate workflow still lacked an operator-side way to return a leader to the normal pool without manual config surgery.
+
+### 2026-03-25
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/smart_money.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added first-pass smart-money `leader_routes` config so specific wallets can be constrained to matching `market.category`, question keywords, or event-title keywords; entry-like signals that miss their route are now skipped and recorded as `route_mismatch` decisions, while exits remain unrestricted.
+- Why: After candidate-state controls were in place, the next practical quality gap was that strong leaders in one market family could still leak low-quality signals into unrelated categories without any routing boundary.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/SmartMoney.tsx`, `README.md`
+- Change: Exposed smart-money route observability by adding candidate-level route fields plus a `/api/status.smart_money_route_summary`, and updated the SmartMoney page to show per-leader route badges, recent route-mismatch counts, and leader labels directly in the recent-decision table.
+- Why: Once route constraints existed, operators still needed to see which leaders were routed where and whether `route_mismatch` was becoming a meaningful reason for skipped copy-trades.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/SmartMoney.tsx`, `README.md`
+- Change: Added a smart-money leader route-template action so the monitor can apply common `crypto` / `politics` / `sports` / `weather` / `all` route presets directly to a candidate, writing the resulting `leader_routes` change into the live smart-money config without manual JSON edits.
+- Why: After making route state visible, the remaining usability gap was that operators still had to hand-edit `leader_routes` for common cases instead of applying a safe preset from the candidate workflow.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/diagnostics.rs`, `crates/pa-strategy/src/smart_money.rs`, `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/SmartMoney.tsx`, `README.md`
+- Change: Added an estimated smart-money leader PnL attribution ledger that tracks leader-weighted copied entry exposure and leader-weighted exit PnL from accepted smart-money opportunities, publishes the snapshot through diagnostics and `/api/status`, and surfaces both per-leader estimated open size/realized PnL and per-exit attributed leaders on the SmartMoney page.
+- Why: Signal-count attribution was enough to show which leaders were active, but it still could not answer the more important question of which leaders were actually carrying copied exposure and estimated收益 through the smart-money pipeline.
+
+### 2026-03-25
+- Area: `crates/pa-market-data/src/wallet_tracker.rs`, `README.md`
+- Change: Finished the smart-money hot-config path by making the wallet tracker's data-poll, on-chain-poll, and auto-discovery scheduling loop recalculate its next wake-up times from the shared live `smart_money` config instead of freezing those intervals at startup.
+- Why: After wiring live smart-money config into wallet selection and strategy thresholds, the remaining inconsistency was that tracker timing knobs still required restart, which left promotion and operator tuning only partially hot-reloadable.
+
+### 2026-03-25
+- Area: `src/app/bootstrap.rs`, `src/app/market_runtime.rs`, `src/app/account_runtime.rs`, `src/main.rs`, `crates/pa-monitor/src/api.rs`, `crates/pa-storage/src/repository.rs`, `crates/pa-market-data/src/wallet_tracker.rs`, `crates/pa-strategy/src/smart_money.rs`, `src/bin/smart_money_replay.rs`, `crates/pa-market-data/Cargo.toml`, `crates/pa-strategy/Cargo.toml`, `README.md`
+- Change: Added a shared `ArcSwap<SmartMoneyConfig>` hot-config path for smart-money so monitor-side promotion writes now propagate into the live wallet tracker and smart-money strategy on later poll/scan cycles, while still persisting the section into `app_config`/`config_history`; replay/tests were updated to use the new shared-config constructor shape.
+- Why: Persisting promotion into the config store and monitor view was still not enough if the running smart-money components kept an immutable startup snapshot, because newly promoted leaders would remain inert until a full process restart.
 
 ### 2026-03-25
 - Area: `crates/pa-storage/src/repository.rs`, `crates/pa-monitor/src/api.rs`, `README.md`
@@ -106,6 +186,16 @@ This file records repository-specific working agreements, high-level project con
 - Area: `src/bin/smart_money_discover_leaders.rs`, `README.md`
 - Change: Extended the smart-money discovery CLI with an optional Polygon RPC supplement that scans recent Conditional Tokens `TransferSingle` logs, seeds additional active wallet candidates from chain activity, folds recent transfer count/volume into candidate metadata and scoring, and documented the new `--onchain-lookback-blocks` workflow.
 - Why: Leaderboard plus active-market API discovery is useful but still has blind spots, so the next pragmatic step is to catch currently active wallets directly from recent Conditional Tokens transfers without committing to a full historical chain indexer yet.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `src/app/tasks.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Extended position snapshots with explicit `bid_price`, `mid_price`, `unrealized_pnl_bid`, and `unrealized_pnl_mid` while keeping the legacy `current_price/unrealized_pnl` fields mapped to bid-mark values, and updated the crypto page to show realized PnL separately from bid-mark and mid-mark unrealized PnL.
+- Why: Operators were still judging crypto performance mostly from a single bid-mark unrealized figure, which overstates losses on wide-spread prediction markets and makes it hard to distinguish true realized losses from spread-driven mark-to-market noise.
+
+### 2026-03-25
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added a same-day range bad-exit cooldown for crypto that temporarily skips new same-day `range/NegRisk` entries after multiple distinct recent `model_reversal` or `relative_stop_loss` exits in the same asset/subtype bucket, records the skip as `gate_reject: same_day_range_bad_exit_cooldown`, and added focused regression coverage for the new cooldown path.
+- Why: Live crypto losses were clustering in thin same-day range markets that repeatedly entered and quickly exited on reversal/stop-loss, so the next precise mitigation is to pause that exact bucket after a short streak of bad exits instead of globally tightening all crypto entries again.
 
 ### 2026-03-25
 - Area: `crates/pa-core/src/traits.rs`, `crates/pa-risk/src/position.rs`, `crates/pa-risk/src/manager.rs`, `crates/pa-strategy/src/engine.rs`
@@ -161,6 +251,31 @@ This file records repository-specific working agreements, high-level project con
 - Area: `config/default.toml`, `README.md`
 - Change: Tightened the default same-day crypto profile by raising `relative_stop_loss_ratio` from `0.80` to `0.85`, lowering `same_day_size_multiplier` from `0.45` to `0.35`, raising `same_day_min_edge_multiplier` from `1.70` to `1.90`, lowering `same_day_max_spread_multiplier` from `0.65` to `0.55`, shifting same-day execution-quality weights further toward retained size/slippage, and tightening same-day `model_reversal`/hold behavior via lower `same_day_exit_buffer_multiplier` and higher `same_day_hold_edge_multiplier`.
 - Why: Live same-day crypto fills were showing a small cluster of quick buy-then-reversal losses where the model edge did not survive thin-book spread and rapid post-entry flips, so the safest next move is to make same-day entries rarer, smaller, and faster to abandon once the signal deteriorates.
+
+### 2026-03-25
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added same-day alt-specific crypto overlays for probability shrink, execution-quality weights, size, min-edge, max-spread, capital-efficiency, model-reversal buffer, and hold-edge; applied those overlays across same-day entry, ranking, and post-entry management; and added focused regression coverage proving same-day alt markets are stricter than same-day major markets.
+- Why: After tightening crypto down to day markets, the remaining mismatch was that thin same-day alt markets still shared too much of the major-asset profile even though their live spread/slippage risk is materially worse.
+
+### 2026-03-25
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added a same-day alt bad-exit cooldown keyed by exact asset plus event subtype and wired it into binary/grouped crypto entry generation as `gate_reject: same_day_alt_bad_exit_cooldown`, with the new controls surfaced in config/docs/UI.
+- Why: After splitting same-day alt from major, the next live failure mode was still repeated small losses in thin same-day alt directional contracts, so the strategy now temporarily stands down that exact bucket after a short cluster of bad exits instead of immediately re-entering.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added backend-derived `crypto_cooldown_summary` to `/api/status`, computing active same-day range and same-day alt cooldown buckets plus remaining time from recent bad exits, and surfaced those active cooldown buckets directly on the CryptoMarkets page.
+- Why: After adding multiple crypto cooldown gates, operators still could not tell whether a quiet period was caused by spread/horizon filters or by a bucket currently being intentionally stood down after repeated bad exits.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `src/app/helpers.rs`, `src/app/tasks.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added `resolution_bucket` and `is_legacy` to crypto position snapshots, wired those fields through both helper-built and periodic runtime position refresh paths, added frontend crypto trade-history fetching, and introduced a bucket-level PnL summary on the CryptoMarkets page that splits realized and unrealized performance across `same_day`, `next_day`, and `legacy`.
+- Why: Once crypto was narrowed to day markets, operators still lacked a clean way to distinguish current day-market performance from old long-dated baggage, which made it too easy to misread the strategy as broadly unprofitable when losses were concentrated in a specific holding bucket.
+
+### 2026-03-25
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Extended the crypto PnL attribution view to split each `same_day` / `next_day` / `legacy` bucket into `range` versus `directional`, using existing position direction labels and trade question text to infer shape and surfacing a second table with realized and unrealized bucket-shape breakdowns.
+- Why: Bucket-level day-market attribution was useful, but the next operational question was specifically whether range-style same-day contracts were dragging performance more than directional contracts, which requires one extra shape split rather than another strategy-wide summary.
 
 ### 2026-03-25
 - Area: `migrations/010_drop_opportunities_condition_id_fk.sql`, `crates/pa-core/src/types.rs`, `crates/pa-execution/src/orchestrator.rs`, `crates/pa-storage/src/repository.rs`, `src/app/tasks.rs`, `src/app/market_runtime.rs`
@@ -1581,3 +1696,38 @@ This file records repository-specific working agreements, high-level project con
 - Area: `src/bin/crypto_calibrate.rs`, `docs/crypto-calibration-workflow.md`, `README.md`
 - Change: Extended `crypto_calibrate_summary.json` with an optional machine-readable `merge_diff_summary` section so merge runs expose the same `new/updated/unchanged` row summary through JSON as well as TOML comments.
 - Why: Once merge output carried a human-readable diff header, the next step was making that same review signal available to downstream report tooling without scraping comments from the generated TOML.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Extended crypto cooldown buckets and runtime override suggestions with explicit `shape` selectors (`range` vs `directional`), changed entry/post-entry suggestion generation to bucket by `asset_class × event_subtype × shape`, and added a new CryptoMarkets "形态压力" table that lines up shape-level PnL attribution, active cooldowns, and the strongest matching override action for each bucket/shape row.
+- Why: Shape-level PnL attribution alone still required operators to mentally join separate cooldown and tuning panels, so pushing `shape` through the status API makes it much easier to see which market shape is losing money, in cooldown, and asking for parameter changes.
+
+### 2026-03-25
+- Area: `crates/pa-strategy/src/smart_money.rs`
+- Change: Cloned `attributed_leaders` before recording smart-money exit diagnostics so the same attribution vector can also be attached to the generated exit opportunity without tripping Rust move semantics.
+- Why: A pre-existing ownership bug in the smart-money exit path surfaced during the repo-wide `polyalpha` compile check and prevented the main binary from compiling even though the current change was centered on crypto monitoring.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added backend-generated crypto override patch previews to `/api/status`, rendering the current entry and post-entry runtime suggestions into review-ready `[[crypto_alpha.calibration_overrides]]` TOML blocks grouped by `asset_class × event_subtype × shape`, and surfaced those previews directly on the CryptoMarkets page with counts for suggestions that still require manual handling.
+- Why: Once shape-level friction, cooldowns, and override suggestions were visible, the next operational gap was still the manual translation step from live diagnostics into an actual configuration patch; preview blocks make the runtime advice much closer to something operators can review and paste into config.
+
+### 2026-03-25
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added direct copy/download actions for the combined crypto runtime override patch preview so operators can export the current entry and post-entry TOML suggestions as a single `crypto_runtime_override_patch.toml` file without hand-copying separate blocks.
+- Why: A patch preview embedded in the page is useful, but the practical next step is usually taking that TOML into review or config management; inline export actions reduce that last bit of manual friction.
+
+### 2026-03-25
+- Area: `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Extended the frontend patch-preview types to use backend row metadata and added a filtered “high-pressure shape” export path that only renders/copies/downloads the override rows whose `range` or `directional` shape is currently in cooldown or showing negative shape-level PnL.
+- Why: Once the page could export the full runtime override patch, the next operational gap was still noise; in practice operators often want a much smaller patch focused only on the shapes currently losing money or actively tripping cooldowns.
+
+### 2026-03-25
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added row selection inside the crypto "形态压力" table plus a dedicated selected-shape patch preview/export panel, and explicitly documented that the current runtime patch rows are shape-scoped short-horizon suggestions rather than same-day/next-day-specific selectors.
+- Why: After adding “high-pressure shape” export, operators still needed a lighter way to focus on one specific pressure row without exporting every bad shape at once, but the UI also needed to be honest about the current selector granularity.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added `source_bucket` (`same_day` / `next_day` / `legacy`) metadata to crypto runtime override suggestions and patch-preview rows, emitted that bucket as a TOML comment in generated patch blocks, and tightened selected-row patch export on the CryptoMarkets page to filter by both `bucket` and `shape` instead of only `shape`.
+- Why: The previous selected-row export still over-matched because the runtime patch preview only preserved shape, which meant choosing one pressure row could pull in suggestions from a different short-horizon bucket; carrying source-bucket metadata makes the export more faithful even though the underlying override table still only supports `horizon = short/medium/long`.

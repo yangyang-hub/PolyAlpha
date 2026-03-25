@@ -44,6 +44,7 @@ pub async fn initialize_market_runtime(
     active_enabled_strategies: &[String],
     resolved_accounts: &[AccountConfig],
     config_arc: Arc<arc_swap::ArcSwap<Settings>>,
+    smart_money_config_arc: Arc<arc_swap::ArcSwap<pa_core::config::SmartMoneyConfig>>,
 ) -> Result<Option<MarketRuntimeArtifacts>> {
     let mut discovery_settings = settings.clone();
     discovery_settings.strategy.enabled = active_enabled_strategies.to_vec();
@@ -86,6 +87,7 @@ pub async fn initialize_market_runtime(
     start_api_server(
         settings,
         config_arc,
+        smart_money_config_arc,
         Arc::clone(&ws_connected),
         Arc::clone(&ws_last_message_unix),
         Arc::clone(&lr_runtime_status),

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use alloy::primitives::{B256, U256};
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use tokio_util::sync::CancellationToken;
@@ -101,6 +102,7 @@ struct TrackedWallet {
     address: String,
     label: String,
     base_weight: Decimal,
+    degrade_multiplier: Decimal,
     effective_weight: Decimal,
     profile_score: Decimal,
     recent_signal_times: VecDeque<DateTime<Utc>>,
@@ -117,7 +119,7 @@ struct RecentSignalMeta {
 // ──── WalletTracker ────
 
 pub struct WalletTracker {
-    config: SmartMoneyConfig,
+    config: Arc<ArcSwap<SmartMoneyConfig>>,
     http_client: reqwest::Client,
     /// Current position snapshots per wallet.
     /// Key: lowercase address, Value: HashMap<token_id, WalletPosition>
@@ -136,7 +138,7 @@ pub struct WalletTracker {
 
 impl WalletTracker {
     pub fn new(
-        config: SmartMoneyConfig,
+        config: Arc<ArcSwap<SmartMoneyConfig>>,
         token_to_condition: Arc<RwLock<HashMap<U256, B256>>>,
     ) -> Self {
         let http_client = reqwest::Client::builder()
@@ -145,13 +147,17 @@ impl WalletTracker {
             .unwrap_or_default();
 
         // Seed tracked wallets from config
-        let tracked_wallets: Vec<TrackedWallet> = config
+        let initial_config = config.load();
+        let blocked_wallets = blocked_wallet_set(&initial_config);
+        let tracked_wallets: Vec<TrackedWallet> = initial_config
             .wallets
             .iter()
+            .filter(|wallet| !blocked_wallets.contains(&wallet.address.to_lowercase()))
             .map(|w| TrackedWallet {
                 address: w.address.to_lowercase(),
                 label: w.label.clone(),
                 base_weight: w.weight,
+                degrade_multiplier: wallet_degrade_multiplier(&initial_config, &w.address),
                 effective_weight: w.weight,
                 profile_score: Decimal::ZERO,
                 recent_signal_times: VecDeque::new(),
@@ -176,6 +182,10 @@ impl WalletTracker {
         }
     }
 
+    fn config(&self) -> Arc<SmartMoneyConfig> {
+        self.config.load_full()
+    }
+
     /// Return a shared reference to the signal queue (for SmartMoneyStrategy).
     pub fn signals_ref(&self) -> Arc<RwLock<Vec<SmartMoneySignal>>> {
         Arc::clone(&self.signals)
@@ -183,29 +193,44 @@ impl WalletTracker {
 
     /// Main run loop — spawned as a background task.
     pub async fn run(&self, cancel: CancellationToken, rpc_url: &str) {
-        let poll_interval = Duration::from_secs(self.config.poll_interval_secs);
-        let onchain_interval = Duration::from_secs(self.config.onchain_poll_secs);
-        let discover_interval = Duration::from_secs(self.config.auto_discover_interval_secs);
-
-        let mut poll_tick = tokio::time::interval(poll_interval);
-        let mut onchain_tick = tokio::time::interval(onchain_interval);
-        let mut discover_tick = tokio::time::interval(discover_interval);
+        let now = tokio::time::Instant::now();
+        let mut next_poll = now;
+        let mut next_onchain = now;
+        let mut next_discover = now;
         let mut last_block: u64 = 0;
 
         let rpc_url_owned = rpc_url.to_string();
-        let onchain_enabled = self.config.onchain_enabled;
-
-        if onchain_enabled {
-            tracing::info!("SmartMoney: on-chain Transfer monitoring enabled");
-        }
+        let mut logged_onchain_enabled = false;
 
         loop {
+            let config = self.config();
+            let poll_interval = Duration::from_secs(config.poll_interval_secs.max(1));
+            let onchain_interval = Duration::from_secs(config.onchain_poll_secs.max(1));
+            let discover_interval = Duration::from_secs(config.auto_discover_interval_secs.max(1));
+            let onchain_enabled = config.onchain_enabled;
+
+            if onchain_enabled && !logged_onchain_enabled {
+                tracing::info!("SmartMoney: on-chain Transfer monitoring enabled");
+                logged_onchain_enabled = true;
+            } else if !onchain_enabled {
+                logged_onchain_enabled = false;
+            }
+
+            let poll_sleep = tokio::time::sleep_until(next_poll);
+            let onchain_sleep = tokio::time::sleep_until(next_onchain);
+            let discover_sleep = tokio::time::sleep_until(next_discover);
+            tokio::pin!(poll_sleep);
+            tokio::pin!(onchain_sleep);
+            tokio::pin!(discover_sleep);
+
             tokio::select! {
                 _ = cancel.cancelled() => {
                     tracing::info!("SmartMoney: WalletTracker shutting down");
                     break;
                 }
-                _ = poll_tick.tick() => {
+                _ = &mut poll_sleep => {
+                    next_poll = tokio::time::Instant::now() + poll_interval;
+                    self.sync_tracked_wallets_from_config();
                     if let Err(e) = self.poll_data_api().await {
                         tracing::warn!(error = %e, "SmartMoney: Data API poll failed");
                     }
@@ -213,17 +238,20 @@ impl WalletTracker {
                     self.prune_stale_pending_onchain_signals();
                     self.prune_recent_signal_index();
                 }
-                _ = onchain_tick.tick(), if onchain_enabled => {
+                _ = &mut onchain_sleep, if onchain_enabled => {
+                    next_onchain = tokio::time::Instant::now() + onchain_interval;
                     match self.poll_onchain_logs(&rpc_url_owned, last_block).await {
                         Ok(new_block) => last_block = new_block,
                         Err(e) => tracing::warn!(error = %e, "SmartMoney: on-chain poll failed"),
                     }
                 }
-                _ = discover_tick.tick() => {
+                _ = &mut discover_sleep => {
+                    next_discover = tokio::time::Instant::now() + discover_interval;
+                    self.sync_tracked_wallets_from_config();
                     if let Err(e) = self.refresh_wallet_profiles().await {
                         tracing::warn!(error = %e, "SmartMoney: wallet score refresh failed");
                     }
-                    if self.config.auto_discover_enabled {
+                    if self.config().auto_discover_enabled {
                         if let Err(e) = self.auto_discover().await {
                             tracing::warn!(error = %e, "SmartMoney: auto-discovery failed");
                         }
@@ -231,6 +259,44 @@ impl WalletTracker {
                 }
             }
         }
+    }
+
+    fn sync_tracked_wallets_from_config(&self) {
+        let config = self.config();
+        let blocked_wallets = blocked_wallet_set(&config);
+        let mut wallets = self.tracked_wallets.write().unwrap();
+        let mut existing_auto: Vec<TrackedWallet> = wallets
+            .iter()
+            .filter(|wallet| wallet.auto_discovered && !blocked_wallets.contains(&wallet.address))
+            .cloned()
+            .collect();
+        let mut synced_manual = Vec::with_capacity(config.wallets.len());
+        for configured in &config.wallets {
+            let address = configured.address.to_lowercase();
+            if blocked_wallets.contains(&address) {
+                continue;
+            }
+            if let Some(existing) = wallets.iter().find(|wallet| wallet.address == address) {
+                let mut wallet = existing.clone();
+                wallet.label = configured.label.clone();
+                wallet.base_weight = configured.weight;
+                wallet.degrade_multiplier = wallet_degrade_multiplier(&config, &address);
+                synced_manual.push(wallet);
+            } else {
+                synced_manual.push(TrackedWallet {
+                    address,
+                    label: configured.label.clone(),
+                    base_weight: configured.weight,
+                    degrade_multiplier: wallet_degrade_multiplier(&config, &configured.address),
+                    effective_weight: configured.weight,
+                    profile_score: Decimal::ZERO,
+                    recent_signal_times: VecDeque::new(),
+                    auto_discovered: false,
+                });
+            }
+        }
+        synced_manual.append(&mut existing_auto);
+        *wallets = synced_manual;
     }
 
     // ──── Data API Polling ────
@@ -513,6 +579,10 @@ impl WalletTracker {
 
     /// Get the weight for a wallet address.
     fn wallet_weight(&self, address: &str) -> Decimal {
+        let config = self.config();
+        if blocked_wallet_set(&config).contains(&address.to_lowercase()) {
+            return Decimal::ZERO;
+        }
         let wallets = self.tracked_wallets.read().unwrap();
         wallets
             .iter()
@@ -554,18 +624,20 @@ impl WalletTracker {
         let signal_bonus = (Decimal::from(wallet.recent_signal_times.len() as u64)
             * config.wallet_signal_bonus_per_event)
             .min(config.wallet_signal_bonus_cap);
-        let raw = wallet.base_weight * (profile_multiplier + signal_bonus);
+        let raw =
+            wallet.base_weight * wallet.degrade_multiplier * (profile_multiplier + signal_bonus);
         raw.max(config.wallet_min_effective_weight)
             .min(config.wallet_max_effective_weight)
     }
 
     fn recompute_wallet_effective_weight(&self, wallet: &mut TrackedWallet, now: DateTime<Utc>) {
+        let config = self.config();
         Self::prune_wallet_recent_signals_for_config(
-            self.config.wallet_signal_lookback_secs,
+            config.wallet_signal_lookback_secs,
             wallet,
             now,
         );
-        wallet.effective_weight = Self::effective_wallet_weight_for_config(&self.config, wallet);
+        wallet.effective_weight = Self::effective_wallet_weight_for_config(&config, wallet);
     }
 
     fn record_wallet_signal_activity(&self, wallet_address: &str, detected_at: DateTime<Utc>) {
@@ -580,6 +652,7 @@ impl WalletTracker {
     }
 
     fn refresh_wallet_profile_score(&self, wallet_address: &str, profile: &WalletProfile) {
+        let config = self.config();
         let mut wallets = self.tracked_wallets.write().unwrap();
         let Some(wallet) = wallets
             .iter_mut()
@@ -587,27 +660,26 @@ impl WalletTracker {
         else {
             return;
         };
-        wallet.profile_score = if profile.volume >= self.config.min_wallet_volume_usdc
-            && profile.volume > Decimal::ZERO
-        {
-            profile.pnl / profile.volume
-        } else {
-            Decimal::ZERO
-        };
+        wallet.profile_score =
+            if profile.volume >= config.min_wallet_volume_usdc && profile.volume > Decimal::ZERO {
+                profile.pnl / profile.volume
+            } else {
+                Decimal::ZERO
+            };
         self.recompute_wallet_effective_weight(wallet, Utc::now());
     }
 
     fn publish_wallet_score_snapshot(&self) {
+        let config = self.config();
         let now = Utc::now();
         let mut wallets = self.tracked_wallets.write().unwrap();
         for wallet in wallets.iter_mut() {
             Self::prune_wallet_recent_signals_for_config(
-                self.config.wallet_signal_lookback_secs,
+                config.wallet_signal_lookback_secs,
                 wallet,
                 now,
             );
-            wallet.effective_weight =
-                Self::effective_wallet_weight_for_config(&self.config, wallet);
+            wallet.effective_weight = Self::effective_wallet_weight_for_config(&config, wallet);
         }
         let entries: Vec<_> = wallets
             .iter()
@@ -644,22 +716,28 @@ impl WalletTracker {
     }
 
     fn score_wallet_profile(&self, profile: &WalletProfile) -> Decimal {
-        if profile.volume < self.config.min_wallet_volume_usdc || profile.volume <= Decimal::ZERO {
+        let config = self.config();
+        if profile.volume < config.min_wallet_volume_usdc || profile.volume <= Decimal::ZERO {
             return Decimal::ZERO;
         }
         let base_score = profile.pnl / profile.volume;
         let volume_multiplier =
-            (profile.volume / self.config.min_wallet_volume_usdc).min(Decimal::from(3));
+            (profile.volume / config.min_wallet_volume_usdc).min(Decimal::from(3));
         base_score * volume_multiplier
     }
 
     fn should_emit_signal(&self, signal: &SmartMoneySignal) -> bool {
-        signal.delta >= self.config.min_signal_delta_shares
-            && signal.signal_notional_usdc >= self.config.min_signal_notional_usdc
-            && signal.wallet_weight >= self.config.min_wallet_weight
+        let config = self.config();
+        if blocked_wallet_set(&config).contains(&signal.wallet_address.to_lowercase()) {
+            return false;
+        }
+        signal.delta >= config.min_signal_delta_shares
+            && signal.signal_notional_usdc >= config.min_signal_notional_usdc
+            && signal.wallet_weight >= config.min_wallet_weight
     }
 
     fn is_duplicate_signal(&self, signal: &SmartMoneySignal) -> bool {
+        let config = self.config();
         let key = (
             signal.wallet_address.clone(),
             signal.token_id,
@@ -669,11 +747,11 @@ impl WalletTracker {
         let Some(existing) = recent.get(&key) else {
             return false;
         };
-        let window = chrono::Duration::seconds(self.config.dedup_window_secs as i64);
+        let window = chrono::Duration::seconds(config.dedup_window_secs as i64);
         if signal.detected_at - existing.detected_at > window {
             return false;
         }
-        let tolerance = self.config.min_signal_delta_shares.min(Decimal::ONE);
+        let tolerance = config.min_signal_delta_shares.min(Decimal::ONE);
         (signal.delta - existing.delta).abs() <= tolerance
     }
 
@@ -705,7 +783,7 @@ impl WalletTracker {
         if !self.should_emit_signal(&signal) {
             return;
         }
-        if !self.config.confirm_onchain_with_data_api {
+        if !self.config().confirm_onchain_with_data_api {
             self.enqueue_signal(signal);
             return;
         }
@@ -776,7 +854,7 @@ impl WalletTracker {
 
     /// Remove signals older than TTL.
     fn prune_stale_signals(&self) {
-        let ttl = chrono::Duration::seconds(self.config.signal_ttl_secs as i64);
+        let ttl = chrono::Duration::seconds(self.config().signal_ttl_secs as i64);
         let cutoff = Utc::now() - ttl;
         let mut signals = self.signals.write().unwrap();
         let before = signals.len();
@@ -792,7 +870,7 @@ impl WalletTracker {
     }
 
     fn prune_stale_pending_onchain_signals(&self) {
-        let ttl = chrono::Duration::seconds(self.config.signal_ttl_secs as i64);
+        let ttl = chrono::Duration::seconds(self.config().signal_ttl_secs as i64);
         let cutoff = Utc::now() - ttl;
         self.pending_onchain_signals
             .write()
@@ -801,7 +879,7 @@ impl WalletTracker {
     }
 
     fn prune_recent_signal_index(&self) {
-        let ttl = chrono::Duration::seconds(self.config.dedup_window_secs as i64);
+        let ttl = chrono::Duration::seconds(self.config().dedup_window_secs as i64);
         let cutoff = Utc::now() - ttl;
         self.recent_signal_index
             .write()
@@ -813,14 +891,19 @@ impl WalletTracker {
 
     /// Evaluate candidate wallets and promote high-scoring ones to tracked list.
     async fn auto_discover(&self) -> Result<()> {
-        let candidates = self.config.auto_discover_candidates.clone();
+        let config = self.config();
+        let candidates = config.auto_discover_candidates.clone();
+        let blocked_wallets = blocked_wallet_set(&config);
         if candidates.is_empty() {
             return Ok(());
         }
 
-        let max = self.config.max_wallets;
+        let max = config.max_wallets;
 
         for address in &candidates {
+            if blocked_wallets.contains(&address.to_lowercase()) {
+                continue;
+            }
             if self.tracked_wallets.read().unwrap().len() >= max {
                 break;
             }
@@ -843,7 +926,7 @@ impl WalletTracker {
 
             let score = self.score_wallet_profile(&profile);
 
-            if score >= self.config.min_wallet_score {
+            if score >= config.min_wallet_score {
                 tracing::info!(
                     address,
                     pnl = %profile.pnl,
@@ -856,6 +939,7 @@ impl WalletTracker {
                     address: address.to_lowercase(),
                     label: format!("auto_{}", &address[..8.min(address.len())]),
                     base_weight: Decimal::ONE,
+                    degrade_multiplier: wallet_degrade_multiplier(&config, address),
                     effective_weight: Decimal::ONE,
                     profile_score: score,
                     recent_signal_times: VecDeque::new(),
@@ -898,6 +982,23 @@ impl WalletTracker {
             volume: raw.total_volume,
         })
     }
+}
+
+fn blocked_wallet_set(config: &SmartMoneyConfig) -> HashSet<String> {
+    config
+        .blocked_wallets
+        .iter()
+        .map(|address| address.to_lowercase())
+        .collect()
+}
+
+fn wallet_degrade_multiplier(config: &SmartMoneyConfig, address: &str) -> Decimal {
+    config
+        .degraded_wallets
+        .iter()
+        .find(|wallet| wallet.address.eq_ignore_ascii_case(address))
+        .map(|wallet| wallet.multiplier.max(Decimal::ZERO))
+        .unwrap_or(Decimal::ONE)
 }
 
 /// Extract a lowercase 0x-prefixed address from a 32-byte hex topic.
@@ -1004,6 +1105,7 @@ pub fn diff_snapshots(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arc_swap::ArcSwap;
     use rust_decimal_macros::dec;
 
     fn make_pos(token_id: u64, size: Decimal) -> WalletPosition {
@@ -1076,7 +1178,10 @@ mod tests {
             signal_ttl_secs: 1, // 1 second TTL
             ..Default::default()
         };
-        let tracker = WalletTracker::new(config, Arc::new(RwLock::new(HashMap::new())));
+        let tracker = WalletTracker::new(
+            Arc::new(ArcSwap::from_pointee(config)),
+            Arc::new(RwLock::new(HashMap::new())),
+        );
 
         // Insert a stale signal
         {
@@ -1153,7 +1258,10 @@ mod tests {
             min_signal_notional_usdc: dec!(25),
             ..Default::default()
         };
-        let tracker = WalletTracker::new(config, Arc::new(RwLock::new(HashMap::new())));
+        let tracker = WalletTracker::new(
+            Arc::new(ArcSwap::from_pointee(config)),
+            Arc::new(RwLock::new(HashMap::new())),
+        );
         let signal = SmartMoneySignal {
             signal_type: SignalType::Entry,
             wallet_address: "0xabc".to_string(),
@@ -1179,7 +1287,10 @@ mod tests {
             min_signal_notional_usdc: dec!(1),
             ..Default::default()
         };
-        let tracker = WalletTracker::new(config, Arc::new(RwLock::new(HashMap::new())));
+        let tracker = WalletTracker::new(
+            Arc::new(ArcSwap::from_pointee(config)),
+            Arc::new(RwLock::new(HashMap::new())),
+        );
         let signal = SmartMoneySignal {
             signal_type: SignalType::Entry,
             wallet_address: "0xabc".to_string(),
@@ -1199,5 +1310,53 @@ mod tests {
 
         let signals = tracker.signals.read().unwrap();
         assert_eq!(signals.len(), 1);
+    }
+
+    #[test]
+    fn test_sync_tracked_wallets_skips_blocked_addresses() {
+        let config = SmartMoneyConfig {
+            wallets: vec![pa_core::config::TrackedWalletConfig {
+                address: "0xabc".into(),
+                label: "blocked".into(),
+                weight: Decimal::ONE,
+            }],
+            blocked_wallets: vec!["0xabc".into()],
+            ..Default::default()
+        };
+        let tracker = WalletTracker::new(
+            Arc::new(ArcSwap::from_pointee(config)),
+            Arc::new(RwLock::new(HashMap::new())),
+        );
+
+        tracker.sync_tracked_wallets_from_config();
+
+        let wallets = tracker.tracked_wallets.read().unwrap();
+        assert!(wallets.is_empty());
+    }
+
+    #[test]
+    fn test_degrade_multiplier_reduces_effective_weight() {
+        let config = SmartMoneyConfig {
+            wallets: vec![pa_core::config::TrackedWalletConfig {
+                address: "0xabc".into(),
+                label: "leader".into(),
+                weight: Decimal::ONE,
+            }],
+            degraded_wallets: vec![pa_core::config::DegradedWalletConfig {
+                address: "0xabc".into(),
+                multiplier: dec!(0.50),
+            }],
+            wallet_min_effective_weight: Decimal::ZERO,
+            ..Default::default()
+        };
+        let tracker = WalletTracker::new(
+            Arc::new(ArcSwap::from_pointee(config)),
+            Arc::new(RwLock::new(HashMap::new())),
+        );
+
+        tracker.publish_wallet_score_snapshot();
+
+        let wallets = tracker.tracked_wallets.read().unwrap();
+        assert_eq!(wallets[0].effective_weight, dec!(0.45));
     }
 }

@@ -27,6 +27,7 @@ async fn main() -> Result<()> {
         resolved_accounts,
         active_enabled_strategies,
         config_arc,
+        smart_money_config_arc,
     } = load_runtime_settings().await?;
 
     tracing::info!(
@@ -43,6 +44,7 @@ async fn main() -> Result<()> {
         &active_enabled_strategies,
         &resolved_accounts,
         Arc::clone(&config_arc),
+        Arc::clone(&smart_money_config_arc),
     )
     .await?
     else {
@@ -104,6 +106,7 @@ async fn main() -> Result<()> {
             &binary_event_groups,
             Arc::clone(&lr_runtime_status),
             repository.clone(),
+            Arc::clone(&smart_money_config_arc),
             cancel.clone(),
         )
         .await;

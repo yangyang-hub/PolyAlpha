@@ -651,6 +651,9 @@ capital_efficiency_threshold = 0.98
 
 [smart_money]
 wallets = []
+blocked_wallets = []
+degraded_wallets = []
+leader_routes = []
 follow_ratio = 0.10
 max_position_usdc = 100.0
 poll_interval_secs = 30
@@ -716,11 +719,49 @@ If `PA_DATABASE__URL` or `--database-url` is set, discovered candidates are also
 
 The SmartMoney page renders this candidate pool directly so you can inspect discovery score, source
 mix, leaderboard rank, realized PnL, and recent chain activity without leaving the monitor UI.
-The page also supports promoting a candidate inside the repository and returns ready-to-copy
-`[[smart_money.wallets]]` / `auto_discover_candidates` snippets. Promotion also updates the
-monitor-side `smart_money` config view and persists the section into `app_config` /
-`config_history`, but running smart-money workers still keep their startup config snapshot until
-restart or future hot-reload support is added.
+The page also supports promoting a candidate, degrading it with a runtime multiplier, or blocking
+it entirely inside the repository. Promotion still returns ready-to-copy `[[smart_money.wallets]]`
+/ `auto_discover_candidates` snippets, while block/degrade actions update
+`smart_money.blocked_wallets` / `smart_money.degraded_wallets`. These changes are persisted into
+`app_config` / `config_history`, and running smart-money workers consume the shared `smart_money`
+config on later scan/poll cycles for wallet lists, thresholds, and tracker scheduling intervals, so
+promoted leaders, blocked wallets, degraded multipliers, and updated polling settings become
+actionable without a process restart. The same UI can also restore a leader by clearing any block
+or degrade override.
+If you need leader-by-theme routing, `leader_routes` can restrict a wallet to specific
+`market.category`, question keywords, or parent-event-title keywords; entry-like smart-money
+signals that miss their configured route are recorded as `route_mismatch` and skipped without
+affecting exit handling.
+The SmartMoney page also surfaces each candidate's current route constraints plus a compact route
+summary so you can see whether route mismatches are becoming a meaningful source of rejected
+signals. Common route templates (`crypto`, `politics`, `sports`, `weather`, `all`) can now be
+applied directly from the candidate table without editing `leader_routes` JSON by hand.
+The SmartMoney page also includes an estimated leader PnL attribution table. This ledger is based
+on accepted smart-money entry/exit opportunities and proportional leader exposure weights, so it is
+useful for ranking leaders and debugging copy-trade quality, but it is not yet a fill-confirmed
+execution ledger.
+Those same estimated leader slices are also persisted into smart-money `opportunities.details` and
+flow through `/api/trades` plus `/api/crypto/trades` as `smart_money_attribution`, so historical
+trade views can be joined back to the leader mix that produced a copied opportunity. Newer trade
+rows also carry `smart_money_trade_attribution`, which scales that leader mix onto each persisted
+fill using the realized `filled_size`, fee, and sell-side realized profit recorded for the trade.
+The SmartMoney page now shows both layers side-by-side: a fill-confirmed leader PnL table derived
+from persisted trade attribution, and the older opportunity-level estimated ledger that is still
+useful when a copied opportunity was generated but only partially filled or not yet exited.
+On top of those ledgers, the status API now derives a compact leader-health table that combines
+accept rate, estimated leader PnL, and fill-confirmed realized PnL into simple `keep_or_promote`,
+`observe`, `degrade`, or `block_candidate` suggestions for operator review.
+The monitor also derives a pending smart-money review queue from those suggestions plus the current
+candidate/config state, so only leaders that still need an operator action are highlighted; the
+SmartMoney page can execute the suggested promote/degrade/block/restore action directly from that
+queue without manually cross-referencing the candidate table.
+Recent smart-money operator changes are also exposed through `/api/smart-money/audit`, which reads
+the smart-money section history from `config_history` and renders a lightweight audit table on the
+SmartMoney page so you can see when web actions changed wallet counts, degraded/blocked sets, or
+route coverage.
+The SmartMoney page also includes a leader signal-attribution table derived from recent smart-money
+decision records, so you can see which leaders are mostly producing accepted versus rejected follow
+signals without trying to overstate exact realized-PnL attribution.
 
 To supplement leaderboard/API discovery with recent Conditional Tokens transfer activity on Polygon,
 add a recent-block scan:
@@ -790,31 +831,45 @@ override_multiplier_max_delta_bps = 2500
 short_horizon_max_days = 1
 medium_horizon_max_days = 7
 max_entry_days = 1
+same_day_alt_probability_multiplier = 0.95
+same_day_range_bad_exit_cooldown_trigger_count = 2
+same_day_range_bad_exit_cooldown_secs = 1800
+same_day_alt_bad_exit_cooldown_trigger_count = 2
+same_day_alt_bad_exit_cooldown_secs = 1800
 same_day_probability_calibration = 0.80
 same_day_range_probability_multiplier = 0.90
 short_horizon_probability_calibration = 0.85
 medium_horizon_probability_calibration = 0.92
 same_day_execution_quality_profit_weight_multiplier = 0.70
+same_day_alt_execution_quality_profit_weight_multiplier = 0.90
 same_day_range_execution_quality_profit_weight_multiplier = 0.85
 same_day_execution_quality_size_weight_multiplier = 1.30
+same_day_alt_execution_quality_size_weight_multiplier = 1.10
 same_day_range_execution_quality_size_weight_multiplier = 1.10
 same_day_execution_quality_slippage_weight_multiplier = 1.50
+same_day_alt_execution_quality_slippage_weight_multiplier = 1.15
 same_day_range_execution_quality_slippage_weight_multiplier = 1.20
 short_execution_quality_profit_weight_multiplier = 1.15
 short_execution_quality_size_weight_multiplier = 0.95
 short_execution_quality_slippage_weight_multiplier = 0.90
 same_day_size_multiplier = 0.35
+same_day_alt_size_multiplier = 0.80
 same_day_range_size_multiplier = 0.75
 short_horizon_size_multiplier = 0.60
 medium_horizon_size_multiplier = 0.80
 same_day_min_edge_multiplier = 1.90
+same_day_alt_min_edge_multiplier = 1.10
 same_day_range_min_edge_multiplier = 1.15
 short_horizon_min_edge_multiplier = 1.50
 same_day_max_spread_multiplier = 0.55
+same_day_alt_max_spread_multiplier = 0.85
 same_day_range_max_spread_multiplier = 0.85
+same_day_alt_capital_efficiency_multiplier = 0.98
 same_day_exit_buffer_multiplier = 0.30
+same_day_alt_exit_buffer_multiplier = 0.90
 same_day_range_exit_buffer_multiplier = 0.85
 same_day_hold_edge_multiplier = 1.90
+same_day_alt_hold_edge_multiplier = 1.10
 same_day_range_hold_edge_multiplier = 1.10
 
 ### Smart Money Replay CLI
@@ -951,6 +1006,7 @@ medium_horizon_edge_decay_cooldown_multiplier = 0.75
 asset = "*"
 asset_class = "major"
 horizon = "any"
+resolution_bucket = "same_day"
 market_type = "any"
 event_subtype = "unlock"
 sigma_multiplier = 1.10

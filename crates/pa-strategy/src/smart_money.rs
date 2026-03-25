@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use alloy::primitives::{B256, U256};
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -15,8 +16,10 @@ use pa_core::types::{
 };
 use pa_market_data::wallet_tracker::{SignalType, SmartMoneySignal, SmartMoneySignalSource};
 use pa_monitor::diagnostics::{
-    SmartMoneyDecision, SmartMoneyExitDecision, record_smart_money_decision,
-    record_smart_money_exit_decision,
+    SmartMoneyDecision, SmartMoneyExitDecision, SmartMoneyLeaderAttributionSlice,
+    SmartMoneyLeaderPnlAttributionEntry, record_smart_money_decision,
+    record_smart_money_exit_decision, record_smart_money_leader_pnl_attribution,
+    record_smart_money_opportunity_attribution,
 };
 
 use crate::profitability::ProfitCalculator;
@@ -39,10 +42,36 @@ struct AggregatedSignal {
     latest_detected_at: DateTime<Utc>,
     has_onchain_source: bool,
     has_data_api_source: bool,
+    leader_addresses: Vec<String>,
+    leader_labels: Vec<String>,
+    leader_contributions: Vec<LeaderContribution>,
+}
+
+#[derive(Debug, Clone)]
+struct LeaderContribution {
+    address: String,
+    label: String,
+    weighted_size: Decimal,
+}
+
+#[derive(Debug, Clone)]
+struct LeaderExposureLot {
+    address: String,
+    label: String,
+    size: Decimal,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LeaderAttributionTotals {
+    label: String,
+    estimated_realized_pnl: Decimal,
+    estimated_exited_size: Decimal,
+    estimated_exit_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SmartMoneyRejectReason {
+    RouteMismatch,
     SignalTooOld,
     WalletWeightTooLow,
     ConsensusTooWeak,
@@ -61,6 +90,7 @@ pub enum SmartMoneyRejectReason {
 impl SmartMoneyRejectReason {
     fn as_str(self) -> &'static str {
         match self {
+            Self::RouteMismatch => "route_mismatch",
             Self::SignalTooOld => "signal_too_old",
             Self::WalletWeightTooLow => "wallet_weight_too_low",
             Self::ConsensusTooWeak => "consensus_too_weak",
@@ -107,7 +137,7 @@ pub struct SmartMoneyStrategyDeps {
 }
 
 pub struct SmartMoneyStrategy {
-    config: SmartMoneyConfig,
+    config: Arc<ArcSwap<SmartMoneyConfig>>,
     profit_calc: ProfitCalculator,
     get_orderbook: Box<dyn Fn(U256) -> Option<OrderBook> + Send + Sync>,
     get_available_capital: Box<dyn Fn() -> Decimal + Send + Sync>,
@@ -122,11 +152,15 @@ pub struct SmartMoneyStrategy {
     position_first_seen_at: Arc<RwLock<HashMap<U256, DateTime<Utc>>>>,
     /// Highest best bid seen since the position was first observed.
     peak_bid_by_token: Arc<RwLock<HashMap<U256, Decimal>>>,
+    /// Estimated outstanding copied size by token and source leader.
+    leader_exposure_by_token: Arc<RwLock<HashMap<U256, Vec<LeaderExposureLot>>>>,
+    /// Estimated realized PnL attribution by leader from generated smart-money exits.
+    leader_realized_totals: Arc<RwLock<HashMap<String, LeaderAttributionTotals>>>,
 }
 
 impl SmartMoneyStrategy {
     pub fn new(
-        config: SmartMoneyConfig,
+        config: Arc<ArcSwap<SmartMoneyConfig>>,
         gas_cost_usd: Decimal,
         deps: SmartMoneyStrategyDeps,
     ) -> Self {
@@ -152,11 +186,17 @@ impl SmartMoneyStrategy {
             markets,
             position_first_seen_at: Arc::new(RwLock::new(HashMap::new())),
             peak_bid_by_token: Arc::new(RwLock::new(HashMap::new())),
+            leader_exposure_by_token: Arc::new(RwLock::new(HashMap::new())),
+            leader_realized_totals: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     fn now(&self) -> DateTime<Utc> {
         (self.now)()
+    }
+
+    fn config(&self) -> Arc<SmartMoneyConfig> {
+        self.config.load_full()
     }
 
     /// Update the internal markets lookup from the latest scan data.
@@ -177,9 +217,24 @@ impl SmartMoneyStrategy {
     /// produce a single aggregated signal with combined target size.
     fn aggregate_signals(&self, signals: &[SmartMoneySignal]) -> HashMap<U256, AggregatedSignal> {
         let mut map: HashMap<U256, AggregatedSignal> = HashMap::new();
-        let follow_ratio = self.config.follow_ratio;
+        let config = self.config();
+        let follow_ratio = config.follow_ratio;
+        let blocked_wallets: std::collections::HashSet<String> = config
+            .blocked_wallets
+            .iter()
+            .map(|address| address.to_lowercase())
+            .collect();
 
         for sig in signals {
+            if blocked_wallets.contains(&sig.wallet_address.to_lowercase()) {
+                continue;
+            }
+            if matches!(sig.signal_type, SignalType::Entry | SignalType::Increase)
+                && !self.signal_matches_leader_route(sig, &config)
+            {
+                self.record_route_mismatch(sig);
+                continue;
+            }
             let entry = map.entry(sig.token_id).or_insert_with(|| AggregatedSignal {
                 signal_type: sig.signal_type,
                 token_id: sig.token_id,
@@ -193,6 +248,9 @@ impl SmartMoneyStrategy {
                 latest_detected_at: sig.detected_at,
                 has_onchain_source: false,
                 has_data_api_source: false,
+                leader_addresses: Vec::new(),
+                leader_labels: Vec::new(),
+                leader_contributions: Vec::new(),
             });
 
             match sig.signal_type {
@@ -230,6 +288,43 @@ impl SmartMoneyStrategy {
                 SmartMoneySignalSource::DataApi => entry.has_data_api_source = true,
                 SmartMoneySignalSource::Onchain => entry.has_onchain_source = true,
             }
+            if !entry
+                .leader_addresses
+                .iter()
+                .any(|address| address == &sig.wallet_address)
+            {
+                entry.leader_addresses.push(sig.wallet_address.clone());
+            }
+            if let Some(label) = sig.wallet_label.as_ref()
+                && !label.is_empty()
+                && !entry.leader_labels.iter().any(|existing| existing == label)
+            {
+                entry.leader_labels.push(label.clone());
+            }
+            let weighted_size = match sig.signal_type {
+                SignalType::Entry | SignalType::Increase => {
+                    sig.wallet_size * follow_ratio * sig.wallet_weight
+                }
+                SignalType::Decrease | SignalType::Exit => {
+                    sig.delta * follow_ratio * sig.wallet_weight
+                }
+            };
+            if let Some(existing) = entry
+                .leader_contributions
+                .iter_mut()
+                .find(|existing| existing.address == sig.wallet_address)
+            {
+                existing.weighted_size += weighted_size;
+                if existing.label.is_empty() {
+                    existing.label = sig.wallet_label.clone().unwrap_or_default();
+                }
+            } else {
+                entry.leader_contributions.push(LeaderContribution {
+                    address: sig.wallet_address.clone(),
+                    label: sig.wallet_label.clone().unwrap_or_default(),
+                    weighted_size,
+                });
+            }
         }
 
         for entry in map.values_mut() {
@@ -239,6 +334,65 @@ impl SmartMoneyStrategy {
         }
 
         map
+    }
+
+    fn signal_matches_leader_route(
+        &self,
+        signal: &SmartMoneySignal,
+        config: &SmartMoneyConfig,
+    ) -> bool {
+        let Some(route) = config
+            .leader_routes
+            .iter()
+            .find(|route| route.address.eq_ignore_ascii_case(&signal.wallet_address))
+        else {
+            return true;
+        };
+
+        let markets = self.markets.read().unwrap();
+        let Some(market) = markets.get(&signal.condition_id) else {
+            return false;
+        };
+
+        let category_match = route.categories.is_empty()
+            || market.category.as_deref().is_some_and(|category| {
+                route
+                    .categories
+                    .iter()
+                    .any(|allowed| category.eq_ignore_ascii_case(allowed.trim()))
+            });
+        let question_match = route.question_keywords.is_empty()
+            || contains_any_keyword(&market.question, &route.question_keywords);
+        let event_title_match = route.event_title_keywords.is_empty()
+            || market
+                .event_title
+                .as_deref()
+                .is_some_and(|title| contains_any_keyword(title, &route.event_title_keywords));
+
+        category_match && question_match && event_title_match
+    }
+
+    fn record_route_mismatch(&self, signal: &SmartMoneySignal) {
+        record_smart_money_decision(SmartMoneyDecision {
+            recorded_at: self.now(),
+            token_id: signal.token_id.to_string(),
+            condition_id: format!("{:#x}", signal.condition_id),
+            signal_type: match signal.signal_type {
+                SignalType::Entry => "entry",
+                SignalType::Increase => "increase",
+                SignalType::Decrease => "decrease",
+                SignalType::Exit => "exit",
+            }
+            .into(),
+            accepted: false,
+            reject_reason: Some(SmartMoneyRejectReason::RouteMismatch.as_str().to_string()),
+            wallet_count: 1,
+            max_wallet_weight: signal.wallet_weight,
+            source_data_api: matches!(signal.source, SmartMoneySignalSource::DataApi),
+            source_onchain: matches!(signal.source, SmartMoneySignalSource::Onchain),
+            leader_addresses: vec![signal.wallet_address.clone()],
+            leader_labels: signal.wallet_label.clone().into_iter().collect(),
+        });
     }
 
     fn signal_age_secs(&self, agg: &AggregatedSignal) -> i64 {
@@ -261,7 +415,8 @@ impl SmartMoneyStrategy {
         if age_secs <= 0 {
             return Decimal::ONE;
         }
-        let half_life = self.config.freshness_half_life_secs.max(1) as f64;
+        let config = self.config();
+        let half_life = config.freshness_half_life_secs.max(1) as f64;
         let multiplier = 0.5_f64.powf(age_secs as f64 / half_life);
         Decimal::from_f64(multiplier)
             .unwrap_or(Decimal::ONE)
@@ -273,21 +428,24 @@ impl SmartMoneyStrategy {
         if consensus_wallets <= 1 {
             return Decimal::ONE;
         }
+        let config = self.config();
         let bonus = (Decimal::from((consensus_wallets - 1) as u64)
-            * self.config.consensus_bonus_per_wallet)
-            .min(self.config.consensus_bonus_cap);
+            * config.consensus_bonus_per_wallet)
+            .min(config.consensus_bonus_cap);
         Decimal::ONE + bonus
     }
 
     fn delta_ratio_multiplier(&self, average_delta_ratio: Decimal) -> Decimal {
+        let config = self.config();
         average_delta_ratio
-            .max(self.config.leader_delta_ratio_floor)
+            .max(config.leader_delta_ratio_floor)
             .min(Decimal::ONE)
     }
 
     fn concentration_multiplier(&self, existing_size: Decimal, best_ask: Decimal) -> Decimal {
         let existing_notional = existing_size * best_ask;
-        let soft_cap = self.config.position_concentration_soft_cap_usdc;
+        let config = self.config();
+        let soft_cap = config.position_concentration_soft_cap_usdc;
         if existing_notional <= Decimal::ZERO
             || soft_cap <= Decimal::ZERO
             || existing_notional <= soft_cap
@@ -295,7 +453,7 @@ impl SmartMoneyStrategy {
             return Decimal::ONE;
         }
         (soft_cap / existing_notional)
-            .max(self.config.position_concentration_min_multiplier)
+            .max(config.position_concentration_min_multiplier)
             .min(Decimal::ONE)
     }
 
@@ -322,6 +480,8 @@ impl SmartMoneyStrategy {
             max_wallet_weight: agg.max_wallet_weight,
             source_data_api: agg.has_data_api_source,
             source_onchain: agg.has_onchain_source,
+            leader_addresses: agg.leader_addresses.clone(),
+            leader_labels: agg.leader_labels.clone(),
         });
     }
 
@@ -329,13 +489,14 @@ impl SmartMoneyStrategy {
         &self,
         agg: &AggregatedSignal,
     ) -> Result<EntryGateContext, SmartMoneyRejectReason> {
-        if self.signal_age_secs(agg) > self.config.max_signal_age_secs as i64 {
+        let config = self.config();
+        if self.signal_age_secs(agg) > config.max_signal_age_secs as i64 {
             return Err(SmartMoneyRejectReason::SignalTooOld);
         }
-        if agg.max_wallet_weight < self.config.min_wallet_weight {
+        if agg.max_wallet_weight < config.min_wallet_weight {
             return Err(SmartMoneyRejectReason::WalletWeightTooLow);
         }
-        if agg.consensus_wallets < self.config.min_consensus_wallets {
+        if agg.consensus_wallets < config.min_consensus_wallets {
             return Err(SmartMoneyRejectReason::ConsensusTooWeak);
         }
         let book =
@@ -351,16 +512,16 @@ impl SmartMoneyStrategy {
         if best_ask <= Decimal::ZERO || best_ask >= Decimal::ONE || best_bid < Decimal::ZERO {
             return Err(SmartMoneyRejectReason::InvalidPrice);
         }
-        if best_ask > self.config.max_entry_price {
+        if best_ask > config.max_entry_price {
             return Err(SmartMoneyRejectReason::EntryPriceTooHigh);
         }
         let spread_bps = Self::compute_spread_bps(best_bid, best_ask);
-        if spread_bps > Decimal::from(self.config.max_spread_bps) {
+        if spread_bps > Decimal::from(config.max_spread_bps) {
             return Err(SmartMoneyRejectReason::SpreadTooWide);
         }
         let top_level_depth_usdc =
             Self::top_level_ask_depth_usdc(&book).ok_or(SmartMoneyRejectReason::DepthTooThin)?;
-        if top_level_depth_usdc < self.config.min_top_level_depth_usdc {
+        if top_level_depth_usdc < config.min_top_level_depth_usdc {
             return Err(SmartMoneyRejectReason::DepthTooThin);
         }
         let markets = self.markets.read().unwrap();
@@ -368,7 +529,7 @@ impl SmartMoneyStrategy {
             .get(&agg.condition_id)
             .cloned()
             .ok_or(SmartMoneyRejectReason::MissingOrderbook)?;
-        if market.liquidity < self.config.min_market_liquidity {
+        if market.liquidity < config.min_market_liquidity {
             return Err(SmartMoneyRejectReason::MarketLiquidityTooLow);
         }
 
@@ -384,7 +545,7 @@ impl SmartMoneyStrategy {
             * freshness_multiplier
             * delta_ratio_multiplier
             * concentration_multiplier;
-        let max_shares = self.config.max_position_usdc / best_ask;
+        let max_shares = config.max_position_usdc / best_ask;
         let remaining = (max_shares - existing).max(Decimal::ZERO);
         if remaining <= Decimal::ZERO {
             return Err(SmartMoneyRejectReason::PositionCapReached);
@@ -461,8 +622,9 @@ impl SmartMoneyStrategy {
             "SmartMoney: following entry signal"
         );
 
+        let opportunity_id = Uuid::now_v7();
         let opp = TradingOpportunity {
-            id: Uuid::now_v7(),
+            id: opportunity_id,
             strategy_type: StrategyType::SmartMoney,
             condition_id: agg.condition_id,
             question: gate.market.question.clone(),
@@ -484,13 +646,17 @@ impl SmartMoneyStrategy {
                 condition_id: agg.condition_id,
             },
         };
+        record_smart_money_opportunity_attribution(
+            opportunity_id,
+            self.opportunity_attribution_slices(agg, gate.final_size),
+        );
         Ok(opp)
     }
 
     /// Process an aggregated exit signal → TradingOpportunity.
     fn process_exit_signal(&self, agg: &AggregatedSignal) -> Option<TradingOpportunity> {
         if matches!(agg.signal_type, SignalType::Decrease)
-            && agg.average_delta_ratio < self.config.leader_exit_min_delta_ratio
+            && agg.average_delta_ratio < self.config().leader_exit_min_delta_ratio
         {
             return None;
         }
@@ -508,6 +674,11 @@ impl SmartMoneyStrategy {
 
         let markets = self.markets.read().unwrap();
         let market = markets.get(&agg.condition_id)?;
+        let avg_cost = (self.get_held_positions)()
+            .into_iter()
+            .find(|(token_id, _, _)| *token_id == agg.token_id)
+            .map(|(_, _, avg_cost)| avg_cost)
+            .unwrap_or(best_bid);
 
         // Sell min(our position, proportional to wallet exit)
         let sell_size = our_position.min(agg.target_size);
@@ -529,14 +700,35 @@ impl SmartMoneyStrategy {
             price = %best_bid,
             "SmartMoney: following exit signal"
         );
+        let est = self.profit_calc.directional_sell_profit(
+            best_bid,
+            avg_cost,
+            sell_size,
+            market.fee_rate_bps,
+        );
+        let attributed_leaders =
+            self.attribute_exit_to_leaders(agg.token_id, sell_size, est.net_profit);
+        record_smart_money_exit_decision(SmartMoneyExitDecision {
+            recorded_at: self.now(),
+            token_id: agg.token_id.to_string(),
+            condition_id: format!("{:#x}", agg.condition_id),
+            reason: "leader_exit".to_string(),
+            question: market.question.clone(),
+            best_bid,
+            avg_cost,
+            size: sell_size,
+            estimated_profit: est.net_profit,
+            attributed_leaders: attributed_leaders.clone(),
+        });
 
-        Some(TradingOpportunity {
-            id: Uuid::now_v7(),
+        let opportunity_id = Uuid::now_v7();
+        let opp = TradingOpportunity {
+            id: opportunity_id,
             strategy_type: StrategyType::SmartMoney,
             condition_id: agg.condition_id,
             question: format!("[EXIT] {}", market.question),
             spread: Decimal::ZERO,
-            estimated_profit: Decimal::ZERO,
+            estimated_profit: est.net_profit,
             size: sell_size,
             min_profit_retention_ratio_multiplier: None,
             max_slippage_bps_multiplier: None,
@@ -552,7 +744,9 @@ impl SmartMoneyStrategy {
                 size: sell_size,
                 condition_id: agg.condition_id,
             },
-        })
+        };
+        record_smart_money_opportunity_attribution(opportunity_id, attributed_leaders.clone());
+        Some(opp)
     }
 
     fn bps_to_ratio(bps: u32) -> Decimal {
@@ -576,6 +770,196 @@ impl SmartMoneyStrategy {
         }
     }
 
+    fn record_entry_attribution(
+        &self,
+        token_id: U256,
+        agg: &AggregatedSignal,
+        filled_size: Decimal,
+    ) {
+        if filled_size <= Decimal::ZERO || agg.leader_contributions.is_empty() {
+            return;
+        }
+        let total_weight: Decimal = agg
+            .leader_contributions
+            .iter()
+            .map(|contribution| contribution.weighted_size.max(Decimal::ZERO))
+            .sum();
+        if total_weight <= Decimal::ZERO {
+            return;
+        }
+        let mut exposures = self.leader_exposure_by_token.write().unwrap();
+        let token_lots = exposures.entry(token_id).or_default();
+        for contribution in &agg.leader_contributions {
+            let ratio = contribution.weighted_size / total_weight;
+            let attributed_size = filled_size * ratio;
+            if attributed_size <= Decimal::ZERO {
+                continue;
+            }
+            if let Some(existing) = token_lots
+                .iter_mut()
+                .find(|existing| existing.address == contribution.address)
+            {
+                existing.size += attributed_size;
+                if existing.label.is_empty() {
+                    existing.label = contribution.label.clone();
+                }
+            } else {
+                token_lots.push(LeaderExposureLot {
+                    address: contribution.address.clone(),
+                    label: contribution.label.clone(),
+                    size: attributed_size,
+                });
+            }
+        }
+        drop(exposures);
+        self.publish_leader_attribution_snapshot();
+    }
+
+    fn opportunity_attribution_slices(
+        &self,
+        agg: &AggregatedSignal,
+        size: Decimal,
+    ) -> Vec<SmartMoneyLeaderAttributionSlice> {
+        if size <= Decimal::ZERO || agg.leader_contributions.is_empty() {
+            return Vec::new();
+        }
+        let total_weight: Decimal = agg
+            .leader_contributions
+            .iter()
+            .map(|contribution| contribution.weighted_size.max(Decimal::ZERO))
+            .sum();
+        if total_weight <= Decimal::ZERO {
+            return Vec::new();
+        }
+        agg.leader_contributions
+            .iter()
+            .filter_map(|contribution| {
+                let ratio = contribution.weighted_size / total_weight;
+                let attributed_size = size * ratio;
+                if attributed_size <= Decimal::ZERO {
+                    None
+                } else {
+                    Some(SmartMoneyLeaderAttributionSlice {
+                        leader: if !contribution.label.is_empty() {
+                            contribution.label.clone()
+                        } else {
+                            contribution.address.clone()
+                        },
+                        estimated_size: attributed_size,
+                        estimated_profit: Decimal::ZERO,
+                    })
+                }
+            })
+            .collect()
+    }
+
+    fn attribute_exit_to_leaders(
+        &self,
+        token_id: U256,
+        exit_size: Decimal,
+        estimated_profit: Decimal,
+    ) -> Vec<SmartMoneyLeaderAttributionSlice> {
+        if exit_size <= Decimal::ZERO {
+            return Vec::new();
+        }
+        let mut exposures = self.leader_exposure_by_token.write().unwrap();
+        let Some(token_lots) = exposures.get_mut(&token_id) else {
+            return Vec::new();
+        };
+        let total_open: Decimal = token_lots
+            .iter()
+            .map(|lot| lot.size.max(Decimal::ZERO))
+            .sum();
+        if total_open <= Decimal::ZERO {
+            return Vec::new();
+        }
+
+        let attributed_exit_size = exit_size.min(total_open);
+        let mut slices = Vec::new();
+        let mut realized = self.leader_realized_totals.write().unwrap();
+
+        for lot in token_lots.iter_mut() {
+            if lot.size <= Decimal::ZERO {
+                continue;
+            }
+            let ratio = lot.size / total_open;
+            let leader_exit_size = attributed_exit_size * ratio;
+            let leader_profit = estimated_profit * ratio;
+            if leader_exit_size <= Decimal::ZERO {
+                continue;
+            }
+            lot.size = (lot.size - leader_exit_size).max(Decimal::ZERO);
+            let leader_key = if !lot.label.is_empty() {
+                lot.label.clone()
+            } else {
+                lot.address.clone()
+            };
+            let entry = realized.entry(leader_key.clone()).or_default();
+            if entry.label.is_empty() {
+                entry.label = leader_key.clone();
+            }
+            entry.estimated_realized_pnl += leader_profit;
+            entry.estimated_exited_size += leader_exit_size;
+            entry.estimated_exit_count += 1;
+            slices.push(SmartMoneyLeaderAttributionSlice {
+                leader: leader_key,
+                estimated_size: leader_exit_size,
+                estimated_profit: leader_profit,
+            });
+        }
+
+        token_lots.retain(|lot| lot.size > Decimal::ZERO);
+        if token_lots.is_empty() {
+            exposures.remove(&token_id);
+        }
+        drop(realized);
+        drop(exposures);
+        self.publish_leader_attribution_snapshot();
+        slices
+    }
+
+    fn publish_leader_attribution_snapshot(&self) {
+        let exposures = self.leader_exposure_by_token.read().unwrap();
+        let realized = self.leader_realized_totals.read().unwrap();
+        let mut open_sizes: HashMap<String, Decimal> = HashMap::new();
+        for lots in exposures.values() {
+            for lot in lots {
+                let leader = if !lot.label.is_empty() {
+                    lot.label.clone()
+                } else {
+                    lot.address.clone()
+                };
+                *open_sizes.entry(leader).or_insert(Decimal::ZERO) += lot.size;
+            }
+        }
+        let mut rows: Vec<_> = realized
+            .iter()
+            .map(|(leader, totals)| SmartMoneyLeaderPnlAttributionEntry {
+                leader: leader.clone(),
+                estimated_open_size: open_sizes.remove(leader).unwrap_or(Decimal::ZERO),
+                estimated_exited_size: totals.estimated_exited_size,
+                estimated_realized_pnl: totals.estimated_realized_pnl,
+                estimated_exit_count: totals.estimated_exit_count,
+            })
+            .collect();
+        rows.extend(open_sizes.into_iter().map(|(leader, open_size)| {
+            SmartMoneyLeaderPnlAttributionEntry {
+                leader,
+                estimated_open_size: open_size,
+                estimated_exited_size: Decimal::ZERO,
+                estimated_realized_pnl: Decimal::ZERO,
+                estimated_exit_count: 0,
+            }
+        }));
+        rows.sort_by(|a, b| {
+            b.estimated_realized_pnl
+                .cmp(&a.estimated_realized_pnl)
+                .then_with(|| b.estimated_open_size.cmp(&a.estimated_open_size))
+                .then_with(|| a.leader.cmp(&b.leader))
+        });
+        record_smart_money_leader_pnl_attribution(rows);
+    }
+
     fn build_exit_opportunity(
         &self,
         token_id: U256,
@@ -590,6 +974,7 @@ impl SmartMoneyStrategy {
         let est = self
             .profit_calc
             .directional_sell_profit(best_bid, avg_cost, size, fee_rate_bps);
+        let attributed_leaders = self.attribute_exit_to_leaders(token_id, size, est.net_profit);
         tracing::info!(
             token_id = %token_id,
             best_bid = %best_bid,
@@ -606,9 +991,12 @@ impl SmartMoneyStrategy {
             best_bid,
             avg_cost,
             size,
+            estimated_profit: est.net_profit,
+            attributed_leaders: attributed_leaders.clone(),
         });
-        TradingOpportunity {
-            id: Uuid::now_v7(),
+        let opportunity_id = Uuid::now_v7();
+        let opp = TradingOpportunity {
+            id: opportunity_id,
             strategy_type: StrategyType::SmartMoney,
             condition_id,
             question: format!("[EXIT:{reason}] {question}"),
@@ -629,7 +1017,9 @@ impl SmartMoneyStrategy {
                 size,
                 condition_id,
             },
-        }
+        };
+        record_smart_money_opportunity_attribution(opportunity_id, attributed_leaders.clone());
+        opp
     }
 
     /// Scan held positions for stale/profit-protect/drawdown/capital-efficiency exits.
@@ -684,19 +1074,19 @@ impl SmartMoneyStrategy {
                 *entry
             };
             let profit_trigger_price = *avg_cost
-                * (Decimal::ONE + Self::bps_to_ratio(self.config.profit_protect_min_gain_bps));
+                * (Decimal::ONE + Self::bps_to_ratio(self.config().profit_protect_min_gain_bps));
             let profit_protect_floor = peak_bid
-                * (Decimal::ONE - Self::bps_to_ratio(self.config.profit_protect_drawdown_bps));
+                * (Decimal::ONE - Self::bps_to_ratio(self.config().profit_protect_drawdown_bps));
             let drawdown_floor =
-                *avg_cost * (Decimal::ONE - Self::bps_to_ratio(self.config.max_drawdown_bps));
+                *avg_cost * (Decimal::ONE - Self::bps_to_ratio(self.config().max_drawdown_bps));
 
             let exit_reason = if best_bid <= drawdown_floor {
                 Some("drawdown")
             } else if peak_bid >= profit_trigger_price && best_bid <= profit_protect_floor {
                 Some("profit_protect")
-            } else if held_secs >= self.config.max_hold_secs as i64 {
+            } else if held_secs >= self.config().max_hold_secs as i64 {
                 Some("stale_follow")
-            } else if best_bid >= self.config.capital_efficiency_threshold {
+            } else if best_bid >= self.config().capital_efficiency_threshold {
                 Some("capital_efficiency")
             } else {
                 None
@@ -716,8 +1106,19 @@ impl SmartMoneyStrategy {
             }
         }
 
+        self.publish_leader_attribution_snapshot();
+
         exits
     }
+}
+
+fn contains_any_keyword(haystack: &str, keywords: &[String]) -> bool {
+    let haystack = haystack.to_lowercase();
+    keywords
+        .iter()
+        .map(|keyword| keyword.trim().to_lowercase())
+        .filter(|keyword| !keyword.is_empty())
+        .any(|keyword| haystack.contains(&keyword))
 }
 
 #[async_trait]
@@ -752,6 +1153,7 @@ impl Strategy for SmartMoneyStrategy {
                 SignalType::Entry | SignalType::Increase => match self.process_entry_signal(agg) {
                     Ok(opp) => {
                         self.record_decision(agg, true, None);
+                        self.record_entry_attribution(agg.token_id, agg, opp.size);
                         opps.push(opp);
                     }
                     Err(reason) => {
@@ -776,6 +1178,7 @@ impl Strategy for SmartMoneyStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arc_swap::ArcSwap;
     use pa_core::types::{OrderBook, Outcome, PriceLevel, TokenInfo};
     use pa_market_data::wallet_tracker::SmartMoneySignalSource;
     use rust_decimal_macros::dec;
@@ -884,7 +1287,7 @@ mod tests {
         let markets_arc = Arc::new(RwLock::new(HashMap::from([(market.condition_id, market)])));
 
         SmartMoneyStrategy::new(
-            config,
+            Arc::new(ArcSwap::from_pointee(config)),
             dec!(0.00),
             SmartMoneyStrategyDeps {
                 get_orderbook: Box::new(move |_| Some((*book).clone())),
@@ -927,7 +1330,7 @@ mod tests {
         ];
 
         let strategy = SmartMoneyStrategy {
-            config,
+            config: Arc::new(ArcSwap::from_pointee(config)),
             profit_calc: ProfitCalculator::new(dec!(0)),
             get_orderbook: Box::new(|_| None),
             get_available_capital: Box::new(|| dec!(1000)),
@@ -938,6 +1341,8 @@ mod tests {
             markets: Arc::new(RwLock::new(HashMap::new())),
             position_first_seen_at: Arc::new(RwLock::new(HashMap::new())),
             peak_bid_by_token: Arc::new(RwLock::new(HashMap::new())),
+            leader_exposure_by_token: Arc::new(RwLock::new(HashMap::new())),
+            leader_realized_totals: Arc::new(RwLock::new(HashMap::new())),
         };
 
         let aggregated = strategy.aggregate_signals(&signals);
@@ -946,6 +1351,133 @@ mod tests {
         assert_eq!(agg.wallet_count, 2);
         // 1000 * 0.10 * 1.0 + 2000 * 0.10 * 0.5 = 100 + 100 = 200
         assert_eq!(agg.target_size, dec!(200));
+    }
+
+    #[test]
+    fn test_leader_route_filters_mismatched_entry_signal() {
+        let token_id = U256::from(42u64);
+        let cid = B256::ZERO;
+        let market = MarketInfo {
+            category: Some("politics".into()),
+            ..make_market(cid, token_id)
+        };
+        let config = SmartMoneyConfig {
+            leader_routes: vec![pa_core::config::SmartMoneyLeaderRouteConfig {
+                address: "0xaaa".into(),
+                categories: vec!["crypto".into()],
+                question_keywords: vec![],
+                event_title_keywords: vec![],
+            }],
+            ..make_config()
+        };
+        let strategy = make_strategy_with_config(
+            make_book(vec![(dec!(0.59), dec!(500))], vec![(dec!(0.60), dec!(500))]),
+            Decimal::ZERO,
+            dec!(1000),
+            vec![],
+            market,
+            config,
+        );
+        let signals = vec![make_signal(
+            SignalType::Entry,
+            "0xaaa",
+            Decimal::ONE,
+            token_id,
+            cid,
+            dec!(500),
+            dec!(500),
+        )];
+
+        let aggregated = strategy.aggregate_signals(&signals);
+        assert!(aggregated.is_empty());
+    }
+
+    #[test]
+    fn test_leader_route_allows_matching_entry_signal() {
+        let token_id = U256::from(42u64);
+        let cid = B256::ZERO;
+        let market = MarketInfo {
+            category: Some("crypto".into()),
+            ..make_market(cid, token_id)
+        };
+        let config = SmartMoneyConfig {
+            leader_routes: vec![pa_core::config::SmartMoneyLeaderRouteConfig {
+                address: "0xaaa".into(),
+                categories: vec!["crypto".into()],
+                question_keywords: vec![],
+                event_title_keywords: vec![],
+            }],
+            ..make_config()
+        };
+        let strategy = make_strategy_with_config(
+            make_book(vec![(dec!(0.59), dec!(500))], vec![(dec!(0.60), dec!(500))]),
+            Decimal::ZERO,
+            dec!(1000),
+            vec![],
+            market,
+            config,
+        );
+        let signals = vec![make_signal(
+            SignalType::Entry,
+            "0xaaa",
+            Decimal::ONE,
+            token_id,
+            cid,
+            dec!(500),
+            dec!(500),
+        )];
+
+        let aggregated = strategy.aggregate_signals(&signals);
+        assert!(aggregated.contains_key(&token_id));
+    }
+
+    #[test]
+    fn test_leader_pnl_attribution_tracks_entry_and_exit() {
+        pa_monitor::diagnostics::clear_smart_money_leader_pnl_attribution();
+        let token_id = U256::from(42u64);
+        let cid = B256::ZERO;
+        let market = make_market(cid, token_id);
+        let strategy = make_strategy_with_config(
+            make_book(vec![(dec!(0.59), dec!(500))], vec![(dec!(0.60), dec!(500))]),
+            Decimal::ZERO,
+            dec!(1000),
+            vec![],
+            market.clone(),
+            make_config(),
+        );
+        let signals = vec![make_signal(
+            SignalType::Entry,
+            "0xaaa",
+            Decimal::ONE,
+            token_id,
+            cid,
+            dec!(500),
+            dec!(500),
+        )];
+        let aggregated = strategy.aggregate_signals(&signals);
+        let agg = aggregated.get(&token_id).unwrap();
+        let opp = strategy.process_entry_signal(agg).unwrap();
+        strategy.record_entry_attribution(token_id, agg, opp.size);
+
+        let snapshot = pa_monitor::diagnostics::smart_money_leader_pnl_attribution();
+        assert_eq!(snapshot.len(), 1);
+        assert!(snapshot[0].estimated_open_size > Decimal::ZERO);
+
+        let exit_opp = strategy.build_exit_opportunity(
+            token_id,
+            dec!(20),
+            dec!(0.50),
+            dec!(0.70),
+            cid,
+            market.question,
+            market.fee_rate_bps,
+            "capital_efficiency",
+        );
+        assert!(exit_opp.estimated_profit > Decimal::ZERO);
+        let snapshot = pa_monitor::diagnostics::smart_money_leader_pnl_attribution();
+        assert_eq!(snapshot.len(), 1);
+        assert!(snapshot[0].estimated_realized_pnl > Decimal::ZERO);
+        assert!(snapshot[0].estimated_open_size < opp.size);
     }
 
     #[test]
@@ -1071,7 +1603,7 @@ mod tests {
         let markets_arc = Arc::new(RwLock::new(HashMap::from([(cid, market)])));
 
         let strategy = SmartMoneyStrategy::new(
-            config,
+            Arc::new(ArcSwap::from_pointee(config)),
             dec!(0.00),
             SmartMoneyStrategyDeps {
                 get_orderbook: Box::new(move |_| Some((*book_arc).clone())),
@@ -1351,10 +1883,10 @@ mod tests {
         );
         signal.detected_at = Utc::now() - chrono::Duration::seconds(120);
         let strategy = SmartMoneyStrategy::new(
-            SmartMoneyConfig {
+            Arc::new(ArcSwap::from_pointee(SmartMoneyConfig {
                 max_signal_age_secs: 90,
                 ..make_config()
-            },
+            })),
             dec!(0.00),
             SmartMoneyStrategyDeps {
                 get_orderbook: Box::new({

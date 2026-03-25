@@ -99,6 +99,7 @@ struct SegmentKey {
     asset: String,
     asset_class: String,
     horizon: String,
+    resolution_bucket: String,
     market_type: String,
     event_subtype: String,
 }
@@ -255,7 +256,7 @@ fn render_override_toml(emitted: &BTreeMap<SegmentKey, SegmentSummary>, args: &A
     for (key, summary) in emitted {
         out.push('\n');
         out.push_str(&format!(
-            "# {} / {} / {} / {} / {} | samples={} | brier_before={:.6} | brier_after={:.6}\n",
+            "# {} / {} / {} / {} / {} / {} | samples={} | brier_before={:.6} | brier_after={:.6}\n",
             key.asset,
             if key.asset_class.is_empty() {
                 "asset"
@@ -263,6 +264,7 @@ fn render_override_toml(emitted: &BTreeMap<SegmentKey, SegmentSummary>, args: &A
                 key.asset_class.as_str()
             },
             key.horizon,
+            key.resolution_bucket,
             key.market_type,
             if key.event_subtype.is_empty() {
                 "any"
@@ -279,6 +281,10 @@ fn render_override_toml(emitted: &BTreeMap<SegmentKey, SegmentSummary>, args: &A
             out.push_str(&format!("asset_class = {:?}\n", key.asset_class));
         }
         out.push_str(&format!("horizon = {:?}\n", key.horizon));
+        out.push_str(&format!(
+            "resolution_bucket = {:?}\n",
+            key.resolution_bucket
+        ));
         out.push_str(&format!("market_type = {:?}\n", key.market_type));
         if !key.event_subtype.is_empty() {
             out.push_str(&format!("event_subtype = {:?}\n", key.event_subtype));
@@ -327,6 +333,7 @@ fn merge_existing_overrides(
             asset: key.asset.clone(),
             asset_class: key.asset_class.clone(),
             horizon: key.horizon.clone(),
+            resolution_bucket: key.resolution_bucket.clone(),
             market_type: key.market_type.clone(),
             event_subtype: key.event_subtype.clone(),
             probability_calibration: Some(new_probability),
@@ -397,6 +404,8 @@ fn override_matches_segment(entry: &CryptoCalibrationOverride, key: &SegmentKey)
     entry.asset == key.asset
         && normalize_selector(&entry.asset_class) == normalize_selector(&key.asset_class)
         && normalize_selector(&entry.horizon) == normalize_selector(&key.horizon)
+        && normalize_selector(&entry.resolution_bucket)
+            == normalize_selector(&key.resolution_bucket)
         && normalize_selector(&entry.market_type) == normalize_selector(&key.market_type)
         && normalize_selector(&entry.event_subtype) == normalize_selector(&key.event_subtype)
 }
@@ -509,6 +518,12 @@ fn render_single_override_block(override_row: &CryptoCalibrationOverride) -> Str
     }
     if !override_row.horizon.is_empty() {
         out.push_str(&format!("horizon = {:?}\n", override_row.horizon));
+    }
+    if !override_row.resolution_bucket.is_empty() {
+        out.push_str(&format!(
+            "resolution_bucket = {:?}\n",
+            override_row.resolution_bucket
+        ));
     }
     if !override_row.market_type.is_empty() {
         out.push_str(&format!("market_type = {:?}\n", override_row.market_type));
@@ -707,9 +722,18 @@ fn infer_segment_key(sample: &CalibrationSampleLine, args: &Args) -> Result<Segm
             args.medium_horizon_max_days,
         )
         .to_string(),
+        resolution_bucket: resolution_bucket(days_to_resolution).to_string(),
         market_type,
         event_subtype,
     })
+}
+
+fn resolution_bucket(days_to_resolution: u32) -> &'static str {
+    match days_to_resolution {
+        0 => "same_day",
+        1 => "next_day",
+        _ => "legacy",
+    }
 }
 
 fn normalize_asset(asset: &str) -> String {
@@ -1062,6 +1086,7 @@ mod tests {
             asset: "BTCUSDT".to_string(),
             asset_class: String::new(),
             horizon: "long".to_string(),
+            resolution_bucket: "legacy".to_string(),
             market_type: "binary".to_string(),
             event_subtype: String::new(),
         };
@@ -1104,6 +1129,7 @@ mod tests {
                         asset: "*".to_string(),
                         asset_class: "alt".to_string(),
                         horizon: "short".to_string(),
+                        resolution_bucket: "next_day".to_string(),
                         market_type: "binary".to_string(),
                         event_subtype: "unlock".to_string(),
                     },
@@ -1115,6 +1141,7 @@ mod tests {
                         asset: "*".to_string(),
                         asset_class: "alt".to_string(),
                         horizon: "short".to_string(),
+                        resolution_bucket: "next_day".to_string(),
                         market_type: "range".to_string(),
                         event_subtype: "unlock".to_string(),
                     },
@@ -1143,6 +1170,7 @@ mod tests {
                     asset: "*".to_string(),
                     asset_class: "major".to_string(),
                     horizon: "medium".to_string(),
+                    resolution_bucket: "legacy".to_string(),
                     market_type: "binary".to_string(),
                     event_subtype: "regulatory".to_string(),
                 },
@@ -1165,6 +1193,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: "alt".to_string(),
                 horizon: "short".to_string(),
+                resolution_bucket: "next_day".to_string(),
                 market_type: "binary".to_string(),
                 event_subtype: "unlock".to_string(),
             },
@@ -1211,6 +1240,7 @@ mod tests {
 asset = "*"
 asset_class = "alt"
 horizon = "short"
+resolution_bucket = "next_day"
 market_type = "binary"
 event_subtype = "unlock"
 probability_calibration = 0.91
@@ -1226,6 +1256,7 @@ size_multiplier = 0.82
                 asset: "*".to_string(),
                 asset_class: "alt".to_string(),
                 horizon: "short".to_string(),
+                resolution_bucket: "next_day".to_string(),
                 market_type: "binary".to_string(),
                 event_subtype: "unlock".to_string(),
             },
@@ -1265,6 +1296,7 @@ size_multiplier = 0.82
 asset = "*"
 asset_class = "alt"
 horizon = "short"
+resolution_bucket = "next_day"
 market_type = "binary"
 event_subtype = "unlock"
 probability_calibration = 0.91
@@ -1280,6 +1312,7 @@ size_multiplier = 0.82
                 asset: "*".to_string(),
                 asset_class: "alt".to_string(),
                 horizon: "short".to_string(),
+                resolution_bucket: "next_day".to_string(),
                 market_type: "binary".to_string(),
                 event_subtype: "unlock".to_string(),
             },
@@ -1332,6 +1365,7 @@ sigma_multiplier = 1.10
                 asset: "*".to_string(),
                 asset_class: "alt".to_string(),
                 horizon: "short".to_string(),
+                resolution_bucket: "next_day".to_string(),
                 market_type: "binary".to_string(),
                 event_subtype: "unlock".to_string(),
             },
@@ -1375,6 +1409,7 @@ sigma_multiplier = 1.10
                 asset: "*".to_string(),
                 asset_class: "alt".to_string(),
                 horizon: "short".to_string(),
+                resolution_bucket: "next_day".to_string(),
                 market_type: "binary".to_string(),
                 event_subtype: "unlock".to_string(),
             },

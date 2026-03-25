@@ -59,6 +59,7 @@ pub struct TradeRow {
     pub tx_hash: Option<Vec<u8>>,
     pub status: String,
     pub created_at: DateTime<Utc>,
+    pub details: Option<serde_json::Value>,
 }
 
 /// Joined trade + opportunity history row for account-facing history APIs.
@@ -87,6 +88,8 @@ pub struct TradeHistoryRow {
     pub actual_profit: Option<Decimal>,
     pub detected_at: Option<DateTime<Utc>>,
     pub executed_at: Option<DateTime<Utc>>,
+    pub details: Option<serde_json::Value>,
+    pub trade_details: Option<serde_json::Value>,
 }
 
 /// Database model for the `orderbook_snapshots` table.
@@ -167,4 +170,15 @@ pub struct SmartMoneyLeaderCandidateRow {
     pub promoted: bool,
     pub metadata: Option<serde_json::Value>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Database model for the `config_history` table.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ConfigHistoryRow {
+    pub id: i64,
+    pub section: String,
+    pub data: serde_json::Value,
+    pub version: i32,
+    pub changed_by: String,
+    pub created_at: DateTime<Utc>,
 }

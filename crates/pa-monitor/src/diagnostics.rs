@@ -1,10 +1,11 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{LazyLock, Mutex};
 
 use alloy::primitives::B256;
 use chrono::{DateTime, Duration, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 const MAX_CRYPTO_DECISIONS: usize = 100;
 const MAX_CRYPTO_EXITS: usize = 100;
@@ -82,6 +83,8 @@ pub struct SmartMoneyDecision {
     pub max_wallet_weight: Decimal,
     pub source_data_api: bool,
     pub source_onchain: bool,
+    pub leader_addresses: Vec<String>,
+    pub leader_labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +108,24 @@ pub struct SmartMoneyExitDecision {
     pub best_bid: Decimal,
     pub avg_cost: Decimal,
     pub size: Decimal,
+    pub estimated_profit: Decimal,
+    pub attributed_leaders: Vec<SmartMoneyLeaderAttributionSlice>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmartMoneyLeaderAttributionSlice {
+    pub leader: String,
+    pub estimated_size: Decimal,
+    pub estimated_profit: Decimal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmartMoneyLeaderPnlAttributionEntry {
+    pub leader: String,
+    pub estimated_open_size: Decimal,
+    pub estimated_exited_size: Decimal,
+    pub estimated_realized_pnl: Decimal,
+    pub estimated_exit_count: usize,
 }
 
 static CRYPTO_CANDIDATE_DECISIONS: LazyLock<Mutex<VecDeque<CryptoCandidateDecision>>> =
@@ -117,6 +138,12 @@ static SMART_MONEY_WALLET_SCORES: LazyLock<Mutex<Vec<SmartMoneyWalletScoreEntry>
     LazyLock::new(|| Mutex::new(Vec::new()));
 static SMART_MONEY_EXIT_DECISIONS: LazyLock<Mutex<VecDeque<SmartMoneyExitDecision>>> =
     LazyLock::new(|| Mutex::new(VecDeque::new()));
+static SMART_MONEY_LEADER_PNL_ATTRIBUTION: LazyLock<
+    Mutex<Vec<SmartMoneyLeaderPnlAttributionEntry>>,
+> = LazyLock::new(|| Mutex::new(Vec::new()));
+static SMART_MONEY_OPPORTUNITY_ATTRIBUTION: LazyLock<
+    Mutex<HashMap<Uuid, Vec<SmartMoneyLeaderAttributionSlice>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub fn record_crypto_candidate_decision(entry: CryptoCandidateDecision) {
     let mut entries = CRYPTO_CANDIDATE_DECISIONS.lock().unwrap();
@@ -232,6 +259,52 @@ pub fn recent_smart_money_exit_decisions() -> Vec<SmartMoneyExitDecision> {
 
 pub fn clear_smart_money_exit_decisions() {
     SMART_MONEY_EXIT_DECISIONS.lock().unwrap().clear();
+}
+
+pub fn record_smart_money_leader_pnl_attribution(
+    entries: Vec<SmartMoneyLeaderPnlAttributionEntry>,
+) {
+    let mut attribution = SMART_MONEY_LEADER_PNL_ATTRIBUTION.lock().unwrap();
+    *attribution = entries;
+}
+
+pub fn smart_money_leader_pnl_attribution() -> Vec<SmartMoneyLeaderPnlAttributionEntry> {
+    SMART_MONEY_LEADER_PNL_ATTRIBUTION.lock().unwrap().clone()
+}
+
+pub fn clear_smart_money_leader_pnl_attribution() {
+    SMART_MONEY_LEADER_PNL_ATTRIBUTION.lock().unwrap().clear();
+}
+
+pub fn record_smart_money_opportunity_attribution(
+    opportunity_id: Uuid,
+    attribution: Vec<SmartMoneyLeaderAttributionSlice>,
+) {
+    let mut entries = SMART_MONEY_OPPORTUNITY_ATTRIBUTION.lock().unwrap();
+    entries.insert(opportunity_id, attribution);
+}
+
+pub fn take_smart_money_opportunity_attribution(
+    opportunity_id: &Uuid,
+) -> Option<Vec<SmartMoneyLeaderAttributionSlice>> {
+    SMART_MONEY_OPPORTUNITY_ATTRIBUTION
+        .lock()
+        .unwrap()
+        .remove(opportunity_id)
+}
+
+pub fn smart_money_opportunity_attribution(
+    opportunity_id: &Uuid,
+) -> Option<Vec<SmartMoneyLeaderAttributionSlice>> {
+    SMART_MONEY_OPPORTUNITY_ATTRIBUTION
+        .lock()
+        .unwrap()
+        .get(opportunity_id)
+        .cloned()
+}
+
+pub fn clear_smart_money_opportunity_attribution() {
+    SMART_MONEY_OPPORTUNITY_ATTRIBUTION.lock().unwrap().clear();
 }
 
 #[cfg(test)]

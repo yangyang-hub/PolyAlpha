@@ -109,24 +109,35 @@ const FIELD_HINTS: Record<string, Record<string, string>> = {
     override_probability_max_delta_bps: "运行时 override 概率最大偏移(bps)",
     override_multiplier_blend: "运行时 override 乘数混合系数",
     override_multiplier_max_delta_bps: "运行时 override 乘数最大偏移(bps)",
-    calibration_overrides: "表驱动校准覆盖：按 asset/asset_class/horizon/market_type/event_subtype 精细覆盖默认校准",
+    calibration_overrides: "表驱动校准覆盖：按 asset/asset_class/horizon/resolution_bucket/market_type/event_subtype 精细覆盖默认校准",
     short_horizon_max_days: "短期期限桶最大天数",
     medium_horizon_max_days: "中期期限桶最大天数",
     max_entry_days: "新开仓允许的最大到期天数",
+    same_day_range_bad_exit_cooldown_trigger_count: "当日期限区间盘坏退出熔断触发次数",
+    same_day_range_bad_exit_cooldown_secs: "当日期限区间盘坏退出熔断窗口秒数",
+    same_day_alt_bad_exit_cooldown_trigger_count: "当日期限山寨币坏退出熔断触发次数",
+    same_day_alt_bad_exit_cooldown_secs: "当日期限山寨币坏退出熔断窗口秒数",
     same_day_probability_calibration: "当日期限概率校准收缩系数",
+    same_day_alt_probability_multiplier: "当日期限山寨币额外概率收缩乘数",
     same_day_range_probability_multiplier: "当日期限区间盘额外概率收缩乘数",
     short_horizon_probability_calibration: "短期期限概率校准收缩系数",
     medium_horizon_probability_calibration: "中期期限概率校准收缩系数",
     same_day_execution_quality_profit_weight_multiplier:
       "当日期限执行质量里的利润保真权重乘数",
+    same_day_alt_execution_quality_profit_weight_multiplier:
+      "当日期限山寨币额外利润保真权重乘数",
     same_day_range_execution_quality_profit_weight_multiplier:
       "当日期限区间盘额外利润保真权重乘数",
     same_day_execution_quality_size_weight_multiplier:
       "当日期限执行质量里的数量保真权重乘数",
+    same_day_alt_execution_quality_size_weight_multiplier:
+      "当日期限山寨币额外数量保真权重乘数",
     same_day_range_execution_quality_size_weight_multiplier:
       "当日期限区间盘额外数量保真权重乘数",
     same_day_execution_quality_slippage_weight_multiplier:
       "当日期限执行质量里的滑点质量权重乘数",
+    same_day_alt_execution_quality_slippage_weight_multiplier:
+      "当日期限山寨币额外滑点质量权重乘数",
     same_day_range_execution_quality_slippage_weight_multiplier:
       "当日期限区间盘额外滑点质量权重乘数",
     short_execution_quality_profit_weight_multiplier:
@@ -136,26 +147,32 @@ const FIELD_HINTS: Record<string, Record<string, string>> = {
     short_execution_quality_slippage_weight_multiplier:
       "次日期限执行质量里的滑点质量权重乘数",
     same_day_size_multiplier: "当日期限仓位乘数",
+    same_day_alt_size_multiplier: "当日期限山寨币额外仓位乘数",
     same_day_range_size_multiplier: "当日期限区间盘额外仓位乘数",
     short_horizon_size_multiplier: "短期期限仓位乘数",
     medium_horizon_size_multiplier: "中期期限仓位乘数",
     same_day_min_edge_multiplier: "当日期限最小 edge 乘数",
+    same_day_alt_min_edge_multiplier: "当日期限山寨币额外最小 edge 乘数",
     same_day_range_min_edge_multiplier: "当日期限区间盘额外最小 edge 乘数",
     short_horizon_min_edge_multiplier: "短期期限最小 edge 乘数",
     medium_horizon_min_edge_multiplier: "中期期限最小 edge 乘数",
     same_day_max_spread_multiplier: "当日期限最大价差乘数",
+    same_day_alt_max_spread_multiplier: "当日期限山寨币额外最大价差乘数",
     same_day_range_max_spread_multiplier: "当日期限区间盘额外最大价差乘数",
     short_horizon_max_spread_multiplier: "短期期限最大价差乘数",
     medium_horizon_max_spread_multiplier: "中期期限最大价差乘数",
     same_day_capital_efficiency_threshold: "当日期限资金效率止盈阈值",
+    same_day_alt_capital_efficiency_multiplier: "当日期限山寨币额外资金效率乘数",
     short_horizon_capital_efficiency_threshold: "短期期限资金效率止盈阈值",
     medium_horizon_capital_efficiency_threshold: "中期期限资金效率止盈阈值",
     same_day_exit_buffer_multiplier: "当日期限模型反转退出缓冲乘数",
+    same_day_alt_exit_buffer_multiplier: "当日期限山寨币额外模型反转缓冲乘数",
     same_day_range_exit_buffer_multiplier: "当日期限区间盘额外模型反转缓冲乘数",
     short_horizon_exit_buffer_multiplier: "短期期限模型反转退出缓冲乘数",
     medium_horizon_exit_buffer_multiplier: "中期期限模型反转退出缓冲乘数",
     hold_min_edge_bps: "持仓继续保留所需的最小 edge（基点）",
     same_day_hold_edge_multiplier: "当日期限持仓最小 edge 乘数",
+    same_day_alt_hold_edge_multiplier: "当日期限山寨币额外持仓最小 edge 乘数",
     same_day_range_hold_edge_multiplier: "当日期限区间盘额外持仓最小 edge 乘数",
     short_horizon_hold_edge_multiplier: "短期期限持仓最小 edge 乘数",
     medium_horizon_hold_edge_multiplier: "中期期限持仓最小 edge 乘数",
@@ -225,6 +242,9 @@ const FIELD_HINTS: Record<string, Record<string, string>> = {
   },
   smart_money: {
     wallets: "跟踪的钱包列表（JSON: address, label, weight）",
+    blocked_wallets: "明确拉黑的钱包列表（JSON）",
+    degraded_wallets: "降权钱包列表（JSON: address, multiplier）",
+    leader_routes: "leader 路由规则（JSON: address, categories/question_keywords/event_title_keywords）",
     follow_ratio: "跟单比例（0-1，如 0.1 = 跟踪仓位的 10%）",
     max_position_usdc: "单市场最大仓位（USDC）",
     poll_interval_secs: "Data API 轮询间隔（秒）",
@@ -316,6 +336,7 @@ type CalibrationOverrideRow = {
   asset?: string;
   asset_class?: string;
   horizon?: string;
+  resolution_bucket?: string;
   market_type?: string;
   event_subtype?: string;
   probability_calibration?: number | string | null;
@@ -362,14 +383,23 @@ function calibrationScopeScore(row: CalibrationOverrideRow) {
   const asset = row.asset || "*";
   const assetClass = row.asset_class || "any";
   const horizon = row.horizon || "any";
+  const resolutionBucket = row.resolution_bucket || "any";
   const marketType = row.market_type || "any";
   const eventSubtype = row.event_subtype || "any";
   const assetScore = asset === "*" ? 0 : 1;
   const assetClassScore = assetClass === "any" ? 0 : 1;
   const horizonScore = horizon === "any" ? 0 : horizon === "long" ? 1 : 2;
+  const resolutionBucketScore = resolutionBucket === "any" ? 0 : 1;
   const marketTypeScore = marketType === "any" ? 0 : 1;
   const eventSubtypeScore = eventSubtype === "any" ? 0 : 1;
-  return assetScore * 1000 + assetClassScore * 100 + horizonScore * 10 + marketTypeScore + eventSubtypeScore;
+  return (
+    assetScore * 10000 +
+    assetClassScore * 1000 +
+    horizonScore * 100 +
+    resolutionBucketScore * 10 +
+    marketTypeScore +
+    eventSubtypeScore
+  );
 }
 
 function calibrationMarketTypeGroupLabel(value: string) {

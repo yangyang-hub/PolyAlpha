@@ -5,8 +5,8 @@ use rust_decimal::Decimal;
 use serde_json::Value as JsonValue;
 
 use crate::models::{
-    MarketRow, OpportunityRow, OrderBookSnapshotRow, PositionRow, SmartMoneyLeaderCandidateRow,
-    TokenRow, TradeHistoryRow, TradeRow, WeatherForecastSnapshotRow,
+    ConfigHistoryRow, MarketRow, OpportunityRow, OrderBookSnapshotRow, PositionRow,
+    SmartMoneyLeaderCandidateRow, TokenRow, TradeHistoryRow, TradeRow, WeatherForecastSnapshotRow,
 };
 
 /// Repository for database operations.
@@ -96,8 +96,8 @@ impl Repository {
     pub async fn insert_trade(&self, row: &TradeRow) -> anyhow::Result<()> {
         sqlx::query(
             r#"INSERT INTO trades
-            (id, opportunity_id, order_id, token_id, side, price, size, filled_size, fee, tx_type, tx_hash, status, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
+            (id, opportunity_id, order_id, token_id, side, price, size, filled_size, fee, tx_type, tx_hash, status, created_at, details)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#,
         )
         .bind(row.id)
         .bind(row.opportunity_id)
@@ -112,6 +112,7 @@ impl Repository {
         .bind(&row.tx_hash)
         .bind(&row.status)
         .bind(row.created_at)
+        .bind(&row.details)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -214,7 +215,9 @@ impl Repository {
                    o.estimated_profit,
                    o.actual_profit,
                    o.detected_at,
-                   o.executed_at
+                   o.executed_at,
+                   o.details,
+                   t.details AS trade_details
                FROM trades t
                LEFT JOIN opportunities o ON o.id = t.opportunity_id
                WHERE ($2::text IS NULL OR o.strategy_type = $2)
@@ -609,5 +612,28 @@ impl Repository {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Load recent config-history rows for one section, optionally filtered by `changed_by` prefix.
+    pub async fn load_config_history(
+        &self,
+        section: &str,
+        changed_by_prefix: Option<&str>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<ConfigHistoryRow>> {
+        let rows = sqlx::query_as::<_, ConfigHistoryRow>(
+            r#"SELECT id, section, data, version, changed_by, created_at
+               FROM config_history
+               WHERE section = $1
+                 AND ($2::TEXT IS NULL OR changed_by LIKE ($2 || '%'))
+               ORDER BY created_at DESC
+               LIMIT $3"#,
+        )
+        .bind(section)
+        .bind(changed_by_prefix)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 }

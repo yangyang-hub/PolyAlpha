@@ -32,6 +32,31 @@ fn infer_crypto_direction(question: &str, outcome: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn infer_crypto_resolution_bucket(
+    question: &str,
+    event_title: Option<&str>,
+    end_date: Option<chrono::DateTime<Utc>>,
+) -> Option<String> {
+    let target_date = pa_strategy::crypto_alpha::parse_crypto_question(question)
+        .and_then(|parsed| parsed.target_date)
+        .or_else(|| {
+            event_title
+                .and_then(pa_strategy::crypto_alpha::parse_crypto_event_title)
+                .and_then(|(_, d)| d)
+        })
+        .or_else(|| end_date.map(|dt| dt.date_naive()));
+    let target_date = target_date?;
+    let days = (target_date - Utc::now().date_naive()).num_days();
+    let bucket = if days <= 0 {
+        "same_day"
+    } else if days == 1 {
+        "next_day"
+    } else {
+        "legacy"
+    };
+    Some(bucket.to_string())
+}
+
 /// Fetch current liquidity rewards from the CLOB API.
 ///
 /// Returns a list of markets with active rewards, including their reward parameters
@@ -91,7 +116,16 @@ pub fn build_position_snapshot(
 ) -> Vec<pa_monitor::api::PositionApiEntry> {
     use std::collections::HashMap;
 
-    let mut token_map: HashMap<U256, (&str, &str, B256, Option<&str>)> = HashMap::new();
+    let mut token_map: HashMap<
+        U256,
+        (
+            &str,
+            &str,
+            B256,
+            Option<&str>,
+            Option<chrono::DateTime<Utc>>,
+        ),
+    > = HashMap::new();
     for m in markets {
         for t in &m.tokens {
             let outcome = match t.outcome {
@@ -105,6 +139,7 @@ pub fn build_position_snapshot(
                     outcome,
                     m.condition_id,
                     m.event_title.as_deref(),
+                    m.end_date,
                 ),
             );
         }
@@ -116,22 +151,36 @@ pub fn build_position_snapshot(
             if pe.size < dec!(0.1) {
                 continue;
             }
-            let (question, outcome, _cid, event_title) = token_map
+            let (question, outcome, _cid, event_title, end_date) = token_map
                 .get(&token_id)
                 .copied()
-                .unwrap_or(("", "", B256::ZERO, None));
+                .unwrap_or(("", "", B256::ZERO, None, None));
             let asset = infer_crypto_asset(question, event_title);
             let direction = if outcome.is_empty() {
                 None
             } else {
                 infer_crypto_direction(question, outcome)
             };
+            let resolution_bucket = infer_crypto_resolution_bucket(question, event_title, end_date);
+            let is_legacy = resolution_bucket.as_deref() == Some("legacy");
 
-            let current_price = cache
+            let (bid_price, mid_price) = cache
                 .get(&token_id)
-                .and_then(|ob| ob.bids.first().map(|b| b.price));
+                .map(|ob| {
+                    let bid = ob.bids.first().map(|b| b.price);
+                    let ask = ob.asks.first().map(|a| a.price);
+                    let mid = match (bid, ask) {
+                        (Some(b), Some(a)) => Some((a + b) / dec!(2)),
+                        (Some(b), None) => Some(b),
+                        (None, Some(a)) => Some(a),
+                        (None, None) => None,
+                    };
+                    (bid, mid)
+                })
+                .unwrap_or((None, None));
 
-            let unrealized_pnl = current_price.map(|p| pe.size * (p - pe.avg_cost));
+            let unrealized_pnl_bid = bid_price.map(|p| pe.size * (p - pe.avg_cost));
+            let unrealized_pnl_mid = mid_price.map(|p| pe.size * (p - pe.avg_cost));
 
             let strategy_name = pe.strategy_type.map(|st| match st {
                 pa_core::types::StrategyType::Weather => "weather",
@@ -159,8 +208,14 @@ pub fn build_position_snapshot(
                 } else {
                     Some(outcome.to_string())
                 },
-                current_price,
-                unrealized_pnl,
+                bid_price,
+                mid_price,
+                unrealized_pnl_bid,
+                unrealized_pnl_mid,
+                resolution_bucket,
+                is_legacy,
+                current_price: bid_price,
+                unrealized_pnl: unrealized_pnl_bid,
             });
         }
     }

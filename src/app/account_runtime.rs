@@ -41,6 +41,7 @@ pub async fn spawn_account_runtime(
     binary_event_groups: &[pa_core::types::BinaryEventGroup],
     lr_runtime_status: Arc<tokio::sync::RwLock<pa_monitor::api::LrRuntimeStatus>>,
     repository: Option<Arc<Repository>>,
+    smart_money_config: Arc<ArcSwap<pa_core::config::SmartMoneyConfig>>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> AccountRuntimeArtifacts {
     let acct_name = ctx.name.clone();
@@ -173,14 +174,14 @@ pub async fn spawn_account_runtime(
             drop(sm_markets_snapshot);
 
             let tracker = pa_market_data::wallet_tracker::WalletTracker::new(
-                settings.smart_money.clone(),
+                Arc::clone(&smart_money_config),
                 Arc::clone(&sm_token_to_cid),
             );
             smart_money_token_map = Some(Arc::clone(&sm_token_to_cid));
             let sm_signals = tracker.signals_ref();
 
             let smart_money = pa_strategy::smart_money::SmartMoneyStrategy::new(
-                settings.smart_money.clone(),
+                Arc::clone(&smart_money_config),
                 dec!(0.00),
                 pa_strategy::smart_money::SmartMoneyStrategyDeps {
                     get_orderbook: Box::new(move |token_id| sm_cache.get(&token_id)),

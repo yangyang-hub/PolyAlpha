@@ -358,6 +358,9 @@ pub struct CryptoCalibrationOverride {
     /// Horizon selector: short / medium / long / any.
     #[serde(default)]
     pub horizon: String,
+    /// Resolution-bucket selector: same_day / next_day / legacy / any.
+    #[serde(default)]
+    pub resolution_bucket: String,
     /// Market-type selector: binary / range / any.
     #[serde(default)]
     pub market_type: String,
@@ -583,21 +586,47 @@ pub struct CryptoAlphaConfig {
     /// entry generation but can still be scanned for exits if already held.
     #[serde(default = "default_crypto_max_entry_days")]
     pub max_entry_days: u32,
+    /// Additional probability shrink factor for same-day alt markets.
+    #[serde(default = "default_crypto_same_day_alt_probability_multiplier")]
+    pub same_day_alt_probability_multiplier: Decimal,
+    /// Number of distinct recent bad same-day range exits required before temporarily
+    /// skipping new same-day range entries for the same asset/subtype bucket.
+    #[serde(default = "default_crypto_same_day_range_bad_exit_cooldown_trigger_count")]
+    pub same_day_range_bad_exit_cooldown_trigger_count: u32,
+    /// Sliding window for same-day range bad-exit cooldown, in seconds.
+    #[serde(default = "default_crypto_same_day_range_bad_exit_cooldown_secs")]
+    pub same_day_range_bad_exit_cooldown_secs: u64,
+    /// Number of distinct recent bad same-day alt directional exits required before temporarily
+    /// skipping new same-day alt directional entries for the same asset/subtype bucket.
+    #[serde(default = "default_crypto_same_day_alt_bad_exit_cooldown_trigger_count")]
+    pub same_day_alt_bad_exit_cooldown_trigger_count: u32,
+    /// Sliding window for same-day alt directional bad-exit cooldown, in seconds.
+    #[serde(default = "default_crypto_same_day_alt_bad_exit_cooldown_secs")]
+    pub same_day_alt_bad_exit_cooldown_secs: u64,
     /// Multiply execution-quality profit-retention weight for same-day entries.
     #[serde(default = "default_crypto_same_day_execution_quality_profit_weight_multiplier")]
     pub same_day_execution_quality_profit_weight_multiplier: Decimal,
+    /// Additional execution-quality profit-retention multiplier for same-day alt entries.
+    #[serde(default = "default_crypto_same_day_alt_execution_quality_profit_weight_multiplier")]
+    pub same_day_alt_execution_quality_profit_weight_multiplier: Decimal,
     /// Additional execution-quality profit-retention multiplier for same-day range/NegRisk entries.
     #[serde(default = "default_crypto_same_day_range_execution_quality_profit_weight_multiplier")]
     pub same_day_range_execution_quality_profit_weight_multiplier: Decimal,
     /// Multiply execution-quality size-retention weight for same-day entries.
     #[serde(default = "default_crypto_same_day_execution_quality_size_weight_multiplier")]
     pub same_day_execution_quality_size_weight_multiplier: Decimal,
+    /// Additional execution-quality size-retention multiplier for same-day alt entries.
+    #[serde(default = "default_crypto_same_day_alt_execution_quality_size_weight_multiplier")]
+    pub same_day_alt_execution_quality_size_weight_multiplier: Decimal,
     /// Additional execution-quality size-retention multiplier for same-day range/NegRisk entries.
     #[serde(default = "default_crypto_same_day_range_execution_quality_size_weight_multiplier")]
     pub same_day_range_execution_quality_size_weight_multiplier: Decimal,
     /// Multiply execution-quality slippage-quality weight for same-day entries.
     #[serde(default = "default_crypto_same_day_execution_quality_slippage_weight_multiplier")]
     pub same_day_execution_quality_slippage_weight_multiplier: Decimal,
+    /// Additional execution-quality slippage-quality multiplier for same-day alt entries.
+    #[serde(default = "default_crypto_same_day_alt_execution_quality_slippage_weight_multiplier")]
+    pub same_day_alt_execution_quality_slippage_weight_multiplier: Decimal,
     /// Additional execution-quality slippage-quality multiplier for same-day range/NegRisk entries.
     #[serde(
         default = "default_crypto_same_day_range_execution_quality_slippage_weight_multiplier"
@@ -627,6 +656,9 @@ pub struct CryptoAlphaConfig {
     /// Multiply entry sizing by this factor for same-day markets.
     #[serde(default = "default_crypto_same_day_size_multiplier")]
     pub same_day_size_multiplier: Decimal,
+    /// Additional size multiplier for same-day alt markets.
+    #[serde(default = "default_crypto_same_day_alt_size_multiplier")]
+    pub same_day_alt_size_multiplier: Decimal,
     /// Additional size multiplier for same-day range/NegRisk markets.
     #[serde(default = "default_crypto_same_day_range_size_multiplier")]
     pub same_day_range_size_multiplier: Decimal,
@@ -639,6 +671,9 @@ pub struct CryptoAlphaConfig {
     /// Multiply min edge by this factor for same-day markets.
     #[serde(default = "default_crypto_same_day_min_edge_multiplier")]
     pub same_day_min_edge_multiplier: Decimal,
+    /// Additional min-edge multiplier for same-day alt markets.
+    #[serde(default = "default_crypto_same_day_alt_min_edge_multiplier")]
+    pub same_day_alt_min_edge_multiplier: Decimal,
     /// Additional min-edge multiplier for same-day range/NegRisk markets.
     #[serde(default = "default_crypto_same_day_range_min_edge_multiplier")]
     pub same_day_range_min_edge_multiplier: Decimal,
@@ -651,6 +686,9 @@ pub struct CryptoAlphaConfig {
     /// Multiply max spread by this factor for same-day markets.
     #[serde(default = "default_crypto_same_day_max_spread_multiplier")]
     pub same_day_max_spread_multiplier: Decimal,
+    /// Additional max-spread multiplier for same-day alt markets.
+    #[serde(default = "default_crypto_same_day_alt_max_spread_multiplier")]
+    pub same_day_alt_max_spread_multiplier: Decimal,
     /// Additional max-spread multiplier for same-day range/NegRisk markets.
     #[serde(default = "default_crypto_same_day_range_max_spread_multiplier")]
     pub same_day_range_max_spread_multiplier: Decimal,
@@ -663,6 +701,9 @@ pub struct CryptoAlphaConfig {
     /// Capital-efficiency exit threshold for same-day markets.
     #[serde(default = "default_crypto_same_day_capital_efficiency_threshold")]
     pub same_day_capital_efficiency_threshold: Decimal,
+    /// Additional capital-efficiency multiplier for same-day alt markets.
+    #[serde(default = "default_crypto_same_day_alt_capital_efficiency_multiplier")]
+    pub same_day_alt_capital_efficiency_multiplier: Decimal,
     /// Capital-efficiency exit threshold for short-dated markets.
     #[serde(default = "default_crypto_short_horizon_capital_efficiency_threshold")]
     pub short_horizon_capital_efficiency_threshold: Decimal,
@@ -672,6 +713,9 @@ pub struct CryptoAlphaConfig {
     /// Multiply exit buffer by this factor for same-day markets.
     #[serde(default = "default_crypto_same_day_exit_buffer_multiplier")]
     pub same_day_exit_buffer_multiplier: Decimal,
+    /// Additional exit-buffer multiplier for same-day alt markets.
+    #[serde(default = "default_crypto_same_day_alt_exit_buffer_multiplier")]
+    pub same_day_alt_exit_buffer_multiplier: Decimal,
     /// Additional exit-buffer multiplier for same-day range/NegRisk markets.
     #[serde(default = "default_crypto_same_day_range_exit_buffer_multiplier")]
     pub same_day_range_exit_buffer_multiplier: Decimal,
@@ -687,6 +731,9 @@ pub struct CryptoAlphaConfig {
     /// Multiply hold-min-edge by this factor for same-day markets.
     #[serde(default = "default_crypto_same_day_hold_edge_multiplier")]
     pub same_day_hold_edge_multiplier: Decimal,
+    /// Additional hold-edge multiplier for same-day alt markets.
+    #[serde(default = "default_crypto_same_day_alt_hold_edge_multiplier")]
+    pub same_day_alt_hold_edge_multiplier: Decimal,
     /// Additional hold-edge multiplier for same-day range/NegRisk markets.
     #[serde(default = "default_crypto_same_day_range_hold_edge_multiplier")]
     pub same_day_range_hold_edge_multiplier: Decimal,
@@ -914,21 +961,42 @@ fn default_crypto_medium_horizon_max_days() -> u32 {
 fn default_crypto_max_entry_days() -> u32 {
     1
 }
+fn default_crypto_same_day_range_bad_exit_cooldown_trigger_count() -> u32 {
+    2
+}
+fn default_crypto_same_day_range_bad_exit_cooldown_secs() -> u64 {
+    1800
+}
+fn default_crypto_same_day_alt_bad_exit_cooldown_trigger_count() -> u32 {
+    2
+}
+fn default_crypto_same_day_alt_bad_exit_cooldown_secs() -> u64 {
+    1800
+}
 fn default_crypto_same_day_execution_quality_profit_weight_multiplier() -> Decimal {
     Decimal::new(80, 2)
 } // 0.80
+fn default_crypto_same_day_alt_execution_quality_profit_weight_multiplier() -> Decimal {
+    Decimal::new(90, 2)
+} // 0.90
 fn default_crypto_same_day_range_execution_quality_profit_weight_multiplier() -> Decimal {
     Decimal::new(85, 2)
 } // 0.85
 fn default_crypto_same_day_execution_quality_size_weight_multiplier() -> Decimal {
     Decimal::new(120, 2)
 } // 1.20
+fn default_crypto_same_day_alt_execution_quality_size_weight_multiplier() -> Decimal {
+    Decimal::new(110, 2)
+} // 1.10
 fn default_crypto_same_day_range_execution_quality_size_weight_multiplier() -> Decimal {
     Decimal::new(110, 2)
 } // 1.10
 fn default_crypto_same_day_execution_quality_slippage_weight_multiplier() -> Decimal {
     Decimal::new(130, 2)
 } // 1.30
+fn default_crypto_same_day_alt_execution_quality_slippage_weight_multiplier() -> Decimal {
+    Decimal::new(115, 2)
+} // 1.15
 fn default_crypto_same_day_range_execution_quality_slippage_weight_multiplier() -> Decimal {
     Decimal::new(120, 2)
 } // 1.20
@@ -944,6 +1012,9 @@ fn default_crypto_short_execution_quality_slippage_weight_multiplier() -> Decima
 fn default_crypto_same_day_probability_calibration() -> Decimal {
     Decimal::new(80, 2)
 } // 0.80
+fn default_crypto_same_day_alt_probability_multiplier() -> Decimal {
+    Decimal::new(95, 2)
+} // 0.95
 fn default_crypto_same_day_range_probability_multiplier() -> Decimal {
     Decimal::new(90, 2)
 } // 0.90
@@ -956,6 +1027,9 @@ fn default_crypto_medium_horizon_probability_calibration() -> Decimal {
 fn default_crypto_same_day_size_multiplier() -> Decimal {
     Decimal::new(45, 2)
 } // 0.45
+fn default_crypto_same_day_alt_size_multiplier() -> Decimal {
+    Decimal::new(80, 2)
+} // 0.80
 fn default_crypto_same_day_range_size_multiplier() -> Decimal {
     Decimal::new(75, 2)
 } // 0.75
@@ -968,6 +1042,9 @@ fn default_crypto_medium_horizon_size_multiplier() -> Decimal {
 fn default_crypto_same_day_min_edge_multiplier() -> Decimal {
     Decimal::new(17, 1)
 } // 1.7
+fn default_crypto_same_day_alt_min_edge_multiplier() -> Decimal {
+    Decimal::new(110, 2)
+} // 1.10
 fn default_crypto_same_day_range_min_edge_multiplier() -> Decimal {
     Decimal::new(115, 2)
 } // 1.15
@@ -980,6 +1057,9 @@ fn default_crypto_medium_horizon_min_edge_multiplier() -> Decimal {
 fn default_crypto_same_day_max_spread_multiplier() -> Decimal {
     Decimal::new(65, 2)
 } // 0.65
+fn default_crypto_same_day_alt_max_spread_multiplier() -> Decimal {
+    Decimal::new(85, 2)
+} // 0.85
 fn default_crypto_same_day_range_max_spread_multiplier() -> Decimal {
     Decimal::new(85, 2)
 } // 0.85
@@ -992,6 +1072,9 @@ fn default_crypto_medium_horizon_max_spread_multiplier() -> Decimal {
 fn default_crypto_same_day_capital_efficiency_threshold() -> Decimal {
     Decimal::new(90, 2)
 } // 0.90
+fn default_crypto_same_day_alt_capital_efficiency_multiplier() -> Decimal {
+    Decimal::new(98, 2)
+} // 0.98
 fn default_crypto_short_horizon_capital_efficiency_threshold() -> Decimal {
     Decimal::new(92, 2)
 } // 0.92
@@ -1001,6 +1084,9 @@ fn default_crypto_medium_horizon_capital_efficiency_threshold() -> Decimal {
 fn default_crypto_same_day_exit_buffer_multiplier() -> Decimal {
     Decimal::new(40, 2)
 } // 0.40
+fn default_crypto_same_day_alt_exit_buffer_multiplier() -> Decimal {
+    Decimal::new(90, 2)
+} // 0.90
 fn default_crypto_same_day_range_exit_buffer_multiplier() -> Decimal {
     Decimal::new(85, 2)
 } // 0.85
@@ -1016,6 +1102,9 @@ fn default_crypto_hold_min_edge_bps() -> u32 {
 fn default_crypto_same_day_hold_edge_multiplier() -> Decimal {
     Decimal::new(17, 1)
 } // 1.7
+fn default_crypto_same_day_alt_hold_edge_multiplier() -> Decimal {
+    Decimal::new(110, 2)
+} // 1.10
 fn default_crypto_same_day_range_hold_edge_multiplier() -> Decimal {
     Decimal::new(110, 2)
 } // 1.10
@@ -1162,16 +1251,32 @@ impl Default for CryptoAlphaConfig {
             short_horizon_max_days: default_crypto_short_horizon_max_days(),
             medium_horizon_max_days: default_crypto_medium_horizon_max_days(),
             max_entry_days: default_crypto_max_entry_days(),
+            same_day_alt_probability_multiplier: default_crypto_same_day_alt_probability_multiplier(
+            ),
+            same_day_range_bad_exit_cooldown_trigger_count:
+                default_crypto_same_day_range_bad_exit_cooldown_trigger_count(),
+            same_day_range_bad_exit_cooldown_secs:
+                default_crypto_same_day_range_bad_exit_cooldown_secs(),
+            same_day_alt_bad_exit_cooldown_trigger_count:
+                default_crypto_same_day_alt_bad_exit_cooldown_trigger_count(),
+            same_day_alt_bad_exit_cooldown_secs: default_crypto_same_day_alt_bad_exit_cooldown_secs(
+            ),
             same_day_execution_quality_profit_weight_multiplier:
                 default_crypto_same_day_execution_quality_profit_weight_multiplier(),
+            same_day_alt_execution_quality_profit_weight_multiplier:
+                default_crypto_same_day_alt_execution_quality_profit_weight_multiplier(),
             same_day_range_execution_quality_profit_weight_multiplier:
                 default_crypto_same_day_range_execution_quality_profit_weight_multiplier(),
             same_day_execution_quality_size_weight_multiplier:
                 default_crypto_same_day_execution_quality_size_weight_multiplier(),
+            same_day_alt_execution_quality_size_weight_multiplier:
+                default_crypto_same_day_alt_execution_quality_size_weight_multiplier(),
             same_day_range_execution_quality_size_weight_multiplier:
                 default_crypto_same_day_range_execution_quality_size_weight_multiplier(),
             same_day_execution_quality_slippage_weight_multiplier:
                 default_crypto_same_day_execution_quality_slippage_weight_multiplier(),
+            same_day_alt_execution_quality_slippage_weight_multiplier:
+                default_crypto_same_day_alt_execution_quality_slippage_weight_multiplier(),
             same_day_range_execution_quality_slippage_weight_multiplier:
                 default_crypto_same_day_range_execution_quality_slippage_weight_multiplier(),
             short_execution_quality_profit_weight_multiplier:
@@ -1188,14 +1293,17 @@ impl Default for CryptoAlphaConfig {
             medium_horizon_probability_calibration:
                 default_crypto_medium_horizon_probability_calibration(),
             same_day_size_multiplier: default_crypto_same_day_size_multiplier(),
+            same_day_alt_size_multiplier: default_crypto_same_day_alt_size_multiplier(),
             same_day_range_size_multiplier: default_crypto_same_day_range_size_multiplier(),
             short_horizon_size_multiplier: default_crypto_short_horizon_size_multiplier(),
             medium_horizon_size_multiplier: default_crypto_medium_horizon_size_multiplier(),
             same_day_min_edge_multiplier: default_crypto_same_day_min_edge_multiplier(),
+            same_day_alt_min_edge_multiplier: default_crypto_same_day_alt_min_edge_multiplier(),
             same_day_range_min_edge_multiplier: default_crypto_same_day_range_min_edge_multiplier(),
             short_horizon_min_edge_multiplier: default_crypto_short_horizon_min_edge_multiplier(),
             medium_horizon_min_edge_multiplier: default_crypto_medium_horizon_min_edge_multiplier(),
             same_day_max_spread_multiplier: default_crypto_same_day_max_spread_multiplier(),
+            same_day_alt_max_spread_multiplier: default_crypto_same_day_alt_max_spread_multiplier(),
             same_day_range_max_spread_multiplier:
                 default_crypto_same_day_range_max_spread_multiplier(),
             short_horizon_max_spread_multiplier: default_crypto_short_horizon_max_spread_multiplier(
@@ -1204,11 +1312,15 @@ impl Default for CryptoAlphaConfig {
                 default_crypto_medium_horizon_max_spread_multiplier(),
             same_day_capital_efficiency_threshold:
                 default_crypto_same_day_capital_efficiency_threshold(),
+            same_day_alt_capital_efficiency_multiplier:
+                default_crypto_same_day_alt_capital_efficiency_multiplier(),
             short_horizon_capital_efficiency_threshold:
                 default_crypto_short_horizon_capital_efficiency_threshold(),
             medium_horizon_capital_efficiency_threshold:
                 default_crypto_medium_horizon_capital_efficiency_threshold(),
             same_day_exit_buffer_multiplier: default_crypto_same_day_exit_buffer_multiplier(),
+            same_day_alt_exit_buffer_multiplier: default_crypto_same_day_alt_exit_buffer_multiplier(
+            ),
             same_day_range_exit_buffer_multiplier:
                 default_crypto_same_day_range_exit_buffer_multiplier(),
             short_horizon_exit_buffer_multiplier:
@@ -1217,6 +1329,7 @@ impl Default for CryptoAlphaConfig {
                 default_crypto_medium_horizon_exit_buffer_multiplier(),
             hold_min_edge_bps: default_crypto_hold_min_edge_bps(),
             same_day_hold_edge_multiplier: default_crypto_same_day_hold_edge_multiplier(),
+            same_day_alt_hold_edge_multiplier: default_crypto_same_day_alt_hold_edge_multiplier(),
             same_day_range_hold_edge_multiplier: default_crypto_same_day_range_hold_edge_multiplier(
             ),
             short_horizon_hold_edge_multiplier: default_crypto_short_horizon_hold_edge_multiplier(),
@@ -1580,6 +1693,15 @@ pub struct SmartMoneyConfig {
     /// Manually configured wallets to track.
     #[serde(default)]
     pub wallets: Vec<TrackedWalletConfig>,
+    /// Wallets that should never be tracked or auto-discovered.
+    #[serde(default)]
+    pub blocked_wallets: Vec<String>,
+    /// Per-wallet weight multipliers used to degrade noisy leaders without fully blocking them.
+    #[serde(default)]
+    pub degraded_wallets: Vec<DegradedWalletConfig>,
+    /// Optional per-wallet market routing rules used to limit which markets a leader can trigger.
+    #[serde(default)]
+    pub leader_routes: Vec<SmartMoneyLeaderRouteConfig>,
     /// Fraction of tracked wallet's position to follow (0.0-1.0).
     #[serde(default = "default_sm_follow_ratio")]
     pub follow_ratio: Decimal,
@@ -1720,9 +1842,30 @@ pub struct TrackedWalletConfig {
     pub weight: Decimal,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DegradedWalletConfig {
+    pub address: String,
+    #[serde(default = "default_sm_degrade_multiplier")]
+    pub multiplier: Decimal,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SmartMoneyLeaderRouteConfig {
+    pub address: String,
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[serde(default)]
+    pub question_keywords: Vec<String>,
+    #[serde(default)]
+    pub event_title_keywords: Vec<String>,
+}
+
 fn default_sm_follow_ratio() -> Decimal {
     Decimal::new(10, 2)
 } // 0.10
+fn default_sm_degrade_multiplier() -> Decimal {
+    Decimal::new(50, 2)
+} // 0.50
 fn default_sm_max_position() -> Decimal {
     Decimal::from(100)
 }
@@ -1842,6 +1985,9 @@ impl Default for SmartMoneyConfig {
     fn default() -> Self {
         Self {
             wallets: vec![],
+            blocked_wallets: vec![],
+            degraded_wallets: vec![],
+            leader_routes: vec![],
             follow_ratio: default_sm_follow_ratio(),
             max_position_usdc: default_sm_max_position(),
             poll_interval_secs: default_sm_poll_interval(),

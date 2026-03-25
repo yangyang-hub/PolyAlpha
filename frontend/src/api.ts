@@ -83,6 +83,19 @@ export interface StatusResponse {
       top_subtype: { label: string; count: number } | null;
     }[];
   };
+  crypto_cooldown_summary?: {
+    active_count: number;
+    buckets: {
+      kind: string;
+      asset: string;
+      event_subtype: string;
+      shape: string;
+      scope_label: string;
+      trigger_count: number;
+      current_count: number;
+      remaining_secs: number;
+    }[];
+  };
   crypto_entry_tuning_hints?: {
     kind: string;
     priority: string;
@@ -98,11 +111,36 @@ export interface StatusResponse {
     direction: string;
     selector_asset_class: string;
     selector_event_subtype: string;
+    selector_shape?: string;
+    source_bucket?: string;
     scope_label: string;
     source_reason: string;
     rationale: string;
     support_count?: number;
   }[];
+  crypto_override_patch_preview?: {
+    supported_row_count: number;
+    unsupported_suggestion_count: number;
+    unsupported_suggestions: string[];
+    rows: {
+      scope_label: string;
+      selector_asset_class: string;
+      selector_event_subtype: string;
+      selector_shape: string;
+      source_bucket: string;
+      resolution_bucket: string;
+      horizon: string;
+      market_type: string;
+      fields: {
+        target_field: string;
+        direction: string;
+        source_reason: string;
+        support_count: number;
+        preview_value: string;
+      }[];
+    }[];
+    toml: string;
+  };
   crypto_post_entry_tuning_hints?: {
     kind: string;
     priority: string;
@@ -118,11 +156,36 @@ export interface StatusResponse {
     direction: string;
     selector_asset_class: string;
     selector_event_subtype: string;
+    selector_shape?: string;
+    source_bucket?: string;
     scope_label: string;
     source_reason: string;
     rationale: string;
     support_count?: number;
   }[];
+  crypto_post_entry_override_patch_preview?: {
+    supported_row_count: number;
+    unsupported_suggestion_count: number;
+    unsupported_suggestions: string[];
+    rows: {
+      scope_label: string;
+      selector_asset_class: string;
+      selector_event_subtype: string;
+      selector_shape: string;
+      source_bucket: string;
+      resolution_bucket: string;
+      horizon: string;
+      market_type: string;
+      fields: {
+        target_field: string;
+        direction: string;
+        source_reason: string;
+        support_count: number;
+        preview_value: string;
+      }[];
+    }[];
+    toml: string;
+  };
   smart_money_signal_summary?: {
     recent_signal_count: number;
     recent_entry_attempts: number;
@@ -135,6 +198,10 @@ export interface StatusResponse {
     total_rejected: number;
     reason_counts: { label: string; count: number }[];
   };
+  smart_money_route_summary?: {
+    configured_routes: number;
+    route_mismatch_rejections: number;
+  };
   smart_money_exit_summary?: {
     total_exits: number;
     reason_counts: { label: string; count: number }[];
@@ -142,6 +209,60 @@ export interface StatusResponse {
   smart_money_leader_discovery_summary?: {
     candidate_count: number;
     top_candidates: SmartMoneyLeaderCandidate[];
+  };
+  smart_money_leader_attribution_summary?: {
+    top_leaders: {
+      leader: string;
+      signals: number;
+      accepted: number;
+      rejected: number;
+      accept_rate: number;
+    }[];
+  };
+  smart_money_leader_pnl_attribution_summary?: {
+    top_leaders: {
+      leader: string;
+      estimated_open_size: string;
+      estimated_exited_size: string;
+      estimated_realized_pnl: string;
+      estimated_exit_count: number;
+    }[];
+  };
+  smart_money_trade_attribution_summary?: {
+    top_leaders: {
+      leader: string;
+      actual_filled_size: string;
+      actual_fee: string;
+      actual_realized_profit: string;
+      trade_count: number;
+    }[];
+  };
+  smart_money_leader_health_summary?: {
+    top_leaders: {
+      leader: string;
+      signals: number;
+      accepted: number;
+      rejected: number;
+      accept_rate: number;
+      estimated_realized_pnl: string;
+      actual_realized_profit: string;
+      trade_count: number;
+      suggested_action: string;
+      rationale: string;
+    }[];
+  };
+  smart_money_review_queue_summary?: {
+    pending_count: number;
+    action_counts: { label: string; count: number }[];
+    top_actions: {
+      leader: string;
+      address: string | null;
+      label: string | null;
+      suggested_action: string;
+      current_state: string;
+      actionable: boolean;
+      rationale: string;
+    }[];
   };
   smart_money_wallet_scores?: {
     address: string;
@@ -163,6 +284,8 @@ export interface StatusResponse {
     max_wallet_weight: string;
     source_data_api: boolean;
     source_onchain: boolean;
+    leader_addresses: string[];
+    leader_labels: string[];
   }[];
   smart_money_recent_exits?: {
     recorded_at: string;
@@ -173,6 +296,12 @@ export interface StatusResponse {
     best_bid: string;
     avg_cost: string;
     size: string;
+    estimated_profit: string;
+    attributed_leaders: {
+      leader: string;
+      estimated_size: string;
+      estimated_profit: string;
+    }[];
   }[];
   accounts: AccountStatusEntry[];
 }
@@ -199,6 +328,11 @@ export interface SmartMoneyLeaderCandidate {
   verified: boolean;
   discovery_score: string;
   promoted: boolean;
+  blocked: boolean;
+  degrade_multiplier?: string | null;
+  route_categories?: string[];
+  route_question_keywords?: string[];
+  route_event_title_keywords?: string[];
   metadata?: Record<string, unknown> | null;
   updated_at: string;
 }
@@ -208,6 +342,31 @@ export interface PromoteSmartMoneyLeaderResponse {
   promoted: boolean;
   wallets_toml: string;
   auto_discover_candidate: string;
+  note: string;
+}
+
+export interface BlockSmartMoneyLeaderResponse {
+  candidate: SmartMoneyLeaderCandidate;
+  blocked: boolean;
+  note: string;
+}
+
+export interface DegradeSmartMoneyLeaderResponse {
+  candidate: SmartMoneyLeaderCandidate;
+  degraded: boolean;
+  multiplier: string;
+  note: string;
+}
+
+export interface RestoreSmartMoneyLeaderResponse {
+  candidate: SmartMoneyLeaderCandidate;
+  restored: boolean;
+  note: string;
+}
+
+export interface ApplySmartMoneyLeaderRouteTemplateResponse {
+  candidate: SmartMoneyLeaderCandidate;
+  template: string;
   note: string;
 }
 
@@ -262,8 +421,62 @@ export interface PositionEntry {
   condition_id: string | null;
   question: string | null;
   outcome: string | null;
+  bid_price: string | null;
+  mid_price: string | null;
+  unrealized_pnl_bid: string | null;
+  unrealized_pnl_mid: string | null;
+  resolution_bucket: string | null;
+  is_legacy: boolean;
   current_price: string | null;
   unrealized_pnl: string | null;
+}
+
+export interface CryptoTradeEntry {
+  trade_id: string;
+  opportunity_id: string | null;
+  order_id: string | null;
+  token_id: string;
+  side: string;
+  price: string;
+  size: string;
+  filled_size: string | null;
+  fee: string | null;
+  tx_type: string;
+  tx_hash: string | null;
+  status: string;
+  created_at: string;
+  strategy: string | null;
+  condition_id: string | null;
+  question: string | null;
+  account_name: string | null;
+  proxy_wallet: string | null;
+  opportunity_status: string | null;
+  estimated_profit: string | null;
+  actual_profit: string | null;
+  detected_at: string | null;
+  executed_at: string | null;
+  smart_money_attribution?: {
+    leader: string;
+    estimated_size: string;
+    estimated_profit: string;
+  }[] | null;
+  smart_money_trade_attribution?: {
+    leader: string;
+    actual_filled_size: string;
+    actual_fee: string;
+    actual_realized_profit: string;
+  }[] | null;
+}
+
+export interface SmartMoneyAuditEntry {
+  created_at: string;
+  changed_by: string;
+  version: number;
+  blocked_wallet_count: number;
+  degraded_wallet_count: number;
+  wallet_count: number;
+  auto_discover_candidate_count: number;
+  route_count: number;
 }
 
 export interface CryptoAlphaConfigSection {
@@ -370,6 +583,61 @@ export async function promoteSmartMoneyLeader(address: string): Promise<PromoteS
   return res.json();
 }
 
+export async function blockSmartMoneyLeader(address: string): Promise<BlockSmartMoneyLeaderResponse> {
+  const res = await fetch(`${BASE}/api/smart-money/leaders/block`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`${res.status}: ${body}`);
+  }
+  return res.json();
+}
+
+export async function degradeSmartMoneyLeader(address: string): Promise<DegradeSmartMoneyLeaderResponse> {
+  const res = await fetch(`${BASE}/api/smart-money/leaders/degrade`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`${res.status}: ${body}`);
+  }
+  return res.json();
+}
+
+export async function restoreSmartMoneyLeader(address: string): Promise<RestoreSmartMoneyLeaderResponse> {
+  const res = await fetch(`${BASE}/api/smart-money/leaders/restore`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`${res.status}: ${body}`);
+  }
+  return res.json();
+}
+
+export async function applySmartMoneyLeaderRouteTemplate(
+  address: string,
+  template: string,
+): Promise<ApplySmartMoneyLeaderRouteTemplateResponse> {
+  const res = await fetch(`${BASE}/api/smart-money/leaders/route-template`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address, template }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`${res.status}: ${body}`);
+  }
+  return res.json();
+}
+
 export function fetchCryptoAlphaConfig(): Promise<CryptoAlphaConfigSection> {
   return get("/api/config/crypto_alpha");
 }
@@ -393,6 +661,18 @@ export function fetchCryptoCandidateDecisions(): Promise<CryptoCandidateDecision
 
 export function fetchCryptoExitDecisions(): Promise<CryptoExitDecisionEntry[]> {
   return get("/api/crypto/exits");
+}
+
+export function fetchCryptoTrades(limit = 200): Promise<CryptoTradeEntry[]> {
+  return get(`/api/crypto/trades?limit=${limit}`);
+}
+
+export function fetchStrategyTrades(strategy: string, limit = 200): Promise<CryptoTradeEntry[]> {
+  return get(`/api/trades?strategy=${encodeURIComponent(strategy)}&limit=${limit}`);
+}
+
+export function fetchSmartMoneyAudit(limit = 50): Promise<SmartMoneyAuditEntry[]> {
+  return get(`/api/smart-money/audit?limit=${limit}`);
 }
 
 export async function fetchMetrics(): Promise<string> {

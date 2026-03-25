@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,7 +19,7 @@ use pa_core::types::{
 use pa_market_data::event_calendar::EventCalendarService;
 use pa_monitor::diagnostics::{
     CryptoCandidateDecision, CryptoExitDecision, recent_crypto_candidate_decisions,
-    record_crypto_candidate_decision, record_crypto_exit_decision,
+    recent_crypto_exit_decisions, record_crypto_candidate_decision, record_crypto_exit_decision,
 };
 
 use crate::profitability::ProfitCalculator;
@@ -184,6 +184,7 @@ fn specificity_score(
     entry: &pa_core::config::CryptoCalibrationOverride,
     asset_class: &str,
     horizon: &str,
+    resolution_bucket: &str,
     market_type: &str,
     event_subtype: &str,
 ) -> u32 {
@@ -202,8 +203,13 @@ fn specificity_score(
         0
     };
     let horizon_score = if exact(&entry.horizon, horizon) { 4 } else { 0 };
-    let market_type_score = if exact(&entry.market_type, market_type) {
+    let resolution_bucket_score = if exact(&entry.resolution_bucket, resolution_bucket) {
         2
+    } else {
+        0
+    };
+    let market_type_score = if exact(&entry.market_type, market_type) {
+        1
     } else {
         0
     };
@@ -212,7 +218,12 @@ fn specificity_score(
     } else {
         0
     };
-    asset_score + asset_class_score + horizon_score + market_type_score + event_subtype_score
+    asset_score
+        + asset_class_score
+        + horizon_score
+        + resolution_bucket_score
+        + market_type_score
+        + event_subtype_score
 }
 
 #[derive(Debug, Clone)]
@@ -950,6 +961,10 @@ impl CryptoAlphaStrategy {
         }
     }
 
+    fn is_alt_asset(asset: &CryptoAsset) -> bool {
+        Self::asset_class_selector(asset) == "alt"
+    }
+
     fn event_subtype_selector(subtype: Option<CryptoEventSubtype>) -> &'static str {
         match subtype {
             Some(CryptoEventSubtype::Unlock) => "unlock",
@@ -1095,6 +1110,10 @@ impl CryptoAlphaStrategy {
             if self.is_same_day_resolution(days_to_resolution) {
                 let mut edge_multiplier = self.config.same_day_min_edge_multiplier;
                 let mut spread_multiplier = self.config.same_day_max_spread_multiplier;
+                if Self::is_alt_asset(asset) {
+                    edge_multiplier *= self.config.same_day_alt_min_edge_multiplier;
+                    spread_multiplier *= self.config.same_day_alt_max_spread_multiplier;
+                }
                 if self.is_same_day_range_market(days_to_resolution, market_type) {
                     edge_multiplier *= self.config.same_day_range_min_edge_multiplier;
                     spread_multiplier *= self.config.same_day_range_max_spread_multiplier;
@@ -1402,8 +1421,11 @@ impl CryptoAlphaStrategy {
         let (event_multiplier, event_subtype) = self
             .effective_event_size_multiplier(asset, market_text)
             .await;
-        let horizon_multiplier =
+        let mut horizon_multiplier =
             self.effective_horizon_size_multiplier(days_to_resolution, market_type);
+        if self.is_same_day_resolution(days_to_resolution) && Self::is_alt_asset(asset) {
+            horizon_multiplier *= self.config.same_day_alt_size_multiplier;
+        }
         let override_multiplier = self
             .calibration_override_size_multiplier(
                 asset,
@@ -1421,6 +1443,16 @@ impl CryptoAlphaStrategy {
         days_to_resolution == 0
     }
 
+    fn resolution_bucket_selector(&self, days_to_resolution: u32) -> &'static str {
+        if self.is_same_day_resolution(days_to_resolution) {
+            "same_day"
+        } else if self.is_short_horizon_resolution(days_to_resolution) {
+            "next_day"
+        } else {
+            "legacy"
+        }
+    }
+
     fn is_same_day_range_market(
         &self,
         days_to_resolution: u32,
@@ -1428,6 +1460,64 @@ impl CryptoAlphaStrategy {
     ) -> bool {
         self.is_same_day_resolution(days_to_resolution)
             && matches!(market_type, CryptoMarketType::Range)
+    }
+
+    fn same_day_range_bad_exit_cooldown_active(
+        &self,
+        asset: &'static CryptoAsset,
+        event_subtype: Option<&str>,
+    ) -> bool {
+        let cooldown_window =
+            chrono::Duration::seconds(self.config.same_day_range_bad_exit_cooldown_secs as i64);
+        let now = Utc::now();
+        let target_subtype = event_subtype.unwrap_or("generic");
+        let distinct_bad_questions = recent_crypto_exit_decisions()
+            .into_iter()
+            .filter(|entry| {
+                (now - entry.recorded_at) <= cooldown_window
+                    && entry.asset.as_deref() == Some(asset.name)
+                    && entry.market_type.as_deref() == Some(CryptoMarketType::Range.as_str())
+                    && entry.days_to_resolution == Some(0)
+                    && matches!(
+                        entry.reason.as_str(),
+                        "model_reversal" | "relative_stop_loss"
+                    )
+                    && entry.event_subtype.as_deref().unwrap_or("generic") == target_subtype
+            })
+            .map(|entry| entry.question)
+            .collect::<HashSet<_>>()
+            .len();
+        distinct_bad_questions
+            >= self.config.same_day_range_bad_exit_cooldown_trigger_count as usize
+    }
+
+    fn same_day_alt_bad_exit_cooldown_active(
+        &self,
+        asset: &'static CryptoAsset,
+        event_subtype: Option<&str>,
+    ) -> bool {
+        let cooldown_window =
+            chrono::Duration::seconds(self.config.same_day_alt_bad_exit_cooldown_secs as i64);
+        let now = Utc::now();
+        let target_subtype = event_subtype.unwrap_or("generic");
+        let distinct_bad_questions = recent_crypto_exit_decisions()
+            .into_iter()
+            .filter(|entry| {
+                (now - entry.recorded_at) <= cooldown_window
+                    && entry.asset.as_deref() == Some(asset.name)
+                    && entry.market_type.as_deref() == Some(CryptoMarketType::Binary.as_str())
+                    && entry.days_to_resolution == Some(0)
+                    && matches!(
+                        entry.reason.as_str(),
+                        "model_reversal" | "relative_stop_loss"
+                    )
+                    && ((target_subtype == "generic" || target_subtype == "other")
+                        || entry.event_subtype.as_deref().unwrap_or("generic") == target_subtype)
+            })
+            .map(|entry| entry.question)
+            .collect::<HashSet<_>>()
+            .len();
+        distinct_bad_questions >= self.config.same_day_alt_bad_exit_cooldown_trigger_count as usize
     }
 
     fn is_short_horizon_resolution(&self, days_to_resolution: u32) -> bool {
@@ -1499,6 +1589,7 @@ impl CryptoAlphaStrategy {
         select: impl Fn(&pa_core::config::CryptoCalibrationOverride) -> Option<Decimal>,
     ) -> Option<Decimal> {
         let horizon = self.horizon_bucket(days_to_resolution);
+        let resolution_bucket = self.resolution_bucket_selector(days_to_resolution);
         let asset_class = Self::asset_class_selector(asset);
         let event_subtype = Self::event_subtype_selector(event_subtype);
         self.config
@@ -1515,6 +1606,11 @@ impl CryptoAlphaStrategy {
                 let horizon_match = entry.horizon.is_empty()
                     || entry.horizon.eq_ignore_ascii_case("any")
                     || entry.horizon.eq_ignore_ascii_case(horizon);
+                let resolution_bucket_match = entry.resolution_bucket.is_empty()
+                    || entry.resolution_bucket.eq_ignore_ascii_case("any")
+                    || entry
+                        .resolution_bucket
+                        .eq_ignore_ascii_case(resolution_bucket);
                 let market_type_match = entry.market_type.is_empty()
                     || entry.market_type.eq_ignore_ascii_case("any")
                     || entry.market_type.eq_ignore_ascii_case(market_type.as_str());
@@ -1524,6 +1620,7 @@ impl CryptoAlphaStrategy {
                 if !(asset_match
                     && asset_class_match
                     && horizon_match
+                    && resolution_bucket_match
                     && market_type_match
                     && event_subtype_match)
                 {
@@ -1535,6 +1632,7 @@ impl CryptoAlphaStrategy {
                     entry,
                     asset_class,
                     horizon,
+                    resolution_bucket,
                     market_type.as_str(),
                     event_subtype,
                 );
@@ -1569,6 +1667,9 @@ impl CryptoAlphaStrategy {
         };
         let horizon_factor = if self.is_same_day_resolution(days_to_resolution) {
             let mut factor = self.config.same_day_probability_calibration;
+            if Self::is_alt_asset(asset) {
+                factor *= self.config.same_day_alt_probability_multiplier;
+            }
             if self.is_same_day_range_market(days_to_resolution, market_type) {
                 factor *= self.config.same_day_range_probability_multiplier;
             }
@@ -1890,11 +1991,22 @@ impl CryptoAlphaStrategy {
             .is_same_day_resolution(days_to_resolution)
         {
             let mut exit_buffer_multiplier = self.config.same_day_exit_buffer_multiplier;
+            if asset.is_some_and(Self::is_alt_asset) {
+                exit_buffer_multiplier *= self.config.same_day_alt_exit_buffer_multiplier;
+            }
             if self.is_same_day_range_market(days_to_resolution, market_type) {
                 exit_buffer_multiplier *= self.config.same_day_range_exit_buffer_multiplier;
             }
+            let capital_efficiency_threshold = if asset.is_some_and(Self::is_alt_asset) {
+                (self.config.same_day_capital_efficiency_threshold
+                    * self.config.same_day_alt_capital_efficiency_multiplier)
+                    .min(Decimal::ONE)
+                    .max(Decimal::ZERO)
+            } else {
+                self.config.same_day_capital_efficiency_threshold
+            };
             (
-                self.config.same_day_capital_efficiency_threshold,
+                capital_efficiency_threshold,
                 (Decimal::from(self.config.exit_buffer_bps) / dec!(10000)) * exit_buffer_multiplier,
             )
         } else if self.is_short_horizon_resolution(days_to_resolution) {
@@ -1950,6 +2062,9 @@ impl CryptoAlphaStrategy {
     ) -> Decimal {
         let mut multiplier = if self.is_same_day_resolution(days_to_resolution) {
             let mut multiplier = self.config.same_day_hold_edge_multiplier;
+            if asset.is_some_and(Self::is_alt_asset) {
+                multiplier *= self.config.same_day_alt_hold_edge_multiplier;
+            }
             if self.is_same_day_range_market(days_to_resolution, market_type) {
                 multiplier *= self.config.same_day_range_hold_edge_multiplier;
             }
@@ -3264,6 +3379,7 @@ impl CryptoAlphaStrategy {
 
     fn execution_quality_weight_multipliers(
         &self,
+        asset: &CryptoAsset,
         days_to_resolution: u32,
         market_type: CryptoMarketType,
     ) -> (Decimal, Decimal, Decimal) {
@@ -3276,6 +3392,17 @@ impl CryptoAlphaStrategy {
                 self.config
                     .same_day_execution_quality_slippage_weight_multiplier,
             );
+            if Self::is_alt_asset(asset) {
+                multipliers.0 *= self
+                    .config
+                    .same_day_alt_execution_quality_profit_weight_multiplier;
+                multipliers.1 *= self
+                    .config
+                    .same_day_alt_execution_quality_size_weight_multiplier;
+                multipliers.2 *= self
+                    .config
+                    .same_day_alt_execution_quality_slippage_weight_multiplier;
+            }
             if self.is_same_day_range_market(days_to_resolution, market_type) {
                 multipliers.0 *= self
                     .config
@@ -3871,6 +3998,27 @@ impl CryptoAlphaStrategy {
             .unwrap_or_else(|| market.question.clone());
         let (event_context_source, event_title, event_category, event_subtype) =
             self.decision_event_context(&market_text).await;
+        if self.is_same_day_resolution(days as u32)
+            && Self::is_alt_asset(question.asset)
+            && self.same_day_alt_bad_exit_cooldown_active(question.asset, event_subtype.as_deref())
+        {
+            self.record_gate_reject_decision(
+                question.asset,
+                None,
+                CryptoMarketType::Binary,
+                &market.question,
+                days as u32,
+                Decimal::ZERO,
+                false,
+                market.condition_id,
+                "same_day_alt_bad_exit_cooldown",
+                event_context_source,
+                event_title,
+                event_category,
+                event_subtype,
+            );
+            return None;
+        }
         let (effective_min_edge_bps, effective_max_spread_bps) = self
             .effective_entry_thresholds_for_context(
                 question.asset,
@@ -4166,7 +4314,11 @@ impl CryptoAlphaStrategy {
             execution_quality_profit_weight_multiplier,
             execution_quality_size_weight_multiplier,
             execution_quality_slippage_weight_multiplier,
-        ) = self.execution_quality_weight_multipliers(days as u32, CryptoMarketType::Binary);
+        ) = self.execution_quality_weight_multipliers(
+            question.asset,
+            days as u32,
+            CryptoMarketType::Binary,
+        );
 
         Some(CryptoEntryCandidate {
             opportunity: TradingOpportunity {
@@ -4226,6 +4378,30 @@ impl CryptoAlphaStrategy {
         }
         let (event_context_source, event_title, event_category, event_subtype) =
             self.decision_event_context(&event_market_text).await;
+        if self.is_same_day_range_market(days.ceil() as u32, CryptoMarketType::Range)
+            && self.same_day_range_bad_exit_cooldown_active(asset, event_subtype.as_deref())
+        {
+            self.record_gate_reject_decision(
+                asset,
+                None,
+                CryptoMarketType::Range,
+                &event.title,
+                days.ceil() as u32,
+                Decimal::ZERO,
+                false,
+                event
+                    .markets
+                    .first()
+                    .map(|market| market.condition_id)
+                    .unwrap_or_default(),
+                "same_day_range_bad_exit_cooldown",
+                event_context_source,
+                event_title,
+                event_category,
+                event_subtype,
+            );
+            return None;
+        }
         let (effective_min_edge_bps, effective_max_spread_bps) = self
             .effective_entry_thresholds_for_context(
                 asset,
@@ -4573,7 +4749,11 @@ impl CryptoAlphaStrategy {
             execution_quality_profit_weight_multiplier,
             execution_quality_size_weight_multiplier,
             execution_quality_slippage_weight_multiplier,
-        ) = self.execution_quality_weight_multipliers(days.ceil() as u32, CryptoMarketType::Range);
+        ) = self.execution_quality_weight_multipliers(
+            asset,
+            days.ceil() as u32,
+            CryptoMarketType::Range,
+        );
 
         Some(CryptoEntryCandidate {
             opportunity: TradingOpportunity {
@@ -4719,6 +4899,29 @@ impl CryptoAlphaStrategy {
             } else {
                 format!("{} {}", group.title, market.question)
             };
+            let (event_context_source, event_title, event_category, event_subtype) =
+                self.decision_event_context(&group_market_text).await;
+            if self.is_same_day_resolution(days as u32)
+                && Self::is_alt_asset(asset)
+                && self.same_day_alt_bad_exit_cooldown_active(asset, event_subtype.as_deref())
+            {
+                self.record_gate_reject_decision(
+                    asset,
+                    None,
+                    CryptoMarketType::Binary,
+                    &market.question,
+                    days as u32,
+                    Decimal::ZERO,
+                    false,
+                    market.condition_id,
+                    "same_day_alt_bad_exit_cooldown",
+                    event_context_source,
+                    event_title,
+                    event_category,
+                    event_subtype,
+                );
+                continue;
+            }
             let (_, effective_max_spread_bps) = self
                 .effective_entry_thresholds_for_context(
                     asset,
@@ -5072,7 +5275,11 @@ impl CryptoAlphaStrategy {
             execution_quality_profit_weight_multiplier,
             execution_quality_size_weight_multiplier,
             execution_quality_slippage_weight_multiplier,
-        ) = self.execution_quality_weight_multipliers(winner_days as u32, CryptoMarketType::Binary);
+        ) = self.execution_quality_weight_multipliers(
+            asset,
+            winner_days as u32,
+            CryptoMarketType::Binary,
+        );
 
         Some(CryptoEntryCandidate {
             opportunity: TradingOpportunity {
@@ -6548,40 +6755,54 @@ mod tests {
             short_horizon_max_days: 1,
             medium_horizon_max_days: 7,
             max_entry_days: 3650,
+            same_day_alt_probability_multiplier: dec!(0.95),
+            same_day_range_bad_exit_cooldown_trigger_count: 2,
+            same_day_range_bad_exit_cooldown_secs: 1800,
+            same_day_alt_bad_exit_cooldown_trigger_count: 2,
+            same_day_alt_bad_exit_cooldown_secs: 1800,
             same_day_probability_calibration: dec!(0.80),
             same_day_range_probability_multiplier: dec!(0.90),
             short_horizon_probability_calibration: dec!(0.85),
             medium_horizon_probability_calibration: dec!(0.92),
             same_day_execution_quality_profit_weight_multiplier: dec!(0.80),
+            same_day_alt_execution_quality_profit_weight_multiplier: dec!(0.90),
             same_day_range_execution_quality_profit_weight_multiplier: dec!(0.85),
             same_day_execution_quality_size_weight_multiplier: dec!(1.20),
+            same_day_alt_execution_quality_size_weight_multiplier: dec!(1.10),
             same_day_range_execution_quality_size_weight_multiplier: dec!(1.10),
             same_day_execution_quality_slippage_weight_multiplier: dec!(1.30),
+            same_day_alt_execution_quality_slippage_weight_multiplier: dec!(1.15),
             same_day_range_execution_quality_slippage_weight_multiplier: dec!(1.20),
             short_execution_quality_profit_weight_multiplier: dec!(1.15),
             short_execution_quality_size_weight_multiplier: dec!(0.95),
             short_execution_quality_slippage_weight_multiplier: dec!(0.90),
             same_day_size_multiplier: dec!(0.45),
+            same_day_alt_size_multiplier: dec!(0.80),
             same_day_range_size_multiplier: dec!(0.75),
             short_horizon_size_multiplier: dec!(0.60),
             medium_horizon_size_multiplier: dec!(0.80),
             same_day_min_edge_multiplier: dec!(1.70),
+            same_day_alt_min_edge_multiplier: dec!(1.10),
             same_day_range_min_edge_multiplier: dec!(1.15),
             short_horizon_min_edge_multiplier: dec!(1.50),
             medium_horizon_min_edge_multiplier: dec!(1.20),
             same_day_max_spread_multiplier: dec!(0.65),
+            same_day_alt_max_spread_multiplier: dec!(0.85),
             same_day_range_max_spread_multiplier: dec!(0.85),
             short_horizon_max_spread_multiplier: dec!(0.75),
             medium_horizon_max_spread_multiplier: dec!(0.90),
             same_day_capital_efficiency_threshold: dec!(0.90),
+            same_day_alt_capital_efficiency_multiplier: dec!(0.98),
             short_horizon_capital_efficiency_threshold: dec!(0.92),
             medium_horizon_capital_efficiency_threshold: dec!(0.95),
             same_day_exit_buffer_multiplier: dec!(0.40),
+            same_day_alt_exit_buffer_multiplier: dec!(0.90),
             same_day_range_exit_buffer_multiplier: dec!(0.85),
             short_horizon_exit_buffer_multiplier: dec!(0.50),
             medium_horizon_exit_buffer_multiplier: dec!(0.80),
             hold_min_edge_bps: 100,
             same_day_hold_edge_multiplier: dec!(1.70),
+            same_day_alt_hold_edge_multiplier: dec!(1.10),
             same_day_range_hold_edge_multiplier: dec!(1.10),
             short_horizon_hold_edge_multiplier: dec!(1.50),
             medium_horizon_hold_edge_multiplier: dec!(1.20),
@@ -6612,6 +6833,7 @@ mod tests {
             same_day_edge_decay_cooldown_multiplier: dec!(0.40),
             short_horizon_edge_decay_cooldown_multiplier: dec!(0.50),
             medium_horizon_edge_decay_cooldown_multiplier: dec!(0.75),
+            ..Default::default()
         };
         let books = Arc::new(books);
         CryptoAlphaStrategy::new(
@@ -6784,6 +7006,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_same_day_alt_market_is_tighter_than_major() {
+        let strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        let major_asset = &CRYPTO_ASSETS[0];
+        let alt_asset = CRYPTO_ASSETS
+            .iter()
+            .find(|asset| asset.binance_symbol == "SOLUSDT")
+            .expect("SOL asset");
+
+        let major_thresholds = strategy
+            .effective_entry_thresholds_for_context(
+                major_asset,
+                CryptoMarketType::Binary,
+                "Will Bitcoin reach $70,000 on March 25?",
+                0,
+            )
+            .await;
+        let alt_thresholds = strategy
+            .effective_entry_thresholds_for_context(
+                alt_asset,
+                CryptoMarketType::Binary,
+                "Will Solana reach $200 on March 25?",
+                0,
+            )
+            .await;
+
+        assert!(alt_thresholds.0 > major_thresholds.0);
+        assert!(alt_thresholds.1 < major_thresholds.1);
+
+        let major_prob = strategy.baseline_probability_calibration_factor(
+            major_asset,
+            0,
+            CryptoMarketType::Binary,
+        );
+        let alt_prob = strategy.baseline_probability_calibration_factor(
+            alt_asset,
+            0,
+            CryptoMarketType::Binary,
+        );
+        assert!(alt_prob < major_prob);
+
+        let major_size = strategy
+            .effective_size_multiplier(
+                major_asset,
+                0,
+                CryptoMarketType::Binary,
+                "Will Bitcoin reach $70,000 on March 25?",
+            )
+            .await;
+        let alt_size = strategy
+            .effective_size_multiplier(
+                alt_asset,
+                0,
+                CryptoMarketType::Binary,
+                "Will Solana reach $200 on March 25?",
+            )
+            .await;
+        assert!(alt_size < major_size);
+    }
+
+    #[tokio::test]
     async fn test_same_day_market_can_generate_new_entry() {
         let yes_token = U256::from(93u64);
         let no_token = U256::from(94u64);
@@ -6841,6 +7123,127 @@ mod tests {
             opp.is_some(),
             "same-day crypto market should remain eligible for new entry generation"
         );
+    }
+
+    #[tokio::test]
+    async fn test_same_day_range_bad_exit_cooldown_blocks_new_neg_risk_entry() {
+        pa_monitor::diagnostics::clear_crypto_exit_decisions();
+        pa_monitor::diagnostics::clear_crypto_candidate_decisions();
+
+        let now = Utc::now();
+        record_crypto_exit_decision(CryptoExitDecision {
+            recorded_at: now - chrono::Duration::minutes(5),
+            asset: Some("Bitcoin".into()),
+            reason: "model_reversal".into(),
+            event_context_source: Some("calendar".into()),
+            event_title: Some("Bitcoin ETF".into()),
+            event_category: Some("Crypto".into()),
+            event_subtype: Some("regulatory".into()),
+            question: "Bitcoin ETF -> $80,000 - $84,999".into(),
+            market_type: Some("range".into()),
+            held_is_yes: Some(true),
+            modeled_prob: Some(dec!(0.40)),
+            days_to_resolution: Some(0),
+            best_bid: dec!(0.30),
+            avg_cost: dec!(0.50),
+            size: dec!(2),
+        });
+        record_crypto_exit_decision(CryptoExitDecision {
+            recorded_at: now - chrono::Duration::minutes(3),
+            asset: Some("Bitcoin".into()),
+            reason: "relative_stop_loss".into(),
+            event_context_source: Some("calendar".into()),
+            event_title: Some("Bitcoin ETF".into()),
+            event_category: Some("Crypto".into()),
+            event_subtype: Some("regulatory".into()),
+            question: "Bitcoin ETF -> $85,000 or above".into(),
+            market_type: Some("range".into()),
+            held_is_yes: Some(false),
+            modeled_prob: None,
+            days_to_resolution: Some(0),
+            best_bid: dec!(0.20),
+            avg_cost: dec!(0.45),
+            size: dec!(2),
+        });
+
+        let yes_token = U256::from(501u64);
+        let no_token = U256::from(502u64);
+        let mut books = HashMap::new();
+        books.insert(
+            yes_token,
+            OrderBook {
+                token_id: yes_token,
+                bids: vec![PriceLevel {
+                    price: dec!(0.39),
+                    size: dec!(200),
+                }],
+                asks: vec![PriceLevel {
+                    price: dec!(0.40),
+                    size: dec!(200),
+                }],
+                timestamp: Utc::now(),
+            },
+        );
+        books.insert(
+            no_token,
+            OrderBook {
+                token_id: no_token,
+                bids: vec![PriceLevel {
+                    price: dec!(0.59),
+                    size: dec!(200),
+                }],
+                asks: vec![PriceLevel {
+                    price: dec!(0.60),
+                    size: dec!(200),
+                }],
+                timestamp: Utc::now(),
+            },
+        );
+
+        let mut strategy = make_crypto_strategy(books, vec![]);
+        strategy
+            .config
+            .same_day_range_bad_exit_cooldown_trigger_count = 2;
+        strategy.config.same_day_range_bad_exit_cooldown_secs = 1800;
+        seed_price_cache(&strategy, &CRYPTO_ASSETS[0], 83_000.0);
+
+        let target_date = Utc::now().date_naive();
+        let mut market = market_with_token_ids(
+            make_crypto_market("$80,000 - $84,999"),
+            yes_token,
+            no_token,
+            B256::from([88u8; 32]),
+        );
+        market.end_date = Some(target_date.and_hms_opt(23, 0, 0).unwrap().and_utc());
+        let event = NegRiskEvent {
+            neg_risk_market_id: B256::from([89u8; 32]),
+            title: format!(
+                "Will Bitcoin ETF decision happen by {}?",
+                target_date.format("%B %-d, %Y")
+            ),
+            markets: vec![market],
+            fee_rate_bps: 200,
+        };
+
+        let opp = strategy
+            .detect_crypto_neg_risk(
+                &event,
+                &CRYPTO_ASSETS[0],
+                0.0,
+                Decimal::ZERO,
+                &HashMap::new(),
+            )
+            .await;
+        assert!(opp.is_none());
+
+        let decisions = pa_monitor::diagnostics::recent_crypto_candidate_decisions();
+        assert!(decisions.iter().any(|decision| {
+            decision.action == "gate_reject"
+                && decision.reason == "same_day_range_bad_exit_cooldown"
+        }));
+
+        pa_monitor::diagnostics::clear_crypto_exit_decisions();
+        pa_monitor::diagnostics::clear_crypto_candidate_decisions();
     }
 
     #[test]
@@ -7017,6 +7420,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: "major".to_string(),
                 horizon: "any".to_string(),
+                resolution_bucket: String::new(),
                 market_type: "any".to_string(),
                 event_subtype: "regulatory".to_string(),
                 probability_calibration: None,
@@ -7040,6 +7444,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: "major".to_string(),
                 horizon: "short".to_string(),
+                resolution_bucket: "next_day".to_string(),
                 market_type: "binary".to_string(),
                 event_subtype: "regulatory".to_string(),
                 probability_calibration: None,
@@ -7424,6 +7829,7 @@ mod tests {
             asset: "*".to_string(),
             asset_class: "alt".to_string(),
             horizon: "long".to_string(),
+            resolution_bucket: "legacy".to_string(),
             market_type: "range".to_string(),
             event_subtype: "unlock".to_string(),
             probability_calibration: None,
@@ -7625,40 +8031,54 @@ mod tests {
             short_horizon_max_days: 1,
             medium_horizon_max_days: 7,
             max_entry_days: 3650,
+            same_day_alt_probability_multiplier: dec!(0.95),
+            same_day_range_bad_exit_cooldown_trigger_count: 2,
+            same_day_range_bad_exit_cooldown_secs: 1800,
+            same_day_alt_bad_exit_cooldown_trigger_count: 2,
+            same_day_alt_bad_exit_cooldown_secs: 1800,
             same_day_probability_calibration: dec!(0.80),
             same_day_range_probability_multiplier: dec!(0.90),
             short_horizon_probability_calibration: dec!(0.85),
             medium_horizon_probability_calibration: dec!(0.92),
             same_day_execution_quality_profit_weight_multiplier: dec!(0.80),
+            same_day_alt_execution_quality_profit_weight_multiplier: dec!(0.90),
             same_day_range_execution_quality_profit_weight_multiplier: dec!(0.85),
             same_day_execution_quality_size_weight_multiplier: dec!(1.20),
+            same_day_alt_execution_quality_size_weight_multiplier: dec!(1.10),
             same_day_range_execution_quality_size_weight_multiplier: dec!(1.10),
             same_day_execution_quality_slippage_weight_multiplier: dec!(1.30),
+            same_day_alt_execution_quality_slippage_weight_multiplier: dec!(1.15),
             same_day_range_execution_quality_slippage_weight_multiplier: dec!(1.20),
             short_execution_quality_profit_weight_multiplier: dec!(1.15),
             short_execution_quality_size_weight_multiplier: dec!(0.95),
             short_execution_quality_slippage_weight_multiplier: dec!(0.90),
             same_day_size_multiplier: dec!(0.45),
+            same_day_alt_size_multiplier: dec!(0.80),
             same_day_range_size_multiplier: dec!(0.75),
             short_horizon_size_multiplier: dec!(0.60),
             medium_horizon_size_multiplier: dec!(0.80),
             same_day_min_edge_multiplier: dec!(1.70),
+            same_day_alt_min_edge_multiplier: dec!(1.10),
             same_day_range_min_edge_multiplier: dec!(1.15),
             short_horizon_min_edge_multiplier: dec!(1.50),
             medium_horizon_min_edge_multiplier: dec!(1.20),
             same_day_max_spread_multiplier: dec!(0.65),
+            same_day_alt_max_spread_multiplier: dec!(0.85),
             same_day_range_max_spread_multiplier: dec!(0.85),
             short_horizon_max_spread_multiplier: dec!(0.75),
             medium_horizon_max_spread_multiplier: dec!(0.90),
             same_day_capital_efficiency_threshold: dec!(0.90),
+            same_day_alt_capital_efficiency_multiplier: dec!(0.98),
             short_horizon_capital_efficiency_threshold: dec!(0.92),
             medium_horizon_capital_efficiency_threshold: dec!(0.95),
             same_day_exit_buffer_multiplier: dec!(0.40),
+            same_day_alt_exit_buffer_multiplier: dec!(0.90),
             same_day_range_exit_buffer_multiplier: dec!(0.85),
             short_horizon_exit_buffer_multiplier: dec!(0.50),
             medium_horizon_exit_buffer_multiplier: dec!(0.80),
             hold_min_edge_bps: 100,
             same_day_hold_edge_multiplier: dec!(1.70),
+            same_day_alt_hold_edge_multiplier: dec!(1.10),
             same_day_range_hold_edge_multiplier: dec!(1.10),
             short_horizon_hold_edge_multiplier: dec!(1.50),
             medium_horizon_hold_edge_multiplier: dec!(1.20),
@@ -7689,6 +8109,7 @@ mod tests {
             same_day_edge_decay_cooldown_multiplier: dec!(0.40),
             short_horizon_edge_decay_cooldown_multiplier: dec!(0.50),
             medium_horizon_edge_decay_cooldown_multiplier: dec!(0.75),
+            ..Default::default()
         };
         let books = Arc::new(books);
         let strategy = CryptoAlphaStrategy::new(
@@ -7853,6 +8274,7 @@ mod tests {
             asset: "*".to_string(),
             asset_class: "major".to_string(),
             horizon: "long".to_string(),
+            resolution_bucket: String::new(),
             market_type: "binary".to_string(),
             event_subtype: "regulatory".to_string(),
             probability_calibration: None,
@@ -7946,6 +8368,7 @@ mod tests {
             asset: "*".to_string(),
             asset_class: "major".to_string(),
             horizon: "long".to_string(),
+            resolution_bucket: String::new(),
             market_type: "binary".to_string(),
             event_subtype: "regulatory".to_string(),
             probability_calibration: None,
@@ -8336,40 +8759,54 @@ mod tests {
             short_horizon_max_days: 1,
             medium_horizon_max_days: 7,
             max_entry_days: 3650,
+            same_day_alt_probability_multiplier: dec!(0.95),
+            same_day_range_bad_exit_cooldown_trigger_count: 2,
+            same_day_range_bad_exit_cooldown_secs: 1800,
+            same_day_alt_bad_exit_cooldown_trigger_count: 2,
+            same_day_alt_bad_exit_cooldown_secs: 1800,
             same_day_probability_calibration: dec!(0.80),
             same_day_range_probability_multiplier: dec!(0.90),
             short_horizon_probability_calibration: dec!(0.85),
             medium_horizon_probability_calibration: dec!(0.92),
             same_day_execution_quality_profit_weight_multiplier: dec!(0.80),
+            same_day_alt_execution_quality_profit_weight_multiplier: dec!(0.90),
             same_day_range_execution_quality_profit_weight_multiplier: dec!(0.85),
             same_day_execution_quality_size_weight_multiplier: dec!(1.20),
+            same_day_alt_execution_quality_size_weight_multiplier: dec!(1.10),
             same_day_range_execution_quality_size_weight_multiplier: dec!(1.10),
             same_day_execution_quality_slippage_weight_multiplier: dec!(1.30),
+            same_day_alt_execution_quality_slippage_weight_multiplier: dec!(1.15),
             same_day_range_execution_quality_slippage_weight_multiplier: dec!(1.20),
             short_execution_quality_profit_weight_multiplier: dec!(1.15),
             short_execution_quality_size_weight_multiplier: dec!(0.95),
             short_execution_quality_slippage_weight_multiplier: dec!(0.90),
             same_day_size_multiplier: dec!(0.45),
+            same_day_alt_size_multiplier: dec!(0.80),
             same_day_range_size_multiplier: dec!(0.75),
             short_horizon_size_multiplier: dec!(0.60),
             medium_horizon_size_multiplier: dec!(0.80),
             same_day_min_edge_multiplier: dec!(1.70),
+            same_day_alt_min_edge_multiplier: dec!(1.10),
             same_day_range_min_edge_multiplier: dec!(1.15),
             short_horizon_min_edge_multiplier: dec!(1.50),
             medium_horizon_min_edge_multiplier: dec!(1.20),
             same_day_max_spread_multiplier: dec!(0.65),
+            same_day_alt_max_spread_multiplier: dec!(0.85),
             same_day_range_max_spread_multiplier: dec!(0.85),
             short_horizon_max_spread_multiplier: dec!(0.75),
             medium_horizon_max_spread_multiplier: dec!(0.90),
             same_day_capital_efficiency_threshold: dec!(0.90),
+            same_day_alt_capital_efficiency_multiplier: dec!(0.98),
             short_horizon_capital_efficiency_threshold: dec!(0.92),
             medium_horizon_capital_efficiency_threshold: dec!(0.95),
             same_day_exit_buffer_multiplier: dec!(0.40),
+            same_day_alt_exit_buffer_multiplier: dec!(0.90),
             same_day_range_exit_buffer_multiplier: dec!(0.85),
             short_horizon_exit_buffer_multiplier: dec!(0.50),
             medium_horizon_exit_buffer_multiplier: dec!(0.80),
             hold_min_edge_bps: 100,
             same_day_hold_edge_multiplier: dec!(1.70),
+            same_day_alt_hold_edge_multiplier: dec!(1.10),
             same_day_range_hold_edge_multiplier: dec!(1.10),
             short_horizon_hold_edge_multiplier: dec!(1.50),
             medium_horizon_hold_edge_multiplier: dec!(1.20),
@@ -8526,6 +8963,7 @@ mod tests {
             asset: "*".to_string(),
             asset_class: "alt".to_string(),
             horizon: "long".to_string(),
+            resolution_bucket: String::new(),
             market_type: "binary".to_string(),
             event_subtype: "unlock".to_string(),
             probability_calibration: None,
@@ -8620,6 +9058,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: "alt".to_string(),
                 horizon: "long".to_string(),
+                resolution_bucket: String::new(),
                 market_type: "binary".to_string(),
                 event_subtype: "unlock".to_string(),
                 probability_calibration: None,
@@ -8665,6 +9104,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: "alt".to_string(),
                 horizon: "long".to_string(),
+                resolution_bucket: String::new(),
                 market_type: "binary".to_string(),
                 event_subtype: "unlock".to_string(),
                 probability_calibration: None,
@@ -8688,6 +9128,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: "alt".to_string(),
                 horizon: "long".to_string(),
+                resolution_bucket: String::new(),
                 market_type: "range".to_string(),
                 event_subtype: "unlock".to_string(),
                 probability_calibration: None,
@@ -8939,6 +9380,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: "alt".to_string(),
                 horizon: "long".to_string(),
+                resolution_bucket: String::new(),
                 market_type: "binary".to_string(),
                 event_subtype: "unlock".to_string(),
                 probability_calibration: None,
@@ -9011,6 +9453,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: "major".to_string(),
                 horizon: "long".to_string(),
+                resolution_bucket: String::new(),
                 market_type: "binary".to_string(),
                 event_subtype: "regulatory".to_string(),
                 probability_calibration: None,
@@ -9042,6 +9485,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: "alt".to_string(),
                 horizon: "long".to_string(),
+                resolution_bucket: String::new(),
                 market_type: "binary".to_string(),
                 event_subtype: "regulatory".to_string(),
                 probability_calibration: None,
@@ -9165,6 +9609,7 @@ mod tests {
                 asset: "BTCUSDT".to_string(),
                 asset_class: String::new(),
                 horizon: "short".to_string(),
+                resolution_bucket: String::new(),
                 market_type: "binary".to_string(),
                 event_subtype: String::new(),
                 probability_calibration: Some(dec!(0.82)),
@@ -9188,6 +9633,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: String::new(),
                 horizon: "short".to_string(),
+                resolution_bucket: String::new(),
                 market_type: "range".to_string(),
                 event_subtype: String::new(),
                 probability_calibration: Some(dec!(0.78)),
@@ -9260,6 +9706,7 @@ mod tests {
             asset: "BTCUSDT".to_string(),
             asset_class: String::new(),
             horizon: "short".to_string(),
+            resolution_bucket: String::new(),
             market_type: "binary".to_string(),
             event_subtype: String::new(),
             probability_calibration: Some(dec!(0.20)),
@@ -9299,6 +9746,7 @@ mod tests {
             asset: "BTCUSDT".to_string(),
             asset_class: String::new(),
             horizon: "short".to_string(),
+            resolution_bucket: String::new(),
             market_type: "binary".to_string(),
             event_subtype: String::new(),
             probability_calibration: Some(dec!(0.20)),
@@ -9338,6 +9786,7 @@ mod tests {
             asset: "BTCUSDT".to_string(),
             asset_class: String::new(),
             horizon: "short".to_string(),
+            resolution_bucket: String::new(),
             market_type: "binary".to_string(),
             event_subtype: String::new(),
             probability_calibration: None,
@@ -9378,6 +9827,7 @@ mod tests {
             asset: "BTCUSDT".to_string(),
             asset_class: String::new(),
             horizon: "short".to_string(),
+            resolution_bucket: String::new(),
             market_type: "binary".to_string(),
             event_subtype: String::new(),
             probability_calibration: None,
@@ -9419,6 +9869,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: "alt".to_string(),
                 horizon: "short".to_string(),
+                resolution_bucket: String::new(),
                 market_type: "binary".to_string(),
                 event_subtype: "unlock".to_string(),
                 probability_calibration: None,
@@ -9442,6 +9893,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: "major".to_string(),
                 horizon: "short".to_string(),
+                resolution_bucket: String::new(),
                 market_type: "binary".to_string(),
                 event_subtype: "unlock".to_string(),
                 probability_calibration: None,
@@ -9500,6 +9952,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: "major".to_string(),
                 horizon: "any".to_string(),
+                resolution_bucket: String::new(),
                 market_type: "any".to_string(),
                 event_subtype: "unlock".to_string(),
                 probability_calibration: None,
@@ -9523,6 +9976,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: "major".to_string(),
                 horizon: "short".to_string(),
+                resolution_bucket: "same_day".to_string(),
                 market_type: "binary".to_string(),
                 event_subtype: "unlock".to_string(),
                 probability_calibration: None,
@@ -9547,7 +10001,7 @@ mod tests {
         assert_eq!(
             strategy.calibration_override_sigma_multiplier(
                 &CRYPTO_ASSETS[0],
-                1,
+                0,
                 CryptoMarketType::Binary,
                 Some(CryptoEventSubtype::Unlock)
             ),
@@ -9556,7 +10010,7 @@ mod tests {
         assert_eq!(
             strategy.calibration_override_size_multiplier(
                 &CRYPTO_ASSETS[0],
-                1,
+                0,
                 CryptoMarketType::Binary,
                 Some(CryptoEventSubtype::Unlock)
             ),
@@ -9565,7 +10019,7 @@ mod tests {
         assert_eq!(
             strategy.calibration_override_value(
                 &CRYPTO_ASSETS[0],
-                1,
+                0,
                 CryptoMarketType::Binary,
                 Some(CryptoEventSubtype::Unlock),
                 |entry| entry.min_edge_multiplier,
@@ -9575,12 +10029,86 @@ mod tests {
         assert_eq!(
             strategy.calibration_override_value(
                 &CRYPTO_ASSETS[0],
-                1,
+                0,
                 CryptoMarketType::Binary,
                 Some(CryptoEventSubtype::Unlock),
                 |entry| entry.max_spread_multiplier,
             ),
             Some(dec!(0.99))
+        );
+    }
+
+    #[test]
+    fn test_crypto_calibration_override_resolution_bucket_prefers_same_day_rule() {
+        let mut strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        strategy.config.calibration_overrides = vec![
+            pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "major".to_string(),
+                horizon: "short".to_string(),
+                resolution_bucket: "any".to_string(),
+                market_type: "binary".to_string(),
+                event_subtype: "unlock".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: Some(dec!(1.08)),
+                size_multiplier: None,
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: None,
+                max_spread_multiplier: None,
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            },
+            pa_core::config::CryptoCalibrationOverride {
+                asset: "*".to_string(),
+                asset_class: "major".to_string(),
+                horizon: "short".to_string(),
+                resolution_bucket: "same_day".to_string(),
+                market_type: "binary".to_string(),
+                event_subtype: "unlock".to_string(),
+                probability_calibration: None,
+                sigma_multiplier: Some(dec!(1.03)),
+                size_multiplier: None,
+                depth_ratio_multiplier: None,
+                min_edge_multiplier: None,
+                max_spread_multiplier: None,
+                hold_edge_multiplier: None,
+                edge_decay_exit_multiplier: None,
+                edge_decay_confirmation_scan_multiplier: None,
+                edge_decay_confirmation_window_multiplier: None,
+                edge_decay_cooldown_multiplier: None,
+                capital_efficiency_multiplier: None,
+                model_reversal_buffer_multiplier: None,
+                profit_retention_multiplier: None,
+                slippage_multiplier: None,
+                size_retention_multiplier: None,
+            },
+        ];
+
+        assert_eq!(
+            strategy.calibration_override_sigma_multiplier(
+                &CRYPTO_ASSETS[0],
+                0,
+                CryptoMarketType::Binary,
+                Some(CryptoEventSubtype::Unlock),
+            ),
+            Some(dec!(1.03))
+        );
+        assert_eq!(
+            strategy.calibration_override_sigma_multiplier(
+                &CRYPTO_ASSETS[0],
+                1,
+                CryptoMarketType::Binary,
+                Some(CryptoEventSubtype::Unlock),
+            ),
+            Some(dec!(1.08))
         );
     }
 
@@ -9592,6 +10120,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: "alt".to_string(),
                 horizon: "any".to_string(),
+                resolution_bucket: String::new(),
                 market_type: "any".to_string(),
                 event_subtype: "unlock".to_string(),
                 probability_calibration: None,
@@ -9615,6 +10144,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: "alt".to_string(),
                 horizon: "short".to_string(),
+                resolution_bucket: String::new(),
                 market_type: "binary".to_string(),
                 event_subtype: "unlock".to_string(),
                 probability_calibration: None,
@@ -9654,6 +10184,7 @@ mod tests {
             asset: "*".to_string(),
             asset_class: "major".to_string(),
             horizon: "any".to_string(),
+            resolution_bucket: String::new(),
             market_type: "any".to_string(),
             event_subtype: "regulatory".to_string(),
             probability_calibration: None,
@@ -9693,6 +10224,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: "major".to_string(),
                 horizon: "any".to_string(),
+                resolution_bucket: String::new(),
                 market_type: "any".to_string(),
                 event_subtype: "regulatory".to_string(),
                 probability_calibration: None,
@@ -9716,6 +10248,7 @@ mod tests {
                 asset: "*".to_string(),
                 asset_class: "major".to_string(),
                 horizon: "short".to_string(),
+                resolution_bucket: String::new(),
                 market_type: "binary".to_string(),
                 event_subtype: "regulatory".to_string(),
                 probability_calibration: None,
@@ -9782,6 +10315,7 @@ mod tests {
             asset: "*".to_string(),
             asset_class: "alt".to_string(),
             horizon: "short".to_string(),
+            resolution_bucket: String::new(),
             market_type: "binary".to_string(),
             event_subtype: "unlock".to_string(),
             probability_calibration: None,

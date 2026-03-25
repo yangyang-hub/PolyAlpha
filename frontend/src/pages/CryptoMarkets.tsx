@@ -3,11 +3,13 @@ import {
   fetchCryptoCandidateDecisions,
   fetchCryptoAlphaConfig,
   fetchCryptoExitDecisions,
+  fetchCryptoTrades,
   fetchPositions,
   fetchStatus,
   type CryptoCandidateDecisionEntry,
   type CryptoAlphaConfigSection,
   type CryptoExitDecisionEntry,
+  type CryptoTradeEntry,
   type PositionEntry,
   type StatusResponse,
 } from "../api";
@@ -101,6 +103,130 @@ function gateScaleHint(reason: string): string {
   }
 }
 
+function formatCooldownRemaining(totalSeconds: number): string {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) {
+    return `${seconds}s`;
+  }
+  if (minutes < 60) {
+    return `${minutes}m ${seconds}s`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remMinutes = minutes % 60;
+  return `${hours}h ${remMinutes}m`;
+}
+
+function bucketLabel(bucket: string | null | undefined): string {
+  switch (bucket) {
+    case "same_day":
+      return "Same Day";
+    case "next_day":
+      return "Next Day";
+    case "legacy":
+      return "Legacy";
+    default:
+      return "Unknown";
+  }
+}
+
+function shapeLabel(shape: "range" | "directional"): string {
+  return shape === "range" ? "Range" : "Directional";
+}
+
+function assetClassLabel(asset: string | null | undefined): "major" | "alt" | "any" {
+  switch ((asset ?? "").toLowerCase()) {
+    case "bitcoin":
+    case "ethereum":
+      return "major";
+    case "":
+      return "any";
+    default:
+      return "alt";
+  }
+}
+
+function renderPatchRowsToToml(
+  rows: Array<{
+    selector_asset_class: string;
+    selector_event_subtype: string;
+    selector_shape: string;
+    market_type: string;
+    fields: Array<{
+      target_field: string;
+      preview_value: string;
+    }>;
+  }>,
+): string {
+  return rows
+    .map((row) => {
+      const lines = [
+        "[[crypto_alpha.calibration_overrides]]",
+        'asset = "*"',
+        `asset_class = "${row.selector_asset_class}"`,
+        'horizon = "short"',
+        `market_type = "${row.market_type}"`,
+        `event_subtype = "${row.selector_event_subtype}"`,
+        ...row.fields.map((field) => `${field.target_field} = ${field.preview_value}`),
+      ];
+      return lines.join("\n");
+    })
+    .join("\n\n");
+}
+
+function inferPositionShape(position: PositionEntry): "range" | "directional" {
+  if (
+    position.direction === "inside_range" ||
+    position.direction === "outside_range" ||
+    position.question?.includes(" - ") ||
+    position.question?.toLowerCase().includes("between")
+  ) {
+    return "range";
+  }
+  return "directional";
+}
+
+function inferTradeBucket(
+  question: string | null | undefined,
+  executedAt: string | null | undefined,
+): "same_day" | "next_day" | "legacy" {
+  if (!question) {
+    return "legacy";
+  }
+  const tail = question.includes("→") ? question.split("→").pop()?.trim() ?? question : question;
+  const match = tail.match(
+    /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),\s*(\d{4})\b/i,
+  );
+  if (!match) {
+    return "legacy";
+  }
+  const targetDate = new Date(`${match[1]} ${match[2]}, ${match[3]} 00:00:00 UTC`);
+  const reference = executedAt ? new Date(executedAt) : new Date();
+  const referenceDate = new Date(
+    Date.UTC(reference.getUTCFullYear(), reference.getUTCMonth(), reference.getUTCDate()),
+  );
+  const days =
+    Math.round((targetDate.getTime() - referenceDate.getTime()) / (24 * 60 * 60 * 1000));
+  if (days <= 0) {
+    return "same_day";
+  }
+  if (days === 1) {
+    return "next_day";
+  }
+  return "legacy";
+}
+
+function inferTradeShape(question: string | null | undefined): "range" | "directional" {
+  if (!question) {
+    return "directional";
+  }
+  const tail = question.includes("→") ? question.split("→").pop()?.trim() ?? question : question;
+  if (tail.includes(" - ") || tail.toLowerCase().includes("between")) {
+    return "range";
+  }
+  return "directional";
+}
+
 function gateRejectPrioritySummary(
   topReason: string | null,
   topAssetEntry: [string, number] | undefined,
@@ -137,6 +263,8 @@ export default function CryptoMarkets() {
   const [selectedDecisionAsset, setSelectedDecisionAsset] = useState("全部");
   const [selectedDecisionDirection, setSelectedDecisionDirection] = useState("全部");
   const [decisionSortMode, setDecisionSortMode] = useState("最新优先");
+  const [patchCopyState, setPatchCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const [selectedPressureKey, setSelectedPressureKey] = useState<string | null>(null);
   const [activeDecisionFocus, setActiveDecisionFocus] = useState<{
     asset: string;
     direction: string;
@@ -146,17 +274,85 @@ export default function CryptoMarkets() {
   const statusFetcher = useCallback(() => fetchStatus(), []);
   const decisionsFetcher = useCallback(() => fetchCryptoCandidateDecisions(), []);
   const exitDecisionsFetcher = useCallback(() => fetchCryptoExitDecisions(), []);
+  const tradesFetcher = useCallback(() => fetchCryptoTrades(200), []);
   const { data: positions, loading } = usePolling<PositionEntry[]>(posFetcher, 15000);
   const { data: config } = usePolling<CryptoAlphaConfigSection>(configFetcher, 30000);
   const { data: status } = usePolling<StatusResponse>(statusFetcher, 15000);
   const { data: decisions } = usePolling<CryptoCandidateDecisionEntry[]>(decisionsFetcher, 15000);
   const { data: exitDecisions } = usePolling<CryptoExitDecisionEntry[]>(exitDecisionsFetcher, 15000);
+  const { data: trades } = usePolling<CryptoTradeEntry[]>(tradesFetcher, 15000);
 
   const totalCost = (positions ?? []).reduce((s, p) => s + Number(p.cost_basis), 0);
-  const totalPnl = (positions ?? []).reduce((s, p) => s + Number(p.unrealized_pnl ?? 0), 0);
-  const totalMarkValue = (positions ?? []).reduce(
-    (sum, p) => sum + Number(p.current_price ?? 0) * Number(p.size),
+  const totalPnlBid = (positions ?? []).reduce(
+    (s, p) => s + Number(p.unrealized_pnl_bid ?? p.unrealized_pnl ?? 0),
     0,
+  );
+  const totalPnlMid = (positions ?? []).reduce(
+    (s, p) => s + Number(p.unrealized_pnl_mid ?? 0),
+    0,
+  );
+  const totalMarkValue = (positions ?? []).reduce(
+    (sum, p) => sum + Number(p.bid_price ?? p.current_price ?? 0) * Number(p.size),
+    0,
+  );
+  const bucketSummaries = ["same_day", "next_day", "legacy"].map((bucket) => {
+    const bucketPositions = (positions ?? []).filter(
+      (position) => (position.resolution_bucket ?? "legacy") === bucket,
+    );
+    const bucketTrades = (trades ?? []).filter(
+      (trade) => inferTradeBucket(trade.question, trade.executed_at ?? trade.created_at) === bucket,
+    );
+    return {
+      bucket,
+      label: bucketLabel(bucket),
+      positions: bucketPositions.length,
+      costBasis: bucketPositions.reduce((sum, position) => sum + Number(position.cost_basis), 0),
+      unrealizedBid: bucketPositions.reduce(
+        (sum, position) => sum + Number(position.unrealized_pnl_bid ?? position.unrealized_pnl ?? 0),
+        0,
+      ),
+      unrealizedMid: bucketPositions.reduce(
+        (sum, position) => sum + Number(position.unrealized_pnl_mid ?? 0),
+        0,
+      ),
+      realized: bucketTrades.reduce(
+        (sum, trade) => sum + Number(trade.actual_profit ?? 0),
+        0,
+      ),
+      trades: bucketTrades.length,
+    };
+  });
+  const bucketShapeSummaries = ["same_day", "next_day", "legacy"].flatMap((bucket) =>
+    ["range", "directional"].map((shape) => {
+      const bucketPositions = (positions ?? []).filter(
+        (position) =>
+          (position.resolution_bucket ?? "legacy") === bucket &&
+          inferPositionShape(position) === shape,
+      );
+      const bucketTrades = (trades ?? []).filter(
+        (trade) =>
+          inferTradeBucket(trade.question, trade.executed_at ?? trade.created_at) === bucket &&
+          inferTradeShape(trade.question) === shape,
+      );
+      return {
+        key: `${bucket}-${shape}`,
+        bucket,
+        shape,
+        label: `${bucketLabel(bucket)} / ${shapeLabel(shape as "range" | "directional")}`,
+        positions: bucketPositions.length,
+        costBasis: bucketPositions.reduce((sum, position) => sum + Number(position.cost_basis), 0),
+        unrealizedBid: bucketPositions.reduce(
+          (sum, position) => sum + Number(position.unrealized_pnl_bid ?? position.unrealized_pnl ?? 0),
+          0,
+        ),
+        unrealizedMid: bucketPositions.reduce(
+          (sum, position) => sum + Number(position.unrealized_pnl_mid ?? 0),
+          0,
+        ),
+        realized: bucketTrades.reduce((sum, trade) => sum + Number(trade.actual_profit ?? 0), 0),
+        trades: bucketTrades.length,
+      };
+    }),
   );
   const strategyFinancials =
     status?.strategy_financials?.crypto_alpha ?? status?.strategy_financials?.crypto;
@@ -308,8 +504,212 @@ export default function CryptoMarkets() {
   const gateScaleRecentCount = status?.crypto_gate_scale_summary?.recent_count ?? visibleGateScales.length;
   const tuningHints = status?.crypto_entry_tuning_hints ?? [];
   const overrideSuggestions = status?.crypto_override_suggestions ?? [];
+  const overridePatchPreview = status?.crypto_override_patch_preview;
   const postEntryHints = status?.crypto_post_entry_tuning_hints ?? [];
   const postEntryOverrideSuggestions = status?.crypto_post_entry_override_suggestions ?? [];
+  const postEntryOverridePatchPreview = status?.crypto_post_entry_override_patch_preview;
+  const cooldownBuckets = status?.crypto_cooldown_summary?.buckets ?? [];
+  const combinedPatchToml = [
+    overridePatchPreview?.toml?.trim(),
+    postEntryOverridePatchPreview?.toml?.trim(),
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join("\n\n");
+
+  const copyPatchPreview = useCallback(async () => {
+    if (!combinedPatchToml) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(combinedPatchToml);
+      setPatchCopyState("copied");
+      window.setTimeout(() => setPatchCopyState("idle"), 2000);
+    } catch {
+      setPatchCopyState("failed");
+      window.setTimeout(() => setPatchCopyState("idle"), 2000);
+    }
+  }, [combinedPatchToml]);
+
+  const downloadPatchPreview = useCallback(() => {
+    if (!combinedPatchToml) {
+      return;
+    }
+    const blob = new Blob([combinedPatchToml], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "crypto_runtime_override_patch.toml";
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }, [combinedPatchToml]);
+  const shapePressureRows = bucketShapeSummaries
+    .map((entry) => {
+      const matchingPositions = (positions ?? []).filter(
+        (position) =>
+          (position.resolution_bucket ?? "legacy") === entry.bucket &&
+          inferPositionShape(position) === entry.shape,
+      );
+      const assetClasses = new Set(matchingPositions.map((position) => assetClassLabel(position.asset)));
+      const matchingCooldowns = cooldownBuckets.filter(
+        (bucket) =>
+          bucket.shape === entry.shape &&
+          ((entry.bucket === "same_day" &&
+            ((entry.shape === "range" && bucket.kind === "same_day_range") ||
+              (entry.shape === "directional" && bucket.kind === "same_day_alt"))) ||
+            (entry.bucket !== "same_day" && false)),
+      );
+      const matchingEntrySuggestions = overrideSuggestions.filter((suggestion) => {
+        if ((suggestion.selector_shape ?? "directional") !== entry.shape) {
+          return false;
+        }
+        if (suggestion.selector_asset_class === "any") {
+          return true;
+        }
+        return assetClasses.has(suggestion.selector_asset_class as "major" | "alt" | "any");
+      });
+      const matchingPostEntrySuggestions = postEntryOverrideSuggestions.filter((suggestion) => {
+        if ((suggestion.selector_shape ?? "directional") !== entry.shape) {
+          return false;
+        }
+        if (suggestion.selector_asset_class === "any") {
+          return true;
+        }
+        return assetClasses.has(suggestion.selector_asset_class as "major" | "alt" | "any");
+      });
+      const strongestSuggestion =
+        [...matchingEntrySuggestions, ...matchingPostEntrySuggestions].sort((a, b) => {
+          const priorityWeight = (value: string) =>
+            value === "high" ? 3 : value === "medium" ? 2 : value === "low" ? 1 : 0;
+          const aPriority = priorityWeight(a.priority);
+          const bPriority = priorityWeight(b.priority);
+          if (bPriority !== aPriority) {
+            return bPriority - aPriority;
+          }
+          return (b.support_count ?? 0) - (a.support_count ?? 0);
+        })[0] ?? null;
+      return {
+        ...entry,
+        cooldowns: matchingCooldowns,
+        cooldownActive: matchingCooldowns.length > 0,
+        remainingCooldownSecs: matchingCooldowns.length
+          ? Math.max(...matchingCooldowns.map((bucket) => bucket.remaining_secs))
+          : 0,
+        entrySuggestionCount: matchingEntrySuggestions.length,
+        postEntrySuggestionCount: matchingPostEntrySuggestions.length,
+        strongestSuggestion,
+      };
+    })
+    .filter(
+      (entry) =>
+        entry.positions > 0 ||
+        entry.trades > 0 ||
+        entry.cooldownActive ||
+        entry.entrySuggestionCount > 0 ||
+        entry.postEntrySuggestionCount > 0,
+    )
+    .sort((a, b) => {
+      if (a.cooldownActive !== b.cooldownActive) {
+        return a.cooldownActive ? -1 : 1;
+      }
+      const aLoss = a.realized + a.unrealizedBid;
+      const bLoss = b.realized + b.unrealizedBid;
+      if (aLoss !== bLoss) {
+        return aLoss - bLoss;
+      }
+      return b.positions - a.positions;
+    });
+  const pressuredShapes = new Set(
+    shapePressureRows
+      .filter((entry) => entry.cooldownActive || entry.realized + entry.unrealizedBid < 0)
+      .map((entry) => entry.shape),
+  );
+  const pressuredEntryPatchRows =
+    overridePatchPreview?.rows.filter((row) => pressuredShapes.has(row.selector_shape)) ?? [];
+  const pressuredPostEntryPatchRows =
+    postEntryOverridePatchPreview?.rows.filter((row) => pressuredShapes.has(row.selector_shape)) ?? [];
+  const pressuredPatchToml = [
+    renderPatchRowsToToml(pressuredEntryPatchRows),
+    renderPatchRowsToToml(pressuredPostEntryPatchRows),
+  ]
+    .filter((value) => value.trim().length > 0)
+    .join("\n\n");
+  const selectedPressureRow =
+    shapePressureRows.find((entry) => entry.key === selectedPressureKey) ?? null;
+  const selectedRowEntryPatchRows =
+    selectedPressureRow && overridePatchPreview
+      ? overridePatchPreview.rows.filter(
+          (row) =>
+            row.selector_shape === selectedPressureRow.shape &&
+            row.source_bucket === selectedPressureRow.bucket,
+        )
+      : [];
+  const selectedRowPostEntryPatchRows =
+    selectedPressureRow && postEntryOverridePatchPreview
+      ? postEntryOverridePatchPreview.rows.filter(
+          (row) =>
+            row.selector_shape === selectedPressureRow.shape &&
+            row.source_bucket === selectedPressureRow.bucket,
+        )
+      : [];
+  const selectedRowPatchToml = [
+    renderPatchRowsToToml(selectedRowEntryPatchRows),
+    renderPatchRowsToToml(selectedRowPostEntryPatchRows),
+  ]
+    .filter((value) => value.trim().length > 0)
+    .join("\n\n");
+
+  const copyPressuredPatchPreview = useCallback(async () => {
+    if (!pressuredPatchToml) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(pressuredPatchToml);
+      setPatchCopyState("copied");
+      window.setTimeout(() => setPatchCopyState("idle"), 2000);
+    } catch {
+      setPatchCopyState("failed");
+      window.setTimeout(() => setPatchCopyState("idle"), 2000);
+    }
+  }, [pressuredPatchToml]);
+
+  const downloadPressuredPatchPreview = useCallback(() => {
+    if (!pressuredPatchToml) {
+      return;
+    }
+    const blob = new Blob([pressuredPatchToml], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "crypto_pressure_override_patch.toml";
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }, [pressuredPatchToml]);
+  const copySelectedPressurePatchPreview = useCallback(async () => {
+    if (!selectedRowPatchToml) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(selectedRowPatchToml);
+      setPatchCopyState("copied");
+      window.setTimeout(() => setPatchCopyState("idle"), 2000);
+    } catch {
+      setPatchCopyState("failed");
+      window.setTimeout(() => setPatchCopyState("idle"), 2000);
+    }
+  }, [selectedRowPatchToml]);
+
+  const downloadSelectedPressurePatchPreview = useCallback(() => {
+    if (!selectedRowPatchToml || !selectedPressureRow) {
+      return;
+    }
+    const blob = new Blob([selectedRowPatchToml], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `crypto_${selectedPressureRow.bucket}_${selectedPressureRow.shape}_override_patch.toml`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }, [selectedRowPatchToml, selectedPressureRow]);
   const averageEfficiencyDelta =
     visibleReplacements.length > 0
       ? visibleReplacements.reduce(
@@ -450,6 +850,52 @@ export default function CryptoMarkets() {
         </div>
       )}
 
+      {!!cooldownBuckets.length && (
+        <div className="card bg-base-200 shadow-sm">
+          <div className="card-body p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="card-title text-base">当前熔断</h2>
+                <div className="text-xs opacity-60">
+                  当前因为连续坏退出而暂时停做的 same-day bucket
+                </div>
+              </div>
+              <span className="badge badge-warning badge-sm">
+                {status?.crypto_cooldown_summary?.active_count ?? cooldownBuckets.length} active
+              </span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="table table-sm">
+                <thead>
+                  <tr>
+                    <th>Bucket</th>
+                    <th>类型</th>
+                    <th>坏退出数</th>
+                    <th>触发阈值</th>
+                    <th>剩余时间</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cooldownBuckets.map((bucket) => (
+                    <tr key={`${bucket.kind}-${bucket.scope_label}`}>
+                      <td>{bucket.scope_label}</td>
+                      <td>
+                        <span className="badge badge-outline badge-sm">
+                          {bucket.kind === "same_day_range" ? "same_day range" : "same_day alt"}
+                        </span>
+                      </td>
+                      <td>{bucket.current_count}</td>
+                      <td>{bucket.trigger_count}</td>
+                      <td>{formatCooldownRemaining(bucket.remaining_secs)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Strategy stats */}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-5">
         <div className="stat bg-base-200 rounded-box p-4">
@@ -469,12 +915,182 @@ export default function CryptoMarkets() {
           <div className="stat-value text-lg">${strategyPositionsMarketValue.toFixed(2)}</div>
         </div>
         <div className="stat bg-base-200 rounded-box p-4">
-          <div className="stat-title text-xs">未实现盈亏</div>
-          <div className={`stat-value text-lg ${totalPnl >= 0 ? "text-success" : "text-error"}`}>
-            ${totalPnl.toFixed(2)}
+          <div className="stat-title text-xs">浮盈亏(Bid)</div>
+          <div className={`stat-value text-lg ${totalPnlBid >= 0 ? "text-success" : "text-error"}`}>
+            ${totalPnlBid.toFixed(2)}
+          </div>
+        </div>
+        <div className="stat bg-base-200 rounded-box p-4">
+          <div className="stat-title text-xs">浮盈亏(Mid)</div>
+          <div className={`stat-value text-lg ${totalPnlMid >= 0 ? "text-success" : "text-error"}`}>
+            ${totalPnlMid.toFixed(2)}
           </div>
         </div>
       </div>
+
+      <div className="card bg-base-200 shadow-sm">
+        <div className="card-body p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="card-title text-base">Bucket 收益归因</h2>
+              <div className="text-xs opacity-60">
+                按 same-day / next-day / legacy 拆分已实现和未实现收益
+              </div>
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="table table-sm">
+              <thead>
+                <tr>
+                  <th>Bucket</th>
+                  <th>持仓数</th>
+                  <th>成交数</th>
+                  <th>成本</th>
+                  <th>已实现</th>
+                  <th>浮盈亏(Bid)</th>
+                  <th>浮盈亏(Mid)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {bucketSummaries.map((bucket) => (
+                  <tr key={bucket.bucket}>
+                    <td>{bucket.label}</td>
+                    <td>{bucket.positions}</td>
+                    <td>{bucket.trades}</td>
+                    <td>${bucket.costBasis.toFixed(2)}</td>
+                    <td className={bucket.realized >= 0 ? "text-success" : "text-error"}>
+                      ${bucket.realized.toFixed(2)}
+                    </td>
+                    <td className={bucket.unrealizedBid >= 0 ? "text-success" : "text-error"}>
+                      ${bucket.unrealizedBid.toFixed(2)}
+                    </td>
+                    <td className={bucket.unrealizedMid >= 0 ? "text-success" : "text-error"}>
+                      ${bucket.unrealizedMid.toFixed(2)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div className="card bg-base-200 shadow-sm">
+        <div className="card-body p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="card-title text-base">形态收益归因</h2>
+              <div className="text-xs opacity-60">
+                按 same-day / next-day / legacy 再拆 range 和 directional
+              </div>
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="table table-sm">
+              <thead>
+                <tr>
+                  <th>Bucket / Shape</th>
+                  <th>持仓数</th>
+                  <th>成交数</th>
+                  <th>成本</th>
+                  <th>已实现</th>
+                  <th>浮盈亏(Bid)</th>
+                  <th>浮盈亏(Mid)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {bucketShapeSummaries.map((entry) => (
+                  <tr key={entry.key}>
+                    <td>{entry.label}</td>
+                    <td>{entry.positions}</td>
+                    <td>{entry.trades}</td>
+                    <td>${entry.costBasis.toFixed(2)}</td>
+                    <td className={entry.realized >= 0 ? "text-success" : "text-error"}>
+                      ${entry.realized.toFixed(2)}
+                    </td>
+                    <td className={entry.unrealizedBid >= 0 ? "text-success" : "text-error"}>
+                      ${entry.unrealizedBid.toFixed(2)}
+                    </td>
+                    <td className={entry.unrealizedMid >= 0 ? "text-success" : "text-error"}>
+                      ${entry.unrealizedMid.toFixed(2)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      {!!shapePressureRows.length && (
+        <div className="card bg-base-200 shadow-sm">
+          <div className="card-body p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="card-title text-base">形态压力</h2>
+                <div className="text-xs opacity-60">
+                  把收益归因、当前熔断和 override 建议放到同一行，方便判断哪类盘正在拖后腿
+                </div>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="table table-sm">
+                <thead>
+                  <tr>
+                    <th>Bucket / Shape</th>
+                    <th>当前表现(Bid)</th>
+                    <th>熔断</th>
+                    <th>Entry 建议</th>
+                    <th>Post-Entry 建议</th>
+                    <th>主建议</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shapePressureRows.map((entry) => (
+                    <tr key={`pressure-${entry.key}`}>
+                      <td>{entry.label}</td>
+                      <td className={entry.realized + entry.unrealizedBid >= 0 ? "text-success" : "text-error"}>
+                        ${(entry.realized + entry.unrealizedBid).toFixed(2)}
+                      </td>
+                      <td>
+                        {entry.cooldownActive ? (
+                          <span className="badge badge-warning badge-sm">
+                            {formatCooldownRemaining(entry.remainingCooldownSecs)}
+                          </span>
+                        ) : (
+                          <span className="badge badge-ghost badge-sm">-</span>
+                        )}
+                      </td>
+                      <td>{entry.entrySuggestionCount}</td>
+                      <td>{entry.postEntrySuggestionCount}</td>
+                      <td className="text-xs">
+                        {entry.strongestSuggestion ? (
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span>
+                              {entry.strongestSuggestion.target_field} / {entry.strongestSuggestion.direction}
+                            </span>
+                            <button
+                              type="button"
+                              className={`btn btn-xs ${selectedPressureKey === entry.key ? "btn-primary" : "btn-ghost"}`}
+                              onClick={() =>
+                                setSelectedPressureKey((current) => (current === entry.key ? null : entry.key))
+                              }
+                            >
+                              {selectedPressureKey === entry.key ? "已选中" : "选中导出"}
+                            </button>
+                          </div>
+                        ) : (
+                          "-"
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
 
       {config && (
         <div className="card bg-base-200 shadow-sm">
@@ -943,6 +1559,87 @@ export default function CryptoMarkets() {
               </div>
             </div>
           )}
+          {selectedPressureRow && selectedRowPatchToml ? (
+            <div className="mb-3 rounded-box bg-primary/10 px-3 py-2 text-xs">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 font-medium">
+                  <span>所选 Shape Patch</span>
+                  <span className="badge badge-sm badge-outline">{selectedPressureRow.label}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button type="button" className="btn btn-xs btn-outline" onClick={copySelectedPressurePatchPreview}>
+                    复制所选 Patch
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-xs btn-outline"
+                    onClick={downloadSelectedPressurePatchPreview}
+                  >
+                    下载所选 TOML
+                  </button>
+                </div>
+              </div>
+              <div className="mb-2 opacity-70">
+                当前 patch preview 会按所选 `same_day / next_day + shape` 过滤，并直接写出 `resolution_bucket` selector；`legacy`
+                来源会保留 `source_bucket` 注释，但预览里默认只用 `horizon = "any"` 做宽匹配。
+              </div>
+              <pre className="overflow-x-auto rounded-box bg-base-100/70 p-3 text-[11px] leading-5">
+                <code>{selectedRowPatchToml}</code>
+              </pre>
+            </div>
+          ) : null}
+          {overridePatchPreview?.toml && (
+            <div className="mb-3 rounded-box bg-secondary/10 px-3 py-2 text-xs">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 font-medium">
+                  <span>Entry Override Patch 预览</span>
+                  <span className="badge badge-sm badge-outline">
+                    {overridePatchPreview.supported_row_count} rows
+                  </span>
+                  {overridePatchPreview.unsupported_suggestion_count > 0 ? (
+                    <span className="badge badge-sm badge-ghost">
+                      {overridePatchPreview.unsupported_suggestion_count} manual
+                    </span>
+                  ) : null}
+                </div>
+                {combinedPatchToml ? (
+                  <div className="flex items-center gap-2">
+                    <button type="button" className="btn btn-xs btn-outline" onClick={copyPatchPreview}>
+                      {patchCopyState === "copied"
+                        ? "已复制"
+                        : patchCopyState === "failed"
+                          ? "复制失败"
+                          : "复制全部 Patch"}
+                    </button>
+                    <button type="button" className="btn btn-xs btn-outline" onClick={downloadPatchPreview}>
+                      下载 TOML
+                    </button>
+                    {pressuredPatchToml ? (
+                      <>
+                        <button
+                          type="button"
+                          className="btn btn-xs btn-outline"
+                          onClick={copyPressuredPatchPreview}
+                        >
+                          复制高压 Patch
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-xs btn-outline"
+                          onClick={downloadPressuredPatchPreview}
+                        >
+                          下载高压 TOML
+                        </button>
+                      </>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+              <pre className="overflow-x-auto rounded-box bg-base-100/70 p-3 text-[11px] leading-5">
+                <code>{overridePatchPreview.toml}</code>
+              </pre>
+            </div>
+          )}
           {postEntryHints.length > 0 && (
             <div className="mb-3 rounded-box bg-accent/10 px-3 py-2 text-xs">
               <div className="mb-2 font-medium">持仓 / 退出参数建议</div>
@@ -1014,6 +1711,24 @@ export default function CryptoMarkets() {
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+          {postEntryOverridePatchPreview?.toml && (
+            <div className="mb-3 rounded-box bg-warning/10 px-3 py-2 text-xs">
+              <div className="mb-2 flex items-center gap-2 font-medium">
+                <span>Post-Entry Override Patch 预览</span>
+                <span className="badge badge-sm badge-outline">
+                  {postEntryOverridePatchPreview.supported_row_count} rows
+                </span>
+                {postEntryOverridePatchPreview.unsupported_suggestion_count > 0 ? (
+                  <span className="badge badge-sm badge-ghost">
+                    {postEntryOverridePatchPreview.unsupported_suggestion_count} manual
+                  </span>
+                ) : null}
+              </div>
+              <pre className="overflow-x-auto rounded-box bg-base-100/70 p-3 text-[11px] leading-5">
+                <code>{postEntryOverridePatchPreview.toml}</code>
+              </pre>
             </div>
           )}
           {(status?.crypto_gate_reject_summary?.recent_count ?? visibleGateRejects.length) > 0 && (
@@ -1440,8 +2155,10 @@ export default function CryptoMarkets() {
                   <th>数量</th>
                   <th>均价</th>
                   <th>成本</th>
-                  <th>当前价</th>
-                  <th>盈亏</th>
+                  <th>Bid</th>
+                  <th>Mid</th>
+                  <th>浮盈亏(Bid)</th>
+                  <th>浮盈亏(Mid)</th>
                 </tr>
               </thead>
               <tbody>
@@ -1467,14 +2184,26 @@ export default function CryptoMarkets() {
                     <td>{Number(p.size).toFixed(1)}</td>
                     <td>${Number(p.avg_cost).toFixed(3)}</td>
                     <td>${Number(p.cost_basis).toFixed(2)}</td>
-                    <td>{p.current_price ? `$${Number(p.current_price).toFixed(3)}` : "-"}</td>
-                    <td className={Number(p.unrealized_pnl ?? 0) >= 0 ? "text-success" : "text-error"}>
-                      {p.unrealized_pnl ? `$${Number(p.unrealized_pnl).toFixed(3)}` : "-"}
+                    <td>{(p.bid_price ?? p.current_price) ? `$${Number(p.bid_price ?? p.current_price).toFixed(3)}` : "-"}</td>
+                    <td>{p.mid_price ? `$${Number(p.mid_price).toFixed(3)}` : "-"}</td>
+                    <td
+                      className={
+                        Number(p.unrealized_pnl_bid ?? p.unrealized_pnl ?? 0) >= 0
+                          ? "text-success"
+                          : "text-error"
+                      }
+                    >
+                      {(p.unrealized_pnl_bid ?? p.unrealized_pnl)
+                        ? `$${Number(p.unrealized_pnl_bid ?? p.unrealized_pnl).toFixed(3)}`
+                        : "-"}
+                    </td>
+                    <td className={Number(p.unrealized_pnl_mid ?? 0) >= 0 ? "text-success" : "text-error"}>
+                      {p.unrealized_pnl_mid ? `$${Number(p.unrealized_pnl_mid).toFixed(3)}` : "-"}
                     </td>
                   </tr>
                 ))}
                 {(!positions || positions.length === 0) && (
-                  <tr><td colSpan={8} className="text-center opacity-50">暂无持仓</td></tr>
+                  <tr><td colSpan={10} className="text-center opacity-50">暂无持仓</td></tr>
                 )}
               </tbody>
             </table>

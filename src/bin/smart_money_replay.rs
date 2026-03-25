@@ -7,6 +7,7 @@ use std::sync::{Arc, RwLock};
 
 use alloy::primitives::{B256, U256};
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use pa_core::config::Settings;
@@ -354,7 +355,7 @@ async fn main() -> Result<()> {
     let profit_calc = ProfitCalculator::new(Decimal::ZERO);
 
     let strategy = SmartMoneyStrategy::new(
-        config,
+        Arc::new(ArcSwap::from_pointee(config)),
         Decimal::ZERO,
         SmartMoneyStrategyDeps {
             get_orderbook: Box::new({

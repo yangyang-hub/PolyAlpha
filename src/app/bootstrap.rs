@@ -23,6 +23,7 @@ pub struct BootstrapArtifacts {
     pub resolved_accounts: Vec<AccountConfig>,
     pub active_enabled_strategies: Vec<String>,
     pub config_arc: Arc<ArcSwap<Settings>>,
+    pub smart_money_config_arc: Arc<ArcSwap<pa_core::config::SmartMoneyConfig>>,
 }
 
 pub fn init_tracing() {
@@ -58,18 +59,21 @@ pub async fn load_runtime_settings() -> Result<BootstrapArtifacts> {
     settings.merge_account_strategies_into_enabled();
     let active_enabled_strategies = settings.active_account_enabled_strategies();
     let config_arc = Arc::new(ArcSwap::new(Arc::new(settings.clone())));
+    let smart_money_config_arc = Arc::new(ArcSwap::new(Arc::new(settings.smart_money.clone())));
 
     Ok(BootstrapArtifacts {
         settings,
         resolved_accounts,
         active_enabled_strategies,
         config_arc,
+        smart_money_config_arc,
     })
 }
 
 pub fn start_api_server(
     settings: &Settings,
     config_arc: Arc<ArcSwap<Settings>>,
+    smart_money_config_arc: Arc<ArcSwap<pa_core::config::SmartMoneyConfig>>,
     ws_connected: Arc<std::sync::atomic::AtomicBool>,
     ws_last_message_unix: Arc<AtomicI64>,
     lr_runtime_status: Arc<tokio::sync::RwLock<LrRuntimeStatus>>,
@@ -87,6 +91,7 @@ pub fn start_api_server(
     let websocket_health_grace_secs = 180i64;
     let api_state = Arc::new(ApiState {
         config: config_arc,
+        smart_money_config: smart_money_config_arc,
         start_time: Utc::now(),
         health_checks: vec![(
             "websocket",
