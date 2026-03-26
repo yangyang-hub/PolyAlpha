@@ -168,24 +168,28 @@ pub fn clear_crypto_candidate_decisions() {
 
 pub fn record_crypto_exit_decision(entry: CryptoExitDecision) {
     let mut entries = CRYPTO_EXIT_DECISIONS.lock().unwrap();
-    if let Some(latest) = entries.front() {
-        let within_dedup_window = (entry.recorded_at - latest.recorded_at)
-            <= Duration::seconds(CRYPTO_EXIT_DEDUP_WINDOW_SECS);
-        let same_exit = latest.asset == entry.asset
-            && latest.reason == entry.reason
-            && latest.event_context_source == entry.event_context_source
-            && latest.event_title == entry.event_title
-            && latest.event_category == entry.event_category
-            && latest.event_subtype == entry.event_subtype
-            && latest.question == entry.question
-            && latest.market_type == entry.market_type
-            && latest.held_is_yes == entry.held_is_yes
-            && latest.days_to_resolution == entry.days_to_resolution
-            && latest.avg_cost == entry.avg_cost
-            && latest.size == entry.size;
-        if within_dedup_window && same_exit {
-            return;
-        }
+    let dedup_window = Duration::seconds(CRYPTO_EXIT_DEDUP_WINDOW_SECS);
+    let duplicated_recent_exit = entries.iter().any(|recent| {
+        let within_dedup_window = (entry.recorded_at - recent.recorded_at) <= dedup_window;
+        let same_exit = recent.asset == entry.asset
+            && recent.reason == entry.reason
+            && recent.event_context_source == entry.event_context_source
+            && recent.event_title == entry.event_title
+            && recent.event_category == entry.event_category
+            && recent.event_subtype == entry.event_subtype
+            && recent.question == entry.question
+            && recent.market_type == entry.market_type
+            && recent.held_is_yes == entry.held_is_yes
+            && recent.days_to_resolution == entry.days_to_resolution
+            && recent.avg_cost == entry.avg_cost
+            && recent.size == entry.size;
+        within_dedup_window && same_exit
+    });
+    if duplicated_recent_exit {
+        return;
+    }
+    while entries.len() > MAX_CRYPTO_EXITS {
+        entries.pop_back();
     }
     entries.push_front(entry);
     while entries.len() > MAX_CRYPTO_EXITS {
@@ -366,6 +370,23 @@ mod tests {
         let mut changed_reason = sample_exit(now + Duration::seconds(1));
         changed_reason.reason = "model_reversal".into();
         record_crypto_exit_decision(changed_reason);
+        let exits = recent_crypto_exit_decisions();
+        assert_eq!(exits.len(), 2);
+        clear_crypto_exit_decisions();
+    }
+
+    #[test]
+    fn record_crypto_exit_decision_deduplicates_interleaved_recent_exit() {
+        clear_crypto_exit_decisions();
+        let now = Utc::now();
+        record_crypto_exit_decision(sample_exit(now));
+
+        let mut distinct_reason = sample_exit(now + Duration::seconds(1));
+        distinct_reason.reason = "model_reversal".into();
+        record_crypto_exit_decision(distinct_reason);
+
+        record_crypto_exit_decision(sample_exit(now + Duration::seconds(2)));
+
         let exits = recent_crypto_exit_decisions();
         assert_eq!(exits.len(), 2);
         clear_crypto_exit_decisions();

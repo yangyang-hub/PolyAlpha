@@ -820,6 +820,9 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
             let Some(asset) = entry.asset.clone() else {
                 continue;
             };
+            if label_kind == "same_day_alt" && asset_class_for_label(Some(&asset)) != "alt" {
+                continue;
+            }
             let subtype = entry
                 .event_subtype
                 .clone()
@@ -1588,6 +1591,9 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         top_asset,
     ) in entry_bucket_actions.into_iter().take(6)
     {
+        if source_bucket == "legacy" {
+            continue;
+        }
         let scope_label = shaped_scope_label(&asset_class, &event_subtype, &shape);
         match (family.as_str(), dominant_reason.as_str()) {
             ("gate_reject", "asset_exposure_cap") => {

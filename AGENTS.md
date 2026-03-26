@@ -83,6 +83,11 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `crates/pa-monitor/src/diagnostics.rs`
+- Change: Fixed crypto runtime observability so same-day alt cooldown buckets now only include true alt assets, entry-side live tuning/override suggestions skip `legacy` resolution-bucket rows instead of surfacing stale `max_entry_days` actions, and recent crypto exit deduplication now suppresses repeated same-exit events across the whole short dedup window rather than only comparing against the latest recorded exit.
+- Why: Live `/crypto` status was still mislabeling Bitcoin as a same-day alt cooldown, cluttering runtime patch previews with non-actionable legacy horizon advice, and re-emitting the same exit reasons every scan tick whenever different exits interleaved in the recent-exit buffer.
+
+### 2026-03-25
 - Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `src/bin/crypto_calibrate.rs`, `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`, `frontend/src/components/ConfigSection.tsx`, `README.md`
 - Change: Added first-class crypto `resolution_bucket` selectors (`same_day` / `next_day` / `legacy`) to calibration overrides, runtime override matching, offline `crypto_calibrate` segment/output/merge logic, and runtime patch previews, so selected-shape patch export now carries true bucket-level TOML selectors instead of only annotating the source bucket in comments.
 - Why: After splitting crypto into day-market buckets and adding live patch previews, the remaining gap was that runtime suggestions still exported only shape-scoped `short` overrides, which made same-day versus next-day tuning previews less precise than the actual live bucket diagnostics.
