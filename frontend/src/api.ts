@@ -22,6 +22,10 @@ export interface StatusResponse {
   accounts_ready: number;
   trading_ready: boolean;
   wallet_balance: string;
+  total_wallet_positions_market_value_bid?: string;
+  total_wallet_positions_market_value_mid?: string;
+  total_wallet_portfolio_value_bid?: string;
+  total_wallet_portfolio_value_mid?: string;
   strategy_financials?: Record<string, {
     wallet_balance: string;
     positions_market_value: string;
@@ -93,6 +97,8 @@ export interface StatusResponse {
       scope_label: string;
       trigger_count: number;
       current_count: number;
+      triggered_at: string;
+      post_trigger_bad_exit_count: number;
       remaining_secs: number;
     }[];
   };
@@ -185,6 +191,49 @@ export interface StatusResponse {
       }[];
     }[];
     toml: string;
+  };
+  crypto_override_patch_export_audit?: {
+    recorded_at: string;
+    mode: string;
+    format: string;
+    filename: string;
+    export_sha: string;
+    scope_label?: string | null;
+  }[];
+  crypto_auto_patch_effectiveness_summary?: {
+    recent_count: number;
+    patches: {
+      created_at: string;
+      runtime_applied_at: string;
+      mode: string;
+      filename: string;
+      export_sha: string;
+      scope_labels: string[];
+      post_apply_bad_exit_count: number;
+      post_apply_realized_pnl: string;
+      current_open_positions: number;
+      current_open_pnl_bid: string;
+      outcome: "effective" | "observe" | "retain_or_tighten";
+      effective_streak: number;
+      recommended_action: "hold" | "observe" | "continue_tighten" | "consider_relax";
+      current_priority_score: number;
+      current_cooldown_severity_score: number;
+      current_window_pressure_score: number;
+    }[];
+  };
+  crypto_bucket_window_summary?: {
+    row_count: number;
+    rows: {
+      window_label: string;
+      resolution_bucket: string;
+      shape: string;
+      asset_class: string;
+      trade_count: number;
+      realized_pnl: string;
+      open_positions: number;
+      open_pnl_bid: string;
+      bad_exit_count: number;
+    }[];
   };
   smart_money_signal_summary?: {
     recent_signal_count: number;
@@ -539,6 +588,41 @@ export interface CryptoExitDecisionEntry {
   size: string;
 }
 
+export interface CryptoOverridePatchExport {
+  mode: string;
+  toml: string;
+  filename?: string;
+  scope_label?: string;
+  export_sha?: string;
+  generated_at?: string;
+  selected_bucket_count?: number;
+  entry_row_count?: number;
+  post_entry_row_count?: number;
+}
+
+export interface CryptoOverridePatchAuditEntry {
+  created_at: string;
+  changed_by: string;
+  version: number;
+  action: string;
+  mode: string;
+  filename: string;
+  export_sha: string;
+  scope_label?: string | null;
+  generated_at?: string | null;
+  runtime_applied: boolean;
+  runtime_applied_at?: string | null;
+}
+
+export interface ApplyCryptoOverridePatchResponse {
+  applied: boolean;
+  action: string;
+  runtime_applied: boolean;
+  filename: string;
+  export_sha: string;
+  note: string;
+}
+
 // --- API functions ---
 
 async function get<T>(path: string): Promise<T> {
@@ -665,6 +749,60 @@ export function fetchCryptoExitDecisions(): Promise<CryptoExitDecisionEntry[]> {
 
 export function fetchCryptoTrades(limit = 200): Promise<CryptoTradeEntry[]> {
   return get(`/api/crypto/trades?limit=${limit}`);
+}
+
+export function fetchCryptoOverridePatch(
+  mode: "full" | "cooldown_priority" | "relax_candidate" = "full",
+): Promise<CryptoOverridePatchExport> {
+  return get(`/api/crypto/override-patch?mode=${encodeURIComponent(mode)}`);
+}
+
+export function fetchSelectedCryptoOverridePatch(
+  bucket: string,
+  shape: "range" | "directional",
+): Promise<CryptoOverridePatchExport> {
+  return get(
+    `/api/crypto/override-patch?mode=selected&bucket=${encodeURIComponent(bucket)}&shape=${encodeURIComponent(shape)}`,
+  );
+}
+
+export function fetchCryptoOverridePatchAudit(limit = 50): Promise<CryptoOverridePatchAuditEntry[]> {
+  return get(`/api/crypto/override-patch/audit?limit=${limit}`);
+}
+
+export async function applyCryptoOverridePatch(payload: {
+  action?: "review" | "approve" | "apply_runtime";
+  mode: string;
+  filename: string;
+  export_sha: string;
+  toml: string;
+  scope_label?: string | null;
+  generated_at?: string | null;
+}): Promise<ApplyCryptoOverridePatchResponse> {
+  const res = await fetch(`${BASE}/api/crypto/override-patch/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`${res.status}: ${body}`);
+  }
+  return res.json();
+}
+
+export function cryptoOverridePatchDownloadPath(
+  mode: "full" | "cooldown_priority" | "relax_candidate" | "selected",
+  options?: { bucket?: string; shape?: "range" | "directional" },
+): string {
+  const params = new URLSearchParams({ mode, format: "toml" });
+  if (options?.bucket) {
+    params.set("bucket", options.bucket);
+  }
+  if (options?.shape) {
+    params.set("shape", options.shape);
+  }
+  return `${BASE}/api/crypto/override-patch?${params.toString()}`;
 }
 
 export function fetchStrategyTrades(strategy: string, limit = 200): Promise<CryptoTradeEntry[]> {

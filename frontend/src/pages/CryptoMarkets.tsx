@@ -1,14 +1,20 @@
 import { Fragment, useCallback, useState } from "react";
 import {
+  fetchCryptoOverridePatchAudit,
   fetchCryptoCandidateDecisions,
   fetchCryptoAlphaConfig,
   fetchCryptoExitDecisions,
+  fetchCryptoOverridePatch,
+  cryptoOverridePatchDownloadPath,
+  fetchSelectedCryptoOverridePatch,
   fetchCryptoTrades,
   fetchPositions,
   fetchStatus,
   type CryptoCandidateDecisionEntry,
   type CryptoAlphaConfigSection,
   type CryptoExitDecisionEntry,
+  type CryptoOverridePatchAuditEntry,
+  type CryptoOverridePatchExport,
   type CryptoTradeEntry,
   type PositionEntry,
   type StatusResponse,
@@ -130,8 +136,55 @@ function bucketLabel(bucket: string | null | undefined): string {
   }
 }
 
+function cooldownBucketResolution(kind: string): "same_day" | "next_day" {
+  return kind === "next_day_alt_range" ? "next_day" : "same_day";
+}
+
 function shapeLabel(shape: "range" | "directional"): string {
   return shape === "range" ? "Range" : "Directional";
+}
+
+function cooldownOutcomeLabel(
+  postTriggerBadExitCount: number,
+  postTriggerRealized: number,
+  openPnlBid: number,
+): { label: string; className: string } {
+  if (postTriggerBadExitCount > 0 || postTriggerRealized < 0 || openPnlBid < 0) {
+    return { label: "保留/收紧", className: "badge-error" };
+  }
+  if (postTriggerBadExitCount === 0 && postTriggerRealized >= 0 && openPnlBid >= 0) {
+    return { label: "有效", className: "badge-success" };
+  }
+  return { label: "观察", className: "badge-warning" };
+}
+
+function autoPatchOutcomeLabel(outcome: "effective" | "observe" | "retain_or_tighten"): {
+  label: string;
+  className: string;
+} {
+  switch (outcome) {
+    case "effective":
+      return { label: "有效", className: "badge-success" };
+    case "retain_or_tighten":
+      return { label: "保留/收紧", className: "badge-error" };
+    default:
+      return { label: "观察", className: "badge-warning" };
+  }
+}
+
+function autoPatchActionLabel(
+  action: "hold" | "observe" | "continue_tighten" | "consider_relax",
+): string {
+  switch (action) {
+    case "hold":
+      return "停止重复收紧";
+    case "consider_relax":
+      return "建议小步回退";
+    case "continue_tighten":
+      return "继续收紧";
+    default:
+      return "继续观察";
+  }
 }
 
 function assetClassLabel(asset: string | null | undefined): "major" | "alt" | "any" {
@@ -227,6 +280,26 @@ function inferTradeShape(question: string | null | undefined): "range" | "direct
   return "directional";
 }
 
+function inferTradeAsset(question: string | null | undefined): string {
+  const text = (question ?? "").toLowerCase();
+  if (text.includes("bitcoin")) {
+    return "Bitcoin";
+  }
+  if (text.includes("ethereum")) {
+    return "Ethereum";
+  }
+  if (text.includes("solana")) {
+    return "Solana";
+  }
+  if (text.includes("dogecoin")) {
+    return "Dogecoin";
+  }
+  if (text.includes("xrp")) {
+    return "XRP";
+  }
+  return "";
+}
+
 function gateRejectPrioritySummary(
   topReason: string | null,
   topAssetEntry: [string, number] | undefined,
@@ -275,12 +348,29 @@ export default function CryptoMarkets() {
   const decisionsFetcher = useCallback(() => fetchCryptoCandidateDecisions(), []);
   const exitDecisionsFetcher = useCallback(() => fetchCryptoExitDecisions(), []);
   const tradesFetcher = useCallback(() => fetchCryptoTrades(200), []);
+  const patchAuditFetcher = useCallback(() => fetchCryptoOverridePatchAudit(20), []);
+  const fullPatchFetcher = useCallback(() => fetchCryptoOverridePatch("full"), []);
+  const cooldownPatchFetcher = useCallback(
+    () => fetchCryptoOverridePatch("cooldown_priority"),
+    [],
+  );
+  const relaxPatchFetcher = useCallback(
+    () => fetchCryptoOverridePatch("relax_candidate"),
+    [],
+  );
   const { data: positions, loading } = usePolling<PositionEntry[]>(posFetcher, 15000);
   const { data: config } = usePolling<CryptoAlphaConfigSection>(configFetcher, 30000);
   const { data: status } = usePolling<StatusResponse>(statusFetcher, 15000);
   const { data: decisions } = usePolling<CryptoCandidateDecisionEntry[]>(decisionsFetcher, 15000);
   const { data: exitDecisions } = usePolling<CryptoExitDecisionEntry[]>(exitDecisionsFetcher, 15000);
   const { data: trades } = usePolling<CryptoTradeEntry[]>(tradesFetcher, 15000);
+  const { data: patchAudit } = usePolling<CryptoOverridePatchAuditEntry[]>(patchAuditFetcher, 15000);
+  const { data: fullPatchExport } = usePolling<CryptoOverridePatchExport>(fullPatchFetcher, 15000);
+  const { data: cooldownPatchExport } = usePolling<CryptoOverridePatchExport>(
+    cooldownPatchFetcher,
+    15000,
+  );
+  const { data: relaxPatchExport } = usePolling<CryptoOverridePatchExport>(relaxPatchFetcher, 15000);
 
   const totalCost = (positions ?? []).reduce((s, p) => s + Number(p.cost_basis), 0);
   const totalPnlBid = (positions ?? []).reduce(
@@ -361,6 +451,15 @@ export default function CryptoMarkets() {
   const strategyPositionsMarketValue = Number(strategyFinancials?.positions_market_value ?? totalMarkValue);
   const strategyPortfolioValue = Number(strategyFinancials?.portfolio_value ?? walletBalance + strategyPositionsMarketValue);
   const strategyRealizedPnl = Number(strategyFinancials?.realized_pnl ?? 0);
+  const totalWalletBalance = Number(status?.wallet_balance ?? 0);
+  const totalWalletPositionsBid = Number(status?.total_wallet_positions_market_value_bid ?? 0);
+  const totalWalletPositionsMid = Number(status?.total_wallet_positions_market_value_mid ?? 0);
+  const totalWalletPortfolioBid = Number(
+    status?.total_wallet_portfolio_value_bid ?? totalWalletBalance + totalWalletPositionsBid,
+  );
+  const totalWalletPortfolioMid = Number(
+    status?.total_wallet_portfolio_value_mid ?? totalWalletBalance + totalWalletPositionsMid,
+  );
   const marketCount = new Set((positions ?? []).map((p) => p.condition_id).filter(Boolean)).size;
   const decisionAssetOptions = ["全部", ...Array.from(new Set((decisions ?? []).map((decision) => decision.asset)))];
   const decisionDirectionOptions = [
@@ -508,13 +607,116 @@ export default function CryptoMarkets() {
   const postEntryHints = status?.crypto_post_entry_tuning_hints ?? [];
   const postEntryOverrideSuggestions = status?.crypto_post_entry_override_suggestions ?? [];
   const postEntryOverridePatchPreview = status?.crypto_post_entry_override_patch_preview;
+  const patchExportAudit = (status?.crypto_override_patch_export_audit ?? []).map((entry) => ({
+    recorded_at: entry.recorded_at,
+    mode: entry.mode,
+    format: entry.format,
+    scope_label: entry.scope_label ?? null,
+    filename: entry.filename,
+    export_sha: entry.export_sha,
+    version: null,
+  }));
+  const autoPatchEffectRows =
+    status?.crypto_auto_patch_effectiveness_summary?.patches.map((entry) => ({
+      ...entry,
+      postApplyRealizedPnl: Number(entry.post_apply_realized_pnl ?? 0),
+      currentOpenPnlBid: Number(entry.current_open_pnl_bid ?? 0),
+      currentPriorityScore: Number(entry.current_priority_score ?? 0),
+      currentCooldownSeverityScore: Number(entry.current_cooldown_severity_score ?? 0),
+      currentWindowPressureScore: Number(entry.current_window_pressure_score ?? 0),
+      outcomeBadge: autoPatchOutcomeLabel(entry.outcome),
+      actionLabel: autoPatchActionLabel(entry.recommended_action),
+    })) ?? [];
   const cooldownBuckets = status?.crypto_cooldown_summary?.buckets ?? [];
-  const combinedPatchToml = [
+  const cooldownEvaluations = cooldownBuckets.map((bucket) => {
+    const resolutionBucket = cooldownBucketResolution(bucket.kind);
+    const triggeredAt = new Date(bucket.triggered_at).getTime();
+    const bucketPositions = (positions ?? []).filter(
+      (position) =>
+        (position.resolution_bucket ?? "legacy") === resolutionBucket &&
+        position.asset === bucket.asset &&
+        inferPositionShape(position) === bucket.shape,
+    );
+    const bucketTrades = (trades ?? []).filter((trade) => {
+      const tradeBucket = inferTradeBucket(trade.question, trade.executed_at ?? trade.created_at);
+      const tradeShape = inferTradeShape(trade.question);
+      const tradeAsset = inferTradeAsset(trade.question);
+      const tradeTimestamp = new Date(trade.executed_at ?? trade.created_at).getTime();
+      return (
+        tradeBucket === resolutionBucket &&
+        tradeShape === bucket.shape &&
+        tradeAsset === bucket.asset &&
+        tradeTimestamp >= triggeredAt
+      );
+    });
+    const postTriggerRealized = bucketTrades.reduce(
+      (sum, trade) => sum + Number(trade.actual_profit ?? 0),
+      0,
+    );
+    const outcome = cooldownOutcomeLabel(
+      bucket.post_trigger_bad_exit_count,
+      postTriggerRealized,
+      bucketPositions.reduce(
+        (sum, position) => sum + Number(position.unrealized_pnl_bid ?? position.unrealized_pnl ?? 0),
+        0,
+      ),
+    );
+    return {
+      ...bucket,
+      resolutionBucket,
+      activePositions: bucketPositions.length,
+      openPnlBid: bucketPositions.reduce(
+        (sum, position) => sum + Number(position.unrealized_pnl_bid ?? position.unrealized_pnl ?? 0),
+        0,
+      ),
+      postTriggerRealized,
+      outcome,
+    };
+  });
+  const cooldownPriorityEntryPatchRows =
+    overridePatchPreview?.rows.filter((row) =>
+      cooldownEvaluations.some(
+        (bucket) =>
+          bucket.outcome.label === "保留/收紧" &&
+          row.source_bucket === bucket.resolutionBucket &&
+          row.selector_shape === bucket.shape &&
+          row.selector_event_subtype === bucket.event_subtype &&
+          row.selector_asset_class === assetClassLabel(bucket.asset),
+      ),
+    ) ?? [];
+  const cooldownPriorityPostEntryPatchRows =
+    postEntryOverridePatchPreview?.rows.filter((row) =>
+      cooldownEvaluations.some(
+        (bucket) =>
+          bucket.outcome.label === "保留/收紧" &&
+          row.source_bucket === bucket.resolutionBucket &&
+          row.selector_shape === bucket.shape &&
+          row.selector_event_subtype === bucket.event_subtype &&
+          row.selector_asset_class === assetClassLabel(bucket.asset),
+      ),
+    ) ?? [];
+  const bucketWindowRows =
+    status?.crypto_bucket_window_summary?.rows.map((row) => ({
+      ...row,
+      realizedPnl: Number(row.realized_pnl ?? 0),
+      openPnlBid: Number(row.open_pnl_bid ?? 0),
+    })) ?? [];
+  const localCooldownPriorityPatchToml = [
+    renderPatchRowsToToml(cooldownPriorityEntryPatchRows),
+    renderPatchRowsToToml(cooldownPriorityPostEntryPatchRows),
+  ]
+    .filter((value) => value.trim().length > 0)
+    .join("\n\n");
+  const cooldownPriorityPatchToml =
+    cooldownPatchExport?.toml?.trim() || localCooldownPriorityPatchToml;
+  const relaxCandidatePatchToml = relaxPatchExport?.toml?.trim() || "";
+  const localCombinedPatchToml = [
     overridePatchPreview?.toml?.trim(),
     postEntryOverridePatchPreview?.toml?.trim(),
   ]
     .filter((value): value is string => Boolean(value))
     .join("\n\n");
+  const combinedPatchToml = fullPatchExport?.toml?.trim() || localCombinedPatchToml;
 
   const copyPatchPreview = useCallback(async () => {
     if (!combinedPatchToml) {
@@ -534,14 +736,11 @@ export default function CryptoMarkets() {
     if (!combinedPatchToml) {
       return;
     }
-    const blob = new Blob([combinedPatchToml], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = "crypto_runtime_override_patch.toml";
+    anchor.href = cryptoOverridePatchDownloadPath("full");
+    anchor.download = fullPatchExport?.filename ?? "crypto_runtime_override_patch.toml";
     anchor.click();
-    URL.revokeObjectURL(url);
-  }, [combinedPatchToml]);
+  }, [combinedPatchToml, fullPatchExport?.filename]);
   const shapePressureRows = bucketShapeSummaries
     .map((entry) => {
       const matchingPositions = (positions ?? []).filter(
@@ -556,7 +755,9 @@ export default function CryptoMarkets() {
           ((entry.bucket === "same_day" &&
             ((entry.shape === "range" && bucket.kind === "same_day_range") ||
               (entry.shape === "directional" && bucket.kind === "same_day_alt"))) ||
-            (entry.bucket !== "same_day" && false)),
+            (entry.bucket === "next_day" &&
+              entry.shape === "range" &&
+              bucket.kind === "next_day_alt_range")),
       );
       const matchingEntrySuggestions = overrideSuggestions.filter((suggestion) => {
         if ((suggestion.selector_shape ?? "directional") !== entry.shape) {
@@ -635,6 +836,20 @@ export default function CryptoMarkets() {
     .join("\n\n");
   const selectedPressureRow =
     shapePressureRows.find((entry) => entry.key === selectedPressureKey) ?? null;
+  const selectedPatchFetcher = useCallback(
+    () =>
+      selectedPressureRow
+        ? fetchSelectedCryptoOverridePatch(
+            selectedPressureRow.bucket,
+            selectedPressureRow.shape as "range" | "directional",
+          )
+        : Promise.resolve({ mode: "selected", toml: "" }),
+    [selectedPressureRow],
+  );
+  const { data: selectedPatchExport } = usePolling<CryptoOverridePatchExport>(
+    selectedPatchFetcher,
+    15000,
+  );
   const selectedRowEntryPatchRows =
     selectedPressureRow && overridePatchPreview
       ? overridePatchPreview.rows.filter(
@@ -657,6 +872,7 @@ export default function CryptoMarkets() {
   ]
     .filter((value) => value.trim().length > 0)
     .join("\n\n");
+  const selectedPatchToml = selectedPatchExport?.toml?.trim() || selectedRowPatchToml;
 
   const copyPressuredPatchPreview = useCallback(async () => {
     if (!pressuredPatchToml) {
@@ -676,40 +892,40 @@ export default function CryptoMarkets() {
     if (!pressuredPatchToml) {
       return;
     }
-    const blob = new Blob([pressuredPatchToml], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = "crypto_pressure_override_patch.toml";
+    anchor.href = cryptoOverridePatchDownloadPath("cooldown_priority");
+    anchor.download =
+      cooldownPatchExport?.filename ?? "crypto_cooldown_priority_override_patch.toml";
     anchor.click();
-    URL.revokeObjectURL(url);
-  }, [pressuredPatchToml]);
+  }, [pressuredPatchToml, cooldownPatchExport?.filename]);
   const copySelectedPressurePatchPreview = useCallback(async () => {
-    if (!selectedRowPatchToml) {
+    if (!selectedPatchToml) {
       return;
     }
     try {
-      await navigator.clipboard.writeText(selectedRowPatchToml);
+      await navigator.clipboard.writeText(selectedPatchToml);
       setPatchCopyState("copied");
       window.setTimeout(() => setPatchCopyState("idle"), 2000);
     } catch {
       setPatchCopyState("failed");
       window.setTimeout(() => setPatchCopyState("idle"), 2000);
     }
-  }, [selectedRowPatchToml]);
+  }, [selectedPatchToml]);
 
   const downloadSelectedPressurePatchPreview = useCallback(() => {
-    if (!selectedRowPatchToml || !selectedPressureRow) {
+    if (!selectedPatchToml || !selectedPressureRow) {
       return;
     }
-    const blob = new Blob([selectedRowPatchToml], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `crypto_${selectedPressureRow.bucket}_${selectedPressureRow.shape}_override_patch.toml`;
+    anchor.href = cryptoOverridePatchDownloadPath("selected", {
+      bucket: selectedPressureRow.bucket,
+      shape: selectedPressureRow.shape as "range" | "directional",
+    });
+    anchor.download =
+      selectedPatchExport?.filename ??
+      `crypto_${selectedPressureRow.bucket}_${selectedPressureRow.shape}_override_patch.toml`;
     anchor.click();
-    URL.revokeObjectURL(url);
-  }, [selectedRowPatchToml, selectedPressureRow]);
+  }, [selectedPatchToml, selectedPressureRow, selectedPatchExport?.filename]);
   const averageEfficiencyDelta =
     visibleReplacements.length > 0
       ? visibleReplacements.reduce(
@@ -828,17 +1044,17 @@ export default function CryptoMarkets() {
       )}
 
       {status && (
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 xl:grid-cols-6">
           <div className="stat bg-base-200 rounded-box p-4">
-            <div className="stat-title text-xs">资产总值</div>
+            <div className="stat-title text-xs">Crypto 策略资产</div>
             <div className="stat-value text-lg">${strategyPortfolioValue.toFixed(2)}</div>
           </div>
           <div className="stat bg-base-200 rounded-box p-4">
-            <div className="stat-title text-xs">可用余额</div>
+            <div className="stat-title text-xs">Crypto 策略现金</div>
             <div className="stat-value text-lg">${walletBalance.toFixed(2)}</div>
           </div>
           <div className="stat bg-base-200 rounded-box p-4">
-            <div className="stat-title text-xs">持仓市值</div>
+            <div className="stat-title text-xs">Crypto 持仓市值(Bid)</div>
             <div className="stat-value text-lg">${strategyPositionsMarketValue.toFixed(2)}</div>
           </div>
           <div className="stat bg-base-200 rounded-box p-4">
@@ -847,21 +1063,39 @@ export default function CryptoMarkets() {
               ${strategyRealizedPnl.toFixed(2)}
             </div>
           </div>
+          <div className="stat bg-base-200 rounded-box p-4">
+            <div className="stat-title text-xs">整钱包资产(Bid)</div>
+            <div className="stat-value text-lg">${totalWalletPortfolioBid.toFixed(2)}</div>
+          </div>
+          <div className="stat bg-base-200 rounded-box p-4">
+            <div className="stat-title text-xs">整钱包资产(Mid)</div>
+            <div className="stat-value text-lg">${totalWalletPortfolioMid.toFixed(2)}</div>
+          </div>
         </div>
       )}
 
-      {!!cooldownBuckets.length && (
+      {status && (
+        <div className="alert bg-base-200 text-sm">
+          <span>
+            这里的 <strong>Crypto 策略资产</strong> 是 crypto 策略视角快照；Polymarket 官网更接近整钱包口径。页面同时给出整钱包
+            <strong> Bid/Mid </strong>
+            估值，方便和官网对比。
+          </span>
+        </div>
+      )}
+
+      {!!cooldownEvaluations.length && (
         <div className="card bg-base-200 shadow-sm">
           <div className="card-body p-4">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <h2 className="card-title text-base">当前熔断</h2>
                 <div className="text-xs opacity-60">
-                  当前因为连续坏退出而暂时停做的 same-day bucket
+                  当前因为连续坏退出而暂时停做的 same-day bucket，以及熔断触发后坏退出、已实现和浮亏是否继续恶化
                 </div>
               </div>
               <span className="badge badge-warning badge-sm">
-                {status?.crypto_cooldown_summary?.active_count ?? cooldownBuckets.length} active
+                {status?.crypto_cooldown_summary?.active_count ?? cooldownEvaluations.length} active
               </span>
             </div>
             <div className="overflow-x-auto">
@@ -872,26 +1106,86 @@ export default function CryptoMarkets() {
                     <th>类型</th>
                     <th>坏退出数</th>
                     <th>触发阈值</th>
+                    <th>熔断后坏退出</th>
+                    <th>熔断后已实现</th>
+                    <th>当前持仓</th>
+                    <th>当前浮盈亏(Bid)</th>
+                    <th>结论</th>
                     <th>剩余时间</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {cooldownBuckets.map((bucket) => (
+                  {cooldownEvaluations.map((bucket) => (
                     <tr key={`${bucket.kind}-${bucket.scope_label}`}>
                       <td>{bucket.scope_label}</td>
                       <td>
                         <span className="badge badge-outline badge-sm">
-                          {bucket.kind === "same_day_range" ? "same_day range" : "same_day alt"}
+                          {bucket.kind === "same_day_range"
+                            ? "same_day range"
+                            : bucket.kind === "next_day_alt_range"
+                              ? "next_day alt range"
+                              : "same_day alt"}
                         </span>
                       </td>
                       <td>{bucket.current_count}</td>
                       <td>{bucket.trigger_count}</td>
+                      <td>{bucket.post_trigger_bad_exit_count}</td>
+                      <td className={bucket.postTriggerRealized >= 0 ? "text-success" : "text-error"}>
+                        ${bucket.postTriggerRealized.toFixed(2)}
+                      </td>
+                      <td>{bucket.activePositions}</td>
+                      <td className={bucket.openPnlBid >= 0 ? "text-success" : "text-error"}>
+                        ${bucket.openPnlBid.toFixed(2)}
+                      </td>
+                      <td>
+                        <span className={`badge badge-sm ${bucket.outcome.className}`}>
+                          {bucket.outcome.label}
+                        </span>
+                      </td>
                       <td>{formatCooldownRemaining(bucket.remaining_secs)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
+            {!!cooldownPriorityPatchToml && (
+              <div className="mt-4 rounded-box bg-base-100/70 p-4">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold">熔断优先 Patch</div>
+                    <div className="text-xs opacity-60">
+                      仅包含当前评估为“保留/收紧”的 cooldown bucket 对应 rows
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {cooldownPatchExport?.export_sha ? (
+                      <span className="badge badge-ghost badge-sm">
+                        sha {cooldownPatchExport.export_sha.slice(0, 8)}
+                      </span>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="btn btn-xs btn-outline"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(cooldownPriorityPatchToml);
+                          setPatchCopyState("copied");
+                          window.setTimeout(() => setPatchCopyState("idle"), 2000);
+                        } catch {
+                          setPatchCopyState("failed");
+                          window.setTimeout(() => setPatchCopyState("idle"), 2000);
+                        }
+                      }}
+                    >
+                      复制熔断 Patch
+                    </button>
+                  </div>
+                </div>
+                <pre className="overflow-x-auto rounded-box bg-base-300 p-3 text-xs whitespace-pre-wrap">
+                  <code>{cooldownPriorityPatchToml}</code>
+                </pre>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -974,6 +1268,59 @@ export default function CryptoMarkets() {
           </div>
         </div>
       </div>
+
+      {!!bucketWindowRows.length && (
+        <div className="card bg-base-200 shadow-sm">
+          <div className="card-body p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="card-title text-base">Bucket 滚动窗口</h2>
+                <div className="text-xs opacity-60">
+                  按 1h / 6h / 24h 查看 same-day / next-day × range / directional × major / alt 的收益和坏退出
+                </div>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="table table-sm">
+                <thead>
+                  <tr>
+                    <th>窗口</th>
+                    <th>Bucket</th>
+                    <th>形态</th>
+                    <th>资产层</th>
+                    <th>成交数</th>
+                    <th>坏退出</th>
+                    <th>已实现</th>
+                    <th>当前持仓</th>
+                    <th>当前浮盈亏(Bid)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {bucketWindowRows.map((row) => (
+                    <tr
+                      key={`${row.window_label}-${row.resolution_bucket}-${row.shape}-${row.asset_class}`}
+                    >
+                      <td>{row.window_label}</td>
+                      <td>{bucketLabel(row.resolution_bucket)}</td>
+                      <td>{shapeLabel(row.shape as "range" | "directional")}</td>
+                      <td>{row.asset_class}</td>
+                      <td>{row.trade_count}</td>
+                      <td>{row.bad_exit_count}</td>
+                      <td className={row.realizedPnl >= 0 ? "text-success" : "text-error"}>
+                        ${row.realizedPnl.toFixed(2)}
+                      </td>
+                      <td>{row.open_positions}</td>
+                      <td className={row.openPnlBid >= 0 ? "text-success" : "text-error"}>
+                        ${row.openPnlBid.toFixed(2)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="card bg-base-200 shadow-sm">
         <div className="card-body p-4">
@@ -1565,6 +1912,11 @@ export default function CryptoMarkets() {
                 <div className="flex items-center gap-2 font-medium">
                   <span>所选 Shape Patch</span>
                   <span className="badge badge-sm badge-outline">{selectedPressureRow.label}</span>
+                  {selectedPatchExport?.export_sha ? (
+                    <span className="badge badge-ghost badge-sm">
+                      sha {selectedPatchExport.export_sha.slice(0, 8)}
+                    </span>
+                  ) : null}
                 </div>
                 <div className="flex items-center gap-2">
                   <button type="button" className="btn btn-xs btn-outline" onClick={copySelectedPressurePatchPreview}>
@@ -1588,6 +1940,180 @@ export default function CryptoMarkets() {
               </pre>
             </div>
           ) : null}
+          {patchAudit && patchAudit.length > 0 ? (
+            <div className="mb-3 rounded-box bg-base-100/70 px-3 py-2 text-xs">
+              <div className="mb-2 font-medium">最近已审 Patch</div>
+              <div className="overflow-x-auto">
+                <table className="table table-sm">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>动作</th>
+                      <th>模式</th>
+                      <th>Scope</th>
+                      <th>文件</th>
+                      <th>SHA</th>
+                      <th>热应用</th>
+                      <th>版本</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {patchAudit.slice(0, 8).map((entry, index) => (
+                      <tr key={`${entry.created_at}-${entry.export_sha}-${index}`}>
+                        <td>{new Date(entry.created_at).toLocaleString("zh-CN")}</td>
+                        <td>{entry.action}</td>
+                        <td>{entry.mode}</td>
+                        <td>{entry.scope_label ?? "-"}</td>
+                        <td className="font-mono text-[11px]">{entry.filename}</td>
+                        <td className="font-mono text-[11px]">{entry.export_sha.slice(0, 12)}</td>
+                        <td>{entry.runtime_applied ? "是" : "否"}</td>
+                        <td>{entry.version}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ) : null}
+          {patchExportAudit.length > 0 && (
+            <div className="mb-3 rounded-box bg-base-100/70 px-3 py-2 text-xs">
+              <div className="mb-2 font-medium">最近 Patch 导出</div>
+              <div className="overflow-x-auto">
+                <table className="table table-sm">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>模式</th>
+                      <th>格式</th>
+                      <th>Scope</th>
+                      <th>文件</th>
+                      <th>SHA</th>
+                      <th>版本</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {patchExportAudit.slice(0, 8).map((entry, index) => (
+                      <tr key={`${entry.recorded_at}-${entry.export_sha}-${index}`}>
+                        <td>{new Date(entry.recorded_at).toLocaleString("zh-CN")}</td>
+                        <td>{entry.mode}</td>
+                        <td>{entry.format}</td>
+                        <td>{entry.scope_label ?? "-"}</td>
+                        <td className="font-mono text-[11px]">{entry.filename}</td>
+                        <td className="font-mono text-[11px]">{entry.export_sha.slice(0, 12)}</td>
+                        <td>{entry.version}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+          {autoPatchEffectRows.length > 0 && (
+            <div className="mb-3 rounded-box bg-base-100/70 px-3 py-2 text-xs">
+              <div className="mb-2 font-medium">最近自动 Patch 效果</div>
+              <div className="overflow-x-auto">
+                <table className="table table-sm">
+                  <thead>
+                    <tr>
+                      <th>应用时间</th>
+                      <th>Scope</th>
+                      <th>当前优先级</th>
+                      <th>熔断后坏退出</th>
+                      <th>熔断后已实现</th>
+                      <th>当前持仓</th>
+                      <th>当前浮盈亏(Bid)</th>
+                      <th>结论</th>
+                      <th>有效连击</th>
+                      <th>后端动作</th>
+                      <th>SHA</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {autoPatchEffectRows.map((entry, index) => (
+                      <tr key={`${entry.runtime_applied_at}-${entry.export_sha}-${index}`}>
+                        <td>{new Date(entry.runtime_applied_at).toLocaleString("zh-CN")}</td>
+                        <td>{entry.scope_labels.join(", ") || "-"}</td>
+                        <td className="font-mono text-[11px]">
+                          <div>{entry.currentPriorityScore}</div>
+                          <div className="text-base-content/60">
+                            冷却 {entry.currentCooldownSeverityScore} / 窗口 {entry.currentWindowPressureScore}
+                          </div>
+                        </td>
+                        <td>{entry.post_apply_bad_exit_count}</td>
+                        <td className={entry.postApplyRealizedPnl >= 0 ? "text-success" : "text-error"}>
+                          ${entry.postApplyRealizedPnl.toFixed(2)}
+                        </td>
+                        <td>{entry.current_open_positions}</td>
+                        <td className={entry.currentOpenPnlBid >= 0 ? "text-success" : "text-error"}>
+                          ${entry.currentOpenPnlBid.toFixed(2)}
+                        </td>
+                        <td>
+                          <span className={`badge badge-sm ${entry.outcomeBadge.className}`}>
+                            {entry.outcomeBadge.label}
+                          </span>
+                        </td>
+                        <td>{entry.effective_streak}</td>
+                        <td>{entry.actionLabel}</td>
+                        <td className="font-mono text-[11px]">{entry.export_sha.slice(0, 12)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+          {relaxCandidatePatchToml ? (
+            <div className="mb-3 rounded-box bg-success/10 px-3 py-2 text-xs">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 font-medium">
+                  <span>建议回退 Patch</span>
+                  {relaxPatchExport?.export_sha ? (
+                    <span className="badge badge-ghost badge-sm">
+                      sha {relaxPatchExport.export_sha.slice(0, 8)}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="btn btn-xs btn-outline"
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(relaxCandidatePatchToml);
+                        setPatchCopyState("copied");
+                        window.setTimeout(() => setPatchCopyState("idle"), 2000);
+                      } catch {
+                        setPatchCopyState("failed");
+                        window.setTimeout(() => setPatchCopyState("idle"), 2000);
+                      }
+                    }}
+                  >
+                    复制回退 Patch
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-xs btn-outline"
+                    onClick={() => {
+                      const anchor = document.createElement("a");
+                      anchor.href = cryptoOverridePatchDownloadPath("relax_candidate");
+                      anchor.download =
+                        relaxPatchExport?.filename ?? "crypto_relax_candidate_override_patch.toml";
+                      anchor.click();
+                    }}
+                  >
+                    下载回退 TOML
+                  </button>
+                </div>
+              </div>
+              <div className="mb-2 opacity-70">
+                这里只读展示后端评估为“建议小步回退”的 scope 所对应的 loosening patch；回退会优先放松 post-entry，
+                只有某个 scope 没有可放松的 post-entry 行时，才会回退 entry。系统不会自动应用这些回退。
+              </div>
+              <pre className="overflow-x-auto rounded-box bg-base-100/70 p-3 text-[11px] leading-5">
+                <code>{relaxCandidatePatchToml}</code>
+              </pre>
+            </div>
+          ) : null}
           {overridePatchPreview?.toml && (
             <div className="mb-3 rounded-box bg-secondary/10 px-3 py-2 text-xs">
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -1604,6 +2130,11 @@ export default function CryptoMarkets() {
                 </div>
                 {combinedPatchToml ? (
                   <div className="flex items-center gap-2">
+                    {fullPatchExport?.export_sha ? (
+                      <span className="badge badge-ghost badge-sm">
+                        sha {fullPatchExport.export_sha.slice(0, 8)}
+                      </span>
+                    ) : null}
                     <button type="button" className="btn btn-xs btn-outline" onClick={copyPatchPreview}>
                       {patchCopyState === "copied"
                         ? "已复制"

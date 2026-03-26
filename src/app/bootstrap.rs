@@ -112,6 +112,7 @@ pub fn start_api_server(
         repository,
         startup_ready,
     });
+    pa_monitor::api::spawn_crypto_override_patch_auto_apply(Arc::clone(&api_state));
     let health_port = settings.monitor.health_port;
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()

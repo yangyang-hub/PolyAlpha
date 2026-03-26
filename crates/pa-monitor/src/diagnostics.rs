@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 const MAX_CRYPTO_DECISIONS: usize = 100;
 const MAX_CRYPTO_EXITS: usize = 100;
+const MAX_CRYPTO_PATCH_EXPORTS: usize = 100;
 const MAX_SMART_MONEY_DECISIONS: usize = 200;
 const MAX_SMART_MONEY_EXITS: usize = 100;
 const CRYPTO_EXIT_DEDUP_WINDOW_SECS: i64 = 5;
@@ -72,6 +73,16 @@ pub struct CryptoExitDecision {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CryptoOverridePatchExportDecision {
+    pub recorded_at: DateTime<Utc>,
+    pub mode: String,
+    pub format: String,
+    pub filename: String,
+    pub export_sha: String,
+    pub scope_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartMoneyDecision {
     pub recorded_at: DateTime<Utc>,
     pub token_id: String,
@@ -131,6 +142,8 @@ pub struct SmartMoneyLeaderPnlAttributionEntry {
 static CRYPTO_CANDIDATE_DECISIONS: LazyLock<Mutex<VecDeque<CryptoCandidateDecision>>> =
     LazyLock::new(|| Mutex::new(VecDeque::new()));
 static CRYPTO_EXIT_DECISIONS: LazyLock<Mutex<VecDeque<CryptoExitDecision>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
+static CRYPTO_PATCH_EXPORT_DECISIONS: LazyLock<Mutex<VecDeque<CryptoOverridePatchExportDecision>>> =
     LazyLock::new(|| Mutex::new(VecDeque::new()));
 static SMART_MONEY_DECISIONS: LazyLock<Mutex<VecDeque<SmartMoneyDecision>>> =
     LazyLock::new(|| Mutex::new(VecDeque::new()));
@@ -208,6 +221,27 @@ pub fn recent_crypto_exit_decisions() -> Vec<CryptoExitDecision> {
 
 pub fn clear_crypto_exit_decisions() {
     CRYPTO_EXIT_DECISIONS.lock().unwrap().clear();
+}
+
+pub fn record_crypto_override_patch_export(entry: CryptoOverridePatchExportDecision) {
+    let mut entries = CRYPTO_PATCH_EXPORT_DECISIONS.lock().unwrap();
+    entries.push_front(entry);
+    while entries.len() > MAX_CRYPTO_PATCH_EXPORTS {
+        entries.pop_back();
+    }
+}
+
+pub fn recent_crypto_override_patch_exports() -> Vec<CryptoOverridePatchExportDecision> {
+    CRYPTO_PATCH_EXPORT_DECISIONS
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect()
+}
+
+pub fn clear_crypto_override_patch_exports() {
+    CRYPTO_PATCH_EXPORT_DECISIONS.lock().unwrap().clear();
 }
 
 pub fn record_smart_money_decision(entry: SmartMoneyDecision) {

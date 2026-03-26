@@ -603,6 +603,28 @@ pub struct CryptoAlphaConfig {
     /// Sliding window for same-day alt directional bad-exit cooldown, in seconds.
     #[serde(default = "default_crypto_same_day_alt_bad_exit_cooldown_secs")]
     pub same_day_alt_bad_exit_cooldown_secs: u64,
+    /// Number of distinct recent bad next-day alt range exits required before temporarily
+    /// skipping new next-day alt range entries for the same asset/subtype bucket.
+    #[serde(default = "default_crypto_next_day_alt_range_bad_exit_cooldown_trigger_count")]
+    pub next_day_alt_range_bad_exit_cooldown_trigger_count: u32,
+    /// Sliding window for next-day alt range bad-exit cooldown, in seconds.
+    #[serde(default = "default_crypto_next_day_alt_range_bad_exit_cooldown_secs")]
+    pub next_day_alt_range_bad_exit_cooldown_secs: u64,
+    /// Whether the backend should periodically auto-apply cooldown-priority crypto override patches.
+    #[serde(default = "default_crypto_auto_apply_cooldown_priority_patch")]
+    pub auto_apply_cooldown_priority_patch: bool,
+    /// Background interval for evaluating and auto-applying cooldown-priority crypto override patches.
+    #[serde(default = "default_crypto_auto_apply_cooldown_priority_patch_interval_secs")]
+    pub auto_apply_cooldown_priority_patch_interval_secs: u64,
+    /// Only allow backend auto-apply to tighten crypto override rows, never loosen them.
+    #[serde(default = "default_crypto_auto_apply_cooldown_priority_patch_tighten_only")]
+    pub auto_apply_cooldown_priority_patch_tighten_only: bool,
+    /// Maximum number of override rows a single backend auto-apply cycle may change.
+    #[serde(default = "default_crypto_auto_apply_cooldown_priority_patch_max_rows")]
+    pub auto_apply_cooldown_priority_patch_max_rows: usize,
+    /// Minimum seconds before the backend may auto-apply another patch touching the same bucket.
+    #[serde(default = "default_crypto_auto_apply_cooldown_priority_patch_min_reapply_secs")]
+    pub auto_apply_cooldown_priority_patch_min_reapply_secs: u64,
     /// Multiply execution-quality profit-retention weight for same-day entries.
     #[serde(default = "default_crypto_same_day_execution_quality_profit_weight_multiplier")]
     pub same_day_execution_quality_profit_weight_multiplier: Decimal,
@@ -689,12 +711,18 @@ pub struct CryptoAlphaConfig {
     /// Additional max-spread multiplier for same-day alt markets.
     #[serde(default = "default_crypto_same_day_alt_max_spread_multiplier")]
     pub same_day_alt_max_spread_multiplier: Decimal,
+    /// Additional max-spread multiplier for same-day alt range/NegRisk markets.
+    #[serde(default = "default_crypto_same_day_alt_range_max_spread_multiplier")]
+    pub same_day_alt_range_max_spread_multiplier: Decimal,
     /// Additional max-spread multiplier for same-day range/NegRisk markets.
     #[serde(default = "default_crypto_same_day_range_max_spread_multiplier")]
     pub same_day_range_max_spread_multiplier: Decimal,
     /// Multiply max spread by this factor for short-dated markets.
     #[serde(default = "default_crypto_short_horizon_max_spread_multiplier")]
     pub short_horizon_max_spread_multiplier: Decimal,
+    /// Additional max-spread multiplier for next-day alt range/NegRisk markets.
+    #[serde(default = "default_crypto_next_day_alt_range_max_spread_multiplier")]
+    pub next_day_alt_range_max_spread_multiplier: Decimal,
     /// Multiply max spread by this factor for medium-dated markets.
     #[serde(default = "default_crypto_medium_horizon_max_spread_multiplier")]
     pub medium_horizon_max_spread_multiplier: Decimal,
@@ -973,6 +1001,27 @@ fn default_crypto_same_day_alt_bad_exit_cooldown_trigger_count() -> u32 {
 fn default_crypto_same_day_alt_bad_exit_cooldown_secs() -> u64 {
     1800
 }
+fn default_crypto_next_day_alt_range_bad_exit_cooldown_trigger_count() -> u32 {
+    2
+}
+fn default_crypto_next_day_alt_range_bad_exit_cooldown_secs() -> u64 {
+    3600
+}
+fn default_crypto_auto_apply_cooldown_priority_patch() -> bool {
+    true
+}
+fn default_crypto_auto_apply_cooldown_priority_patch_interval_secs() -> u64 {
+    300
+}
+fn default_crypto_auto_apply_cooldown_priority_patch_tighten_only() -> bool {
+    true
+}
+fn default_crypto_auto_apply_cooldown_priority_patch_max_rows() -> usize {
+    4
+}
+fn default_crypto_auto_apply_cooldown_priority_patch_min_reapply_secs() -> u64 {
+    1800
+}
 fn default_crypto_same_day_execution_quality_profit_weight_multiplier() -> Decimal {
     Decimal::new(80, 2)
 } // 0.80
@@ -1060,12 +1109,18 @@ fn default_crypto_same_day_max_spread_multiplier() -> Decimal {
 fn default_crypto_same_day_alt_max_spread_multiplier() -> Decimal {
     Decimal::new(85, 2)
 } // 0.85
+fn default_crypto_same_day_alt_range_max_spread_multiplier() -> Decimal {
+    Decimal::new(110, 2)
+} // 1.10
 fn default_crypto_same_day_range_max_spread_multiplier() -> Decimal {
     Decimal::new(85, 2)
 } // 0.85
 fn default_crypto_short_horizon_max_spread_multiplier() -> Decimal {
     Decimal::new(75, 2)
 } // 0.75
+fn default_crypto_next_day_alt_range_max_spread_multiplier() -> Decimal {
+    Decimal::new(110, 2)
+} // 1.10
 fn default_crypto_medium_horizon_max_spread_multiplier() -> Decimal {
     Decimal::new(90, 2)
 } // 0.90
@@ -1261,6 +1316,19 @@ impl Default for CryptoAlphaConfig {
                 default_crypto_same_day_alt_bad_exit_cooldown_trigger_count(),
             same_day_alt_bad_exit_cooldown_secs: default_crypto_same_day_alt_bad_exit_cooldown_secs(
             ),
+            next_day_alt_range_bad_exit_cooldown_trigger_count:
+                default_crypto_next_day_alt_range_bad_exit_cooldown_trigger_count(),
+            next_day_alt_range_bad_exit_cooldown_secs:
+                default_crypto_next_day_alt_range_bad_exit_cooldown_secs(),
+            auto_apply_cooldown_priority_patch: default_crypto_auto_apply_cooldown_priority_patch(),
+            auto_apply_cooldown_priority_patch_interval_secs:
+                default_crypto_auto_apply_cooldown_priority_patch_interval_secs(),
+            auto_apply_cooldown_priority_patch_tighten_only:
+                default_crypto_auto_apply_cooldown_priority_patch_tighten_only(),
+            auto_apply_cooldown_priority_patch_max_rows:
+                default_crypto_auto_apply_cooldown_priority_patch_max_rows(),
+            auto_apply_cooldown_priority_patch_min_reapply_secs:
+                default_crypto_auto_apply_cooldown_priority_patch_min_reapply_secs(),
             same_day_execution_quality_profit_weight_multiplier:
                 default_crypto_same_day_execution_quality_profit_weight_multiplier(),
             same_day_alt_execution_quality_profit_weight_multiplier:
@@ -1304,10 +1372,14 @@ impl Default for CryptoAlphaConfig {
             medium_horizon_min_edge_multiplier: default_crypto_medium_horizon_min_edge_multiplier(),
             same_day_max_spread_multiplier: default_crypto_same_day_max_spread_multiplier(),
             same_day_alt_max_spread_multiplier: default_crypto_same_day_alt_max_spread_multiplier(),
+            same_day_alt_range_max_spread_multiplier:
+                default_crypto_same_day_alt_range_max_spread_multiplier(),
             same_day_range_max_spread_multiplier:
                 default_crypto_same_day_range_max_spread_multiplier(),
             short_horizon_max_spread_multiplier: default_crypto_short_horizon_max_spread_multiplier(
             ),
+            next_day_alt_range_max_spread_multiplier:
+                default_crypto_next_day_alt_range_max_spread_multiplier(),
             medium_horizon_max_spread_multiplier:
                 default_crypto_medium_horizon_max_spread_multiplier(),
             same_day_capital_efficiency_threshold:

@@ -82,6 +82,156 @@ This file records repository-specific working agreements, high-level project con
 
 ## Change Log
 
+### 2026-03-26
+- Area: `crates/pa-monitor/src/api.rs`
+- Change: Fixed three crypto auto-patch logic issues by making runtime/effectiveness `scope_labels` include the real `resolution_bucket`, teaching auto-patch effectiveness and relax-candidate matching to honor `same_day` versus `next_day`, and isolating cooldown severity/current-priority scoring by `event_subtype` instead of blending all same-asset same-shape losses together.
+- Why: Once next-day cooldowns and bucket-aware auto-tighten were in place, the remaining automation gaps were that effect evaluation still treated everything as same-day, different subtypes could borrow each other's loss pressure, and same-day/next-day scopes could block or “effective-streak” each other through bucket-agnostic audit keys.
+
+### 2026-03-26
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Exposed the backend's live auto-tighten ranking inputs through `crypto_auto_patch_effectiveness_summary` by adding `current_priority_score`, `current_cooldown_severity_score`, and `current_window_pressure_score`, and surfaced those numbers on the read-only crypto "最近自动 Patch 效果" table.
+- Why: Once backend auto-tighten started ranking buckets by cooldown severity plus rolling-window deterioration, operators still could not see that current priority signal from `/crypto`, which made the backend's tighten order difficult to audit against the rest of the read-only bucket diagnostics.
+
+### 2026-03-26
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `crates/pa-monitor/src/api.rs`, `crates/pa-strategy/Cargo.toml`, `frontend/src/components/ConfigSection.tsx`, `frontend/src/pages/CryptoMarkets.tsx`, `config/default.toml`, `README.md`
+- Change: Added a dedicated `next_day_alt_range` bad-exit cooldown with new config knobs, runtime activation for next-day alt `range/NegRisk` entries, backend cooldown-summary support, and read-only `/crypto` labeling/shape-pressure matching for that new bucket; also added a focused serial regression that verifies the next-day alt range cooldown becomes active after repeated bad exits.
+- Why: After narrowly relaxing spread for `alt / range`, the safest next optimization was to add the matching next-day protection so bad exits cannot simply migrate from same-day buckets into next-day alt range without entering the same cooldown and observability flow.
+
+### 2026-03-26
+- Area: `crates/pa-monitor/src/api.rs`
+- Change: Upgraded backend auto-apply ranking for `cooldown_priority` crypto patches so scope selection and severity scoring now respect the cooldown bucket's real `resolution_bucket` (`same_day` vs `next_day`) and prioritize rows using a combined score from post-trigger bad exits, post-trigger realized PnL, and current open bid-mark PnL instead of relying mostly on raw row support counts.
+- Why: Once next-day cooldown buckets existed and runtime auto-tightening was active, the old same-day-only support-based ranking was no longer enough to target the worst live crypto buckets; the backend now tightens the scopes that are actually losing money or still emitting bad exits first.
+
+### 2026-03-26
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added a backend-owned `crypto_bucket_window_summary` over rolling `1h / 6h / 24h` windows for `same_day / next_day × range / directional × major / alt`, exposing trade count, realized PnL, current open bid-mark PnL, open-position count, and bad-exit count, and surfaced it on the read-only crypto page as a dedicated “Bucket 滚动窗口” table; also fixed the cooldown evaluation path and cooldown-priority patch filtering to respect `next_day` buckets instead of assuming every cooldown bucket is `same_day`.
+- Why: After bucket-level attribution and cooldown automation were in place, the remaining observability gap was a fast view of which crypto shapes had just started deteriorating, while the newly added next-day cooldown buckets also needed to flow through the same read-only evaluation and patch-priority path instead of being silently forced back into same-day semantics.
+
+### 2026-03-26
+- Area: `crates/pa-monitor/src/api.rs`
+- Change: Refined backend `cooldown_priority` auto-apply selection so stressed scopes are now scored with bucket-aware severity (`same_day` vs `next_day`) from post-trigger bad exits, post-trigger realized losses, and current open bid-mark losses, and the server now ranks automatic tighten rows by that severity before falling back to patch support-count ordering.
+- Why: Once rolling bucket summaries and next-day cooldowns existed, the remaining automation gap was that automatic tighten still mostly followed cooldown presence and row support; the backend now prioritizes the buckets that are actually deteriorating the fastest in live PnL terms.
+
+### 2026-03-26
+- Area: `crates/pa-monitor/src/api.rs`
+- Change: Extended the backend auto-tighten severity model to add `1h / 6h` rolling-window pressure scores from bucket-level realized losses, open bid-mark losses, and bad exits on top of the existing post-trigger cooldown severity, so recently deteriorating `same_day / next_day × range / directional × major / alt` buckets are automatically ranked ahead of buckets that only look bad on longer-lived cumulative metrics.
+- Why: After adding bucket window summaries, the next useful refinement was to let automatic tighten respond first to scopes that are worsening right now, instead of treating every stressed cooldown bucket as equally urgent regardless of whether the damage is fresh or already stale.
+
+### 2026-03-26
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Split the crypto page's asset-value semantics by adding backend-owned whole-wallet Bid/Mid valuation fields to `/api/status` and relabeling the existing top stats as explicit `Crypto 策略资产 / Crypto 策略现金 / Crypto 持仓市值(Bid)`, while also showing separate `整钱包资产(Bid/Mid)` cards plus a short note explaining the strategy-vs-wallet valuation difference.
+- Why: Operators were comparing the crypto page's strategy-scoped, bid-marked asset total against Polymarket's broader wallet view and understandably reading the mismatch as a bug, so the UI now exposes both scopes and labels them clearly instead of implying they are the same number.
+
+### 2026-03-26
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Tightened the read-only `relax_candidate` export policy so relax patches now prefer loosening matching post-entry rows first and only fall back to entry rows for scopes that have no post-entry relax candidates, and updated the crypto-page copy to reflect the more conservative ordering.
+- Why: Once the backend could emit reviewable relax patches, the safer next refinement was to ease exit/hold behavior before reopening the entry front door, reducing the chance that a healthy bucket would immediately re-admit lower-quality day-market trades.
+
+### 2026-03-26
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added a backend-owned `relax_candidate` crypto override-patch export mode that rewrites same-day scope rows to `loosen` for buckets currently marked `建议小步回退`, and surfaced the resulting read-only “建议回退 Patch” block on `/crypto` with copy/download actions while keeping runtime auto-apply strictly tighten-only.
+- Why: Once the backend could identify scopes with repeated effective tighten outcomes, the next useful step was to give AI/operators a concrete, reviewable relax patch artifact for those healthy buckets without enabling any automatic loosening path.
+
+### 2026-03-26
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Extended crypto auto-patch effectiveness reporting with a per-scope effective streak and a new read-only `建议小步回退` recommendation, so scopes with at least three recent `effective` auto-patch outcomes and no current same-day open positions are flagged as relax candidates without enabling any automatic loosening.
+- Why: Once the backend could already auto-tighten, score outcomes, and stop repeated tightening on healthy scopes, the next useful optimization was to identify mature buckets that appear safe to ease slightly while still keeping loosening as a human/AI-reviewed follow-up rather than an automatic runtime action.
+
+### 2026-03-26
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Reused the backend auto-patch effectiveness evaluation to drive the cooldown-priority auto-apply loop, so the monitor now skips reapplying the same auto-tightening scopes after two recent `effective` auto-patch outcomes, and surfaced the resulting backend recommendation (`停止重复收紧` / `继续观察` / `继续收紧`) in the read-only crypto auto-patch effectiveness table.
+- Why: Once automatic cooldown-priority patching and effect scoring existed, the next automation gap was that the backend would still keep retightening scopes that were already proving stable, instead of using recent outcomes to stop repeated tighten cycles on healthy buckets.
+
+### 2026-03-26
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added a backend-owned `crypto_auto_patch_effectiveness_summary` that scores recent auto-applied cooldown-priority crypto patches from post-apply bad exits, post-apply realized PnL, and current same-day bid-mark open PnL/position counts for matching buckets, and surfaced the results as a read-only “最近自动 Patch 效果” table on `/crypto`.
+- Why: Once cooldown-priority patches were auto-applied by the backend, the next operational gap was a backend-native answer to whether those automatic tightenings were actually helping, without forcing operators or AI tooling to manually correlate config-history rows with exits, trades, and open positions.
+
+### 2026-03-26
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `crates/pa-monitor/src/api.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added guardrails for backend auto-applied cooldown-priority crypto patches, including new `auto_apply_cooldown_priority_patch_tighten_only`, `auto_apply_cooldown_priority_patch_max_rows`, and `auto_apply_cooldown_priority_patch_min_reapply_secs` settings, filtered auto-generated patch rows down to tighten-only actions, capped each auto-apply cycle to the highest-support rows, and throttled repeat auto-application for the same scope labels using recent patch audit history.
+- Why: Once cooldown-priority patching moved fully into the backend, the next operational risk was letting automation loosen buckets, rewrite too many rows at once, or repeatedly retune the same scope before live outcomes had time to settle.
+
+### 2026-03-26
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Removed the crypto page's patch mutation controls (`保存为已审 Patch` / `批准待上线` / `批准并热应用`) so the frontend is read-only again, while keeping patch previews, download/copy actions, audit tables, and all backend patch APIs intact for automation and AI-side analysis.
+- Why: The intended operating model is backend-owned auto-application of cooldown-priority crypto patches, not user-driven patch state changes from the monitoring UI, so the frontend should remain an observability surface rather than a control plane.
+
+### 2026-03-26
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `crates/pa-monitor/src/api.rs`, `src/app/bootstrap.rs`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added backend-owned auto-application for cooldown-priority crypto patches with new `crypto_alpha.auto_apply_cooldown_priority_patch` and `auto_apply_cooldown_priority_patch_interval_secs` settings, refactored cooldown-priority patch generation into a reusable server helper, added a background monitor task that periodically builds the current cooldown-priority patch, skips already-applied `export_sha`s, and hot-applies new patches into live `crypto_alpha.calibration_overrides` plus config storage without requiring any frontend action.
+- Why: The earlier review/approve/apply flow still depended on an operator clicking buttons in the `/crypto` page, while the desired operating model is a backend-driven loop that automatically tightens stressed cooldown buckets once the live diagnostics justify a cooldown-priority patch.
+
+### 2026-03-26
+- Area: `crates/pa-monitor/src/api.rs`, `crates/pa-monitor/Cargo.toml`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Extended the crypto override-patch workflow from a single “save reviewed patch” action into staged `review` / `approve` / `apply_runtime` actions, added TOML parsing plus selector-key merge logic so runtime apply now merges exported `crypto_alpha.calibration_overrides` rows into the live config and persists the updated `crypto_alpha` section, enriched patch audit entries with action/runtime status, and surfaced matching `批准待上线` / `批准并热应用` buttons plus a recent reviewed-patch audit table on the CryptoMarkets page.
+- Why: The earlier patch flow could export and archive reviewed TOML, but operators still lacked a controlled way to distinguish “saved for review” from “approved” and a deliberate path to hot-apply a reviewed crypto override patch into the running config while preserving an audit trail.
+
+### 2026-03-25
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Extended the crypto cooldown panel into a first-pass effectiveness view by adding post-trigger realized PnL from matching same-day trades, a simple `有效 / 观察 / 保留/收紧` outcome badge, and table columns that combine post-trigger bad exits, current bid-mark open PnL, and realized performance for each active cooldown bucket.
+- Why: The earlier cooldown summary showed that a bucket was paused, but operators still had to manually infer whether the cooldown was actually stabilizing that bucket or whether losses after the trigger still justified keeping or tightening the stand-down.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/diagnostics.rs`, `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added a conservative crypto patch review flow with `/api/crypto/override-patch/apply` and `/api/crypto/override-patch/audit`, persisted approved patch snapshots into `app_config/config_history` as `crypto_override_patch`, recorded recent export events in diagnostics, and surfaced both “保存为已审 Patch” actions and recent approved/exported patch tables on the CryptoMarkets page.
+- Why: The live crypto patch pipeline already supported preview, filtering, export, and audit metadata, but operators still lacked a controlled way to mark one of those patch artifacts as reviewed and persist it into a repository-backed audit trail before any future runtime-apply step.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/diagnostics.rs`, `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added an in-memory crypto override patch export audit stream, recorded every `/api/crypto/override-patch` export with mode/format/filename/sha/scope metadata, exposed the recent entries through `/api/status`, and surfaced a recent patch-export table on the CryptoMarkets page.
+- Why: After making live crypto patch exports server-owned and auditable by SHA, the remaining gap was a compact runtime trail showing which full/cooldown/selected patch artifacts were actually exported recently, instead of only exposing the current patch previews.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`
+- Change: Annotated `format=toml` crypto override exports with a short metadata header inside the downloaded file itself, adding `# filename`, `# export_sha`, and `# generated_at` comments above the emitted TOML rows for full, cooldown-priority, and selected exports.
+- Why: Showing audit metadata in the UI was useful, but once operators download or share a patch file, the artifact itself still needed to carry its own provenance so it can be traced back to the exact live export snapshot without referencing the monitor page.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added patch-export audit metadata (`export_sha`, `generated_at`) to all `/api/crypto/override-patch` modes and surfaced the short SHA in the crypto page's full, cooldown-priority, and selected patch sections.
+- Why: After making patch export server-owned and directly downloadable, the next remaining audit gap was a stable identifier proving which exact live patch payload the operator copied or downloaded from the monitor.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added `format=toml` support to `/api/crypto/override-patch` so the monitor can return direct `text/plain` attachment responses for full, cooldown-priority, and selected patch exports, and switched the crypto page download buttons to hit those backend download URLs directly instead of first building client-side blobs.
+- Why: Once server-owned patch exports and filenames existed, the remaining gap was that downloads still routed through frontend-local blob generation instead of consuming the same backend artifact directly, which kept one foot in the old client-side export path.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added patch-export metadata (`filename` and, for selected exports, `scope_label`) to `/api/crypto/override-patch` responses and updated the crypto page download actions to prefer those backend-provided filenames instead of hard-coded local names.
+- Why: Once all crypto patch exports were unified behind the backend endpoint, the remaining usability gap was that the frontend and any future automation still had to invent their own filenames and selected-scope labels instead of consuming server-owned export metadata.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Extended `/api/crypto/override-patch` with `mode=selected&bucket=...&shape=...` and switched the crypto page's selected-shape patch export to prefer that backend-owned artifact, so full, cooldown-priority, and selected row patch exports now all share the same server-rendered TOML path.
+- Why: After moving full and cooldown-priority patch export to the monitor API, the last remaining inconsistency was that selected-shape export still depended on frontend-local filtering and TOML rendering instead of the same backend patch pipeline.
+
+### 2026-03-25
+- Area: `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added a frontend `fetchCryptoOverridePatch` client and switched the crypto page to prefer the new backend-owned `/api/crypto/override-patch` exports for both full and cooldown-priority TOML, while retaining the existing local patch rendering as a fallback.
+- Why: Once the monitor exposed backend-owned patch exports, the remaining consistency gap was that the page still rendered its own local TOML; preferring the server output keeps the UI aligned with the same patch artifact automation can now consume.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`
+- Change: Added a backend-owned `/api/crypto/override-patch` export endpoint with `mode=full` and `mode=cooldown_priority`, reusing the live status patch previews and filtering cooldown-priority rows on the server from active same-day cooldown buckets plus post-trigger realized/open PnL checks.
+- Why: The crypto page could already preview and copy runtime patch snippets, but automation and operator tooling still lacked a stable backend export for the exact same full patch or the narrower cooldown-priority patch without relying on frontend-local filtering logic.
+
+### 2026-03-25
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added a cooldown-priority patch block that filters runtime entry/post-entry patch previews down to only the active cooldown buckets currently judged as `保留/收紧`, so the crypto page now emits a copy-ready TOML focused on the buckets whose cooldowns are still failing or still carrying losses.
+- Why: Once cooldown effectiveness had an explicit outcome badge, the next operational gap was translating those bad cooldown buckets into the exact override rows that should be reviewed or tightened first instead of forcing operators to manually cross-reference cooldown rows against the broader shape-pressure patch previews.
+
+### 2026-03-25
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Extended crypto cooldown buckets with `triggered_at` and `post_trigger_bad_exit_count`, and added a cooldown-effect view on `/crypto` that shows each active bucket's post-trigger bad exits, current open-position count, and current bid-mark PnL alongside the remaining cooldown timer.
+- Why: Once same-day range/alt cooldowns were in place, operators still could not tell whether a triggered cooldown was actually stabilizing the bucket or whether bad exits and open losses were continuing after the trigger event.
+
+### 2026-03-25
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added dedicated `same_day_alt_range_max_spread_multiplier` and `next_day_alt_range_max_spread_multiplier` knobs and applied them only to `alt / range` crypto entry thresholds, so same-day and next-day alt range markets can tolerate a modestly wider spread without loosening major or directional buckets.
+- Why: Live crypto friction had become highly concentrated in `spread_too_wide` for `alt / range` buckets, so the safest next optimization is a narrow spread relaxation for that exact shape instead of weakening the global day-market spread gate.
+
 ### 2026-03-25
 - Area: `crates/pa-monitor/src/api.rs`, `crates/pa-monitor/src/diagnostics.rs`
 - Change: Fixed crypto runtime observability so same-day alt cooldown buckets now only include true alt assets, entry-side live tuning/override suggestions skip `legacy` resolution-bucket rows instead of surfacing stale `max_entry_days` actions, and recent crypto exit deduplication now suppresses repeated same-exit events across the whole short dedup window rather than only comparing against the latest recorded exit.
