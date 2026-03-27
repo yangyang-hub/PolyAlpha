@@ -2346,8 +2346,18 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
             .map(|entry| {
                 let effective_streak =
                     scope_effective_streak(&entry.scope_labels, &effectiveness_entries);
+                let max_long_window_pressure = compute_scope_set_long_window_pressure(
+                    &entry.scope_labels,
+                    &trade_rows,
+                    &positions,
+                    &recent_exits,
+                );
                 let recommended_action = match entry.outcome {
-                    "effective" if effective_streak >= 3 && entry.current_open_positions == 0 => {
+                    "effective"
+                        if effective_streak >= 3
+                            && entry.current_open_positions == 0
+                            && max_long_window_pressure == 0 =>
+                    {
                         "consider_relax"
                     }
                     "effective" => "hold",
@@ -2398,6 +2408,10 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
                     "outcome": entry.outcome,
                     "effective_streak": effective_streak,
                     "recommended_action": recommended_action,
+                    "blocked_by_long_window_relax_guard": entry.outcome == "effective"
+                        && effective_streak >= 3
+                        && entry.current_open_positions == 0
+                        && max_long_window_pressure > 0,
                     "current_priority_score": current_priority_score,
                     "current_cooldown_severity_score": current_cooldown_severity_score,
                     "current_window_pressure_score": current_window_pressure_score,
@@ -2409,6 +2423,31 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
                 })
             })
             .collect();
+        let long_window_relax_guard_summary = {
+            let rows = patches
+                .iter()
+                .filter(|patch| {
+                    patch.get("blocked_by_long_window_relax_guard")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                })
+                .map(|patch| {
+                    json!({
+                        "runtime_applied_at": patch.get("runtime_applied_at").cloned().unwrap_or(Value::Null),
+                        "scope_labels": patch.get("scope_labels").cloned().unwrap_or_else(|| json!([])),
+                        "effective_streak": patch.get("effective_streak").cloned().unwrap_or_else(|| json!(0)),
+                        "current_long_window_pressure_score": patch.get("current_long_window_pressure_score").cloned().unwrap_or_else(|| json!(0)),
+                        "current_open_positions": patch.get("current_open_positions").cloned().unwrap_or_else(|| json!(0)),
+                        "current_open_pnl_bid": patch.get("current_open_pnl_bid").cloned().unwrap_or_else(|| json!("0")),
+                        "note": "24h 慢变量仍承压，暂不进入建议回退",
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "blocked_count": rows.len(),
+                "rows": rows,
+            })
+        };
         let relax_pressure_summary = {
             let mut same_day_count = 0usize;
             let mut next_day_count = 0usize;
@@ -2491,11 +2530,17 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
                 "next_day_pressure_score": next_day_pressure_score,
             })
         };
-        let priority_bucket_summary =
-            build_priority_bucket_summary(&current_scope_scores, &patches);
+        let priority_bucket_summary = build_priority_bucket_summary(
+            &current_scope_scores,
+            &patches,
+            &entry_patch_rows,
+            &post_entry_patch_rows,
+            &crypto_cooldown_buckets,
+        );
         json!({
             "recent_count": patches.len(),
             "patches": patches,
+            "long_window_relax_guard_summary": long_window_relax_guard_summary,
             "relax_pressure_summary": relax_pressure_summary,
             "priority_bucket_summary": priority_bucket_summary,
         })
@@ -2503,6 +2548,10 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         json!({
             "recent_count": 0,
             "patches": [],
+            "long_window_relax_guard_summary": {
+                "blocked_count": 0,
+                "rows": [],
+            },
             "relax_pressure_summary": {
                 "leader_label": "暂无明确回退压力",
                 "same_day_count": 0,
@@ -2518,6 +2567,10 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
                 "leader_label": "当前没有明显恶化的冷却 bucket",
                 "leader_recommended_action": "observe",
                 "leader_action_label": "继续观察",
+                "leader_field_action_label": "暂无字段级建议",
+                "leader_target_fields": [],
+                "subtype_focus_label": "暂无明显主导 subtype",
+                "asset_focus_label": "暂无明显主导资产",
                 "rows": [],
             },
         })
@@ -3943,18 +3996,7 @@ fn scope_has_repeated_effective_auto_patches(
     entries: &[CryptoAutoPatchEffectivenessEntry],
     min_effective_count: usize,
 ) -> bool {
-    !scope_labels.is_empty()
-        && scope_labels.iter().all(|scope_label| {
-            entries
-                .iter()
-                .filter(|entry| {
-                    entry.outcome == "effective"
-                        && entry.scope_labels.iter().any(|label| label == scope_label)
-                })
-                .take(min_effective_count)
-                .count()
-                >= min_effective_count
-        })
+    scope_effective_streak(scope_labels, entries) >= min_effective_count
 }
 
 fn scope_effective_streak(
@@ -3964,15 +4006,49 @@ fn scope_effective_streak(
     if scope_labels.is_empty() {
         return 0;
     }
-    entries
+    let mut matching = entries
         .iter()
         .filter(|entry| {
-            entry.outcome == "effective"
-                && scope_labels
-                    .iter()
-                    .all(|scope_label| entry.scope_labels.iter().any(|label| label == scope_label))
+            scope_labels
+                .iter()
+                .all(|scope_label| entry.scope_labels.iter().any(|label| label == scope_label))
         })
-        .count()
+        .collect::<Vec<_>>();
+    matching.sort_by(|a, b| b.runtime_applied_at.cmp(&a.runtime_applied_at));
+    let mut streak = 0usize;
+    for entry in matching {
+        if entry.outcome == "effective" {
+            streak += 1;
+        } else {
+            break;
+        }
+    }
+    streak
+}
+
+fn compute_scope_set_long_window_pressure(
+    scope_labels: &[String],
+    trade_rows: &[TradeHistoryRow],
+    positions: &[PositionApiEntry],
+    recent_exits: &[crate::diagnostics::CryptoExitDecision],
+) -> i64 {
+    scope_labels
+        .iter()
+        .filter_map(|label| parse_bucketed_shaped_scope_label(label))
+        .map(|(resolution_bucket, asset_class, event_subtype, shape)| {
+            compute_scope_window_pressure_score(
+                trade_rows,
+                positions,
+                recent_exits,
+                &resolution_bucket,
+                &shape,
+                &asset_class,
+                &event_subtype,
+                &[(chrono::Duration::hours(24), 1_i64)],
+            )
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 fn rewrite_patch_rows_direction(
@@ -4067,43 +4143,34 @@ fn build_staged_relax_post_entry_rows(
     post_entry_rows: &[Value],
     relax_scope_labels: &std::collections::BTreeSet<String>,
 ) -> (Vec<Value>, bool, bool) {
-    let hold_edge_only_fields = ["hold_edge_multiplier"];
-    let secondary_conservative_fields = [
-        "capital_efficiency_multiplier",
-        "model_reversal_buffer_multiplier",
+    let staged_fields = [
+        ["hold_edge_multiplier"].as_slice(),
+        ["capital_efficiency_multiplier"].as_slice(),
+        ["model_reversal_buffer_multiplier"].as_slice(),
     ];
-    let mut selected = rewrite_patch_rows_direction_for_fields(
-        post_entry_rows,
-        relax_scope_labels,
-        "loosen",
-        &hold_edge_only_fields,
-    )
-    .into_iter()
-    .filter(|row| row.get("source_bucket").and_then(Value::as_str) != Some("legacy"))
-    .collect::<Vec<_>>();
-    let mut covered_scopes = selected
-        .iter()
-        .filter_map(row_scope_key)
-        .collect::<std::collections::BTreeSet<_>>();
-    let secondary = rewrite_patch_rows_direction_for_fields(
-        post_entry_rows,
-        relax_scope_labels,
-        "loosen",
-        &secondary_conservative_fields,
-    )
-    .into_iter()
-    .filter(|row| row.get("source_bucket").and_then(Value::as_str) != Some("legacy"))
-    .filter(|row| {
-        row_scope_key(row)
-            .map(|label| !covered_scopes.contains(&label))
-            .unwrap_or(false)
-    })
-    .collect::<Vec<_>>();
-    selected.extend(secondary);
-    covered_scopes = selected
-        .iter()
-        .filter_map(row_scope_key)
-        .collect::<std::collections::BTreeSet<_>>();
+    let mut selected = Vec::new();
+    let mut covered_scopes = std::collections::BTreeSet::new();
+    for allowed_fields in staged_fields {
+        let staged_rows = rewrite_patch_rows_direction_for_fields(
+            post_entry_rows,
+            relax_scope_labels,
+            "loosen",
+            allowed_fields,
+        )
+        .into_iter()
+        .filter(|row| row.get("source_bucket").and_then(Value::as_str) != Some("legacy"))
+        .filter(|row| {
+            row_scope_key(row)
+                .map(|label| !covered_scopes.contains(&label))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+        selected.extend(staged_rows);
+        covered_scopes = selected
+            .iter()
+            .filter_map(row_scope_key)
+            .collect::<std::collections::BTreeSet<_>>();
+    }
     let mut uses_fallback_post_entry = false;
     if covered_scopes.len() < relax_scope_labels.len() {
         let fallback_post_entry =
@@ -4124,6 +4191,176 @@ fn build_staged_relax_post_entry_rows(
         !selected.is_empty(),
         uses_fallback_post_entry,
     )
+}
+
+fn target_field_display_label(target_field: &str) -> String {
+    match target_field {
+        "max_spread_multiplier" => "max_spread".to_string(),
+        "min_edge_multiplier" => "min_edge".to_string(),
+        "size_multiplier" => "size".to_string(),
+        "hold_edge_multiplier" => "hold_edge".to_string(),
+        "capital_efficiency_multiplier" => "capital_efficiency".to_string(),
+        "model_reversal_buffer_multiplier" => "model_buffer".to_string(),
+        "edge_decay_exit_multiplier" => "edge_decay_exit".to_string(),
+        "edge_decay_confirmation_scan_multiplier" => "edge_decay_confirm_scan".to_string(),
+        "edge_decay_confirmation_window_multiplier" => "edge_decay_confirm_window".to_string(),
+        "edge_decay_cooldown_multiplier" => "edge_decay_cooldown".to_string(),
+        "profit_retention_multiplier" => "profit_retention".to_string(),
+        "slippage_multiplier" => "slippage".to_string(),
+        "size_retention_multiplier" => "size_retention".to_string(),
+        "depth_ratio_multiplier" => "depth_ratio".to_string(),
+        "probability_calibration" => "probability".to_string(),
+        _ => target_field.to_string(),
+    }
+}
+
+fn target_field_tighten_priority(target_field: &str) -> i64 {
+    match target_field {
+        "max_spread_multiplier" => 600,
+        "size_multiplier" => 500,
+        "min_edge_multiplier" => 450,
+        "hold_edge_multiplier" => 350,
+        "capital_efficiency_multiplier" => 250,
+        "model_reversal_buffer_multiplier" => 200,
+        "edge_decay_exit_multiplier" => 150,
+        "edge_decay_confirmation_scan_multiplier" => 140,
+        "edge_decay_confirmation_window_multiplier" => 130,
+        "edge_decay_cooldown_multiplier" => 120,
+        "profit_retention_multiplier" => 110,
+        "slippage_multiplier" => 100,
+        "size_retention_multiplier" => 90,
+        "depth_ratio_multiplier" => 80,
+        "probability_calibration" => 70,
+        _ => 10,
+    }
+}
+
+fn patch_row_field_priority_score(row: &Value) -> i64 {
+    row.get("fields")
+        .and_then(Value::as_array)
+        .map(|fields| {
+            fields
+                .iter()
+                .filter_map(|field| {
+                    let target_field = field.get("target_field").and_then(Value::as_str)?;
+                    let support_count = field
+                        .get("support_count")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as i64;
+                    Some(target_field_tighten_priority(target_field) * 1_000 + support_count)
+                })
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
+}
+
+fn collect_scope_field_targets_by_support(
+    rows: &[Value],
+    scope_label: &str,
+    limit: usize,
+) -> Vec<String> {
+    let mut scored = rows
+        .iter()
+        .filter(|row| row_scope_key(row).as_deref() == Some(scope_label))
+        .flat_map(|row| {
+            row.get("fields")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|field| {
+                    Some((
+                        field
+                            .get("support_count")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                        field
+                            .get("target_field")
+                            .and_then(Value::as_str)?
+                            .to_string(),
+                    ))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let mut seen = std::collections::BTreeSet::new();
+    scored
+        .into_iter()
+        .filter_map(|(_, target_field)| {
+            if seen.insert(target_field.clone()) {
+                Some(target_field_display_label(&target_field))
+            } else {
+                None
+            }
+        })
+        .take(limit)
+        .collect()
+}
+
+fn collect_scope_field_targets_in_row_order(
+    rows: &[Value],
+    scope_label: &str,
+    limit: usize,
+) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut ordered = Vec::new();
+    for row in rows {
+        if row_scope_key(row).as_deref() != Some(scope_label) {
+            continue;
+        }
+        for field in row
+            .get("fields")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(target_field) = field.get("target_field").and_then(Value::as_str) else {
+                continue;
+            };
+            if seen.insert(target_field.to_string()) {
+                ordered.push(target_field_display_label(target_field));
+            }
+            if ordered.len() >= limit {
+                return ordered;
+            }
+        }
+    }
+    ordered
+}
+
+fn build_scope_relax_field_targets(
+    entry_rows: &[Value],
+    post_entry_rows: &[Value],
+    scope_label: &str,
+    limit: usize,
+) -> Vec<String> {
+    let relax_scope_labels = [scope_label.to_string()]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let filtered_post_entry_rows = post_entry_rows
+        .iter()
+        .filter(|row| row.get("source_bucket").and_then(Value::as_str) != Some("legacy"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let (post_entry_selected, _, _) =
+        build_staged_relax_post_entry_rows(&filtered_post_entry_rows, &relax_scope_labels);
+    let mut fields =
+        collect_scope_field_targets_in_row_order(&post_entry_selected, scope_label, limit);
+    if fields.len() < limit {
+        let entry_selected =
+            rewrite_patch_rows_direction(entry_rows, &relax_scope_labels, "loosen")
+                .into_iter()
+                .filter(|row| row.get("source_bucket").and_then(Value::as_str) != Some("legacy"))
+                .collect::<Vec<_>>();
+        let remaining = limit.saturating_sub(fields.len());
+        fields.extend(collect_scope_field_targets_in_row_order(
+            &entry_selected,
+            scope_label,
+            remaining,
+        ));
+    }
+    fields
 }
 
 fn compute_relax_tier_for_scope_labels(
@@ -4207,7 +4444,30 @@ fn auto_patch_action_label(action: &str) -> &'static str {
 fn build_priority_bucket_summary(
     current_scope_scores: &std::collections::HashMap<String, (i64, i64, i64, i64)>,
     patches: &[Value],
+    entry_patch_rows: &[Value],
+    post_entry_patch_rows: &[Value],
+    cooldown_buckets: &[Value],
 ) -> Value {
+    let scope_action_for = |scope_label: &str| {
+        patches
+            .iter()
+            .find(|patch| {
+                patch
+                    .get("scope_labels")
+                    .and_then(Value::as_array)
+                    .map(|labels| {
+                        labels
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .any(|label| label == scope_label)
+                    })
+                    .unwrap_or(false)
+            })
+            .and_then(|patch| patch.get("recommended_action"))
+            .and_then(Value::as_str)
+            .unwrap_or("observe")
+            .to_string()
+    };
     let mut rows = current_scope_scores
         .iter()
         .filter_map(
@@ -4263,25 +4523,301 @@ fn build_priority_bucket_summary(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let leader_recommended_action = patches
-        .iter()
-        .find(|patch| {
-            patch
-                .get("scope_labels")
-                .and_then(Value::as_array)
-                .map(|labels| {
-                    labels
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .any(|label| label == leader_scope_label)
-                })
-                .unwrap_or(false)
-        })
-        .and_then(|patch| patch.get("recommended_action"))
-        .and_then(Value::as_str)
-        .unwrap_or("observe")
-        .to_string();
+    let leader_recommended_action = scope_action_for(&leader_scope_label);
     let leader_action_label = auto_patch_action_label(&leader_recommended_action).to_string();
+    let leader_target_fields = if leader_scope_label.is_empty() {
+        Vec::new()
+    } else if leader_recommended_action == "consider_relax" {
+        build_scope_relax_field_targets(
+            entry_patch_rows,
+            post_entry_patch_rows,
+            &leader_scope_label,
+            4,
+        )
+    } else {
+        let mut fields =
+            collect_scope_field_targets_by_support(entry_patch_rows, &leader_scope_label, 4);
+        if fields.len() < 4 {
+            let remaining = 4usize.saturating_sub(fields.len());
+            let mut post_entry_fields = collect_scope_field_targets_by_support(
+                post_entry_patch_rows,
+                &leader_scope_label,
+                remaining,
+            );
+            fields.append(&mut post_entry_fields);
+            fields.dedup();
+            fields.truncate(4);
+        }
+        fields
+    };
+    let leader_field_action_label = if leader_target_fields.is_empty() {
+        match leader_recommended_action.as_str() {
+            "hold" => "维持当前收紧，无新增字段动作".to_string(),
+            "continue_tighten" => "继续收紧，但当前没有可导出的字段候选".to_string(),
+            "consider_relax" => "建议小步回退，但当前没有可导出的字段候选".to_string(),
+            _ => "继续观察，无新增字段动作".to_string(),
+        }
+    } else {
+        match leader_recommended_action.as_str() {
+            "hold" => format!(
+                "维持当前收紧，优先保持：{}",
+                leader_target_fields.join(" / ")
+            ),
+            "continue_tighten" => {
+                format!("建议优先收紧：{}", leader_target_fields.join(" / "))
+            }
+            "consider_relax" => {
+                format!("建议优先小步回退：{}", leader_target_fields.join(" / "))
+            }
+            _ => format!("继续观察：{}", leader_target_fields.join(" / ")),
+        }
+    };
+    let subtype_focus_label = {
+        let mut subtype_scores = std::collections::BTreeMap::<String, i64>::new();
+        let mut subtype_scope_leaders = std::collections::BTreeMap::<String, (String, i64)>::new();
+        for (scope_label, (priority_score, _, _, _)) in current_scope_scores {
+            if *priority_score <= 0 {
+                continue;
+            }
+            let Some((_, _, event_subtype, _)) = parse_bucketed_shaped_scope_label(scope_label)
+            else {
+                continue;
+            };
+            *subtype_scores.entry(event_subtype.to_string()).or_insert(0) += *priority_score;
+            subtype_scope_leaders
+                .entry(event_subtype.to_string())
+                .and_modify(|(leader_scope, leader_score)| {
+                    if *priority_score > *leader_score {
+                        *leader_scope = scope_label.clone();
+                        *leader_score = *priority_score;
+                    }
+                })
+                .or_insert_with(|| (scope_label.clone(), *priority_score));
+        }
+        let total_score: i64 = subtype_scores.values().sum();
+        let leader = subtype_scores.into_iter().max_by_key(|(_, score)| *score);
+        if let Some((subtype, score)) = leader {
+            let subtype_label = if matches!(subtype.as_str(), "" | "generic" | "any") {
+                "generic".to_string()
+            } else {
+                subtype
+            };
+            let concentration = if total_score > 0 && score * 10 >= total_score * 7 {
+                "风险较集中"
+            } else {
+                "风险较分散"
+            };
+            format!("当前主导恶化 subtype 为 {subtype_label}，{concentration}")
+        } else {
+            "暂无明显主导 subtype".to_string()
+        }
+    };
+    let subtype_focus_action_label = {
+        let mut subtype_scores = std::collections::BTreeMap::<String, i64>::new();
+        let mut subtype_scope_leaders = std::collections::BTreeMap::<String, (String, i64)>::new();
+        for (scope_label, (priority_score, _, _, _)) in current_scope_scores {
+            if *priority_score <= 0 {
+                continue;
+            }
+            let Some((_, _, event_subtype, _)) = parse_bucketed_shaped_scope_label(scope_label)
+            else {
+                continue;
+            };
+            *subtype_scores.entry(event_subtype.to_string()).or_insert(0) += *priority_score;
+            subtype_scope_leaders
+                .entry(event_subtype.to_string())
+                .and_modify(|(leader_scope, leader_score)| {
+                    if *priority_score > *leader_score {
+                        *leader_scope = scope_label.clone();
+                        *leader_score = *priority_score;
+                    }
+                })
+                .or_insert_with(|| (scope_label.clone(), *priority_score));
+        }
+        subtype_scores
+            .into_iter()
+            .max_by_key(|(_, score)| *score)
+            .and_then(|(subtype, _)| {
+                subtype_scope_leaders
+                    .get(&subtype)
+                    .cloned()
+                    .map(|(scope_label, _)| (subtype, scope_label))
+            })
+            .map(|(subtype, scope_label)| {
+                let action = scope_action_for(&scope_label);
+                let targets = if action == "consider_relax" {
+                    build_scope_relax_field_targets(
+                        entry_patch_rows,
+                        post_entry_patch_rows,
+                        &scope_label,
+                        3,
+                    )
+                } else {
+                    collect_scope_field_targets_by_support(entry_patch_rows, &scope_label, 3)
+                };
+                let subtype_label = if matches!(subtype.as_str(), "" | "generic" | "any") {
+                    "generic".to_string()
+                } else {
+                    subtype
+                };
+                if targets.is_empty() {
+                    format!(
+                        "subtype 建议：{}（{}）",
+                        auto_patch_action_label(&action),
+                        subtype_label
+                    )
+                } else {
+                    format!(
+                        "subtype 建议：{}（{}：{}）",
+                        auto_patch_action_label(&action),
+                        subtype_label,
+                        targets.join(" / ")
+                    )
+                }
+            })
+            .unwrap_or_else(|| "subtype 建议：继续观察".to_string())
+    };
+    let asset_focus_label = {
+        let bucket_scope_lookup = cooldown_buckets
+            .iter()
+            .filter_map(|bucket| {
+                let kind = bucket
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("same_day_range");
+                let resolution_bucket = cooldown_kind_resolution_bucket(kind);
+                let asset = bucket
+                    .get("asset")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let event_subtype = bucket
+                    .get("event_subtype")
+                    .and_then(Value::as_str)
+                    .unwrap_or("generic");
+                let shape = bucket
+                    .get("shape")
+                    .and_then(Value::as_str)
+                    .unwrap_or("directional");
+                let scope_label = bucketed_scope_label(
+                    resolution_bucket,
+                    asset_class_for_asset_label(asset),
+                    event_subtype,
+                    shape,
+                );
+                Some((scope_label, asset.to_string()))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut asset_scores = std::collections::BTreeMap::<String, i64>::new();
+        for (scope_label, (priority_score, _, _, _)) in current_scope_scores {
+            if *priority_score <= 0 {
+                continue;
+            }
+            let Some(asset) = bucket_scope_lookup.get(scope_label) else {
+                continue;
+            };
+            *asset_scores.entry(asset.clone()).or_insert(0) += *priority_score;
+        }
+        let total_score: i64 = asset_scores.values().sum();
+        let leader = asset_scores.into_iter().max_by_key(|(_, score)| *score);
+        if let Some((asset, score)) = leader {
+            let concentration = if total_score > 0 && score * 10 >= total_score * 7 {
+                "可优先考虑资产级微调"
+            } else {
+                "暂不建议资产级单点微调"
+            };
+            format!("当前冷却压力主要集中在 {asset}，{concentration}")
+        } else {
+            "暂无明显主导资产".to_string()
+        }
+    };
+    let asset_focus_action_label = {
+        let bucket_scope_lookup = cooldown_buckets
+            .iter()
+            .filter_map(|bucket| {
+                let kind = bucket
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("same_day_range");
+                let resolution_bucket = cooldown_kind_resolution_bucket(kind);
+                let asset = bucket
+                    .get("asset")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let event_subtype = bucket
+                    .get("event_subtype")
+                    .and_then(Value::as_str)
+                    .unwrap_or("generic");
+                let shape = bucket
+                    .get("shape")
+                    .and_then(Value::as_str)
+                    .unwrap_or("directional");
+                let scope_label = bucketed_scope_label(
+                    resolution_bucket,
+                    asset_class_for_asset_label(asset),
+                    event_subtype,
+                    shape,
+                );
+                Some((scope_label, asset.to_string()))
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut asset_scope_leaders = std::collections::BTreeMap::<String, (String, i64)>::new();
+        let mut asset_scores = std::collections::BTreeMap::<String, i64>::new();
+        for (scope_label, (priority_score, _, _, _)) in current_scope_scores {
+            if *priority_score <= 0 {
+                continue;
+            }
+            let Some(asset) = bucket_scope_lookup.get(scope_label) else {
+                continue;
+            };
+            *asset_scores.entry(asset.clone()).or_insert(0) += *priority_score;
+            asset_scope_leaders
+                .entry(asset.clone())
+                .and_modify(|(leader_scope, leader_score)| {
+                    if *priority_score > *leader_score {
+                        *leader_scope = scope_label.clone();
+                        *leader_score = *priority_score;
+                    }
+                })
+                .or_insert_with(|| (scope_label.clone(), *priority_score));
+        }
+        asset_scores
+            .into_iter()
+            .max_by_key(|(_, score)| *score)
+            .and_then(|(asset, _)| {
+                asset_scope_leaders
+                    .get(&asset)
+                    .cloned()
+                    .map(|(scope_label, _)| (asset, scope_label))
+            })
+            .map(|(asset, scope_label)| {
+                let action = scope_action_for(&scope_label);
+                let targets = if action == "consider_relax" {
+                    build_scope_relax_field_targets(
+                        entry_patch_rows,
+                        post_entry_patch_rows,
+                        &scope_label,
+                        3,
+                    )
+                } else {
+                    collect_scope_field_targets_by_support(entry_patch_rows, &scope_label, 3)
+                };
+                if targets.is_empty() {
+                    format!(
+                        "资产建议：{}（{}）",
+                        auto_patch_action_label(&action),
+                        asset
+                    )
+                } else {
+                    format!(
+                        "资产建议：{}（{}：{}）",
+                        auto_patch_action_label(&action),
+                        asset,
+                        targets.join(" / ")
+                    )
+                }
+            })
+            .unwrap_or_else(|| "资产建议：继续观察".to_string())
+    };
     let leader_label = rows
         .first()
         .and_then(|row| {
@@ -4307,6 +4843,12 @@ fn build_priority_bucket_summary(
         "leader_label": leader_label,
         "leader_recommended_action": leader_recommended_action,
         "leader_action_label": leader_action_label,
+        "leader_field_action_label": leader_field_action_label,
+        "leader_target_fields": leader_target_fields,
+        "subtype_focus_label": subtype_focus_label,
+        "subtype_focus_action_label": subtype_focus_action_label,
+        "asset_focus_label": asset_focus_label,
+        "asset_focus_action_label": asset_focus_action_label,
         "rows": rows,
     })
 }
@@ -4638,6 +5180,7 @@ fn filter_patch_rows_for_auto_apply(
     filtered.sort_by(|a, b| {
         patch_row_support_score(b)
             .cmp(&patch_row_support_score(a))
+            .then_with(|| patch_row_field_priority_score(b).cmp(&patch_row_field_priority_score(a)))
             .then_with(|| {
                 b.get("scope_label")
                     .and_then(Value::as_str)
@@ -4864,6 +5407,9 @@ async fn build_cooldown_priority_patch_export(
                 .unwrap_or(0);
             b_score
                 .cmp(&a_score)
+                .then_with(|| {
+                    patch_row_field_priority_score(&b.1).cmp(&patch_row_field_priority_score(&a.1))
+                })
                 .then_with(|| patch_row_support_score(&b.1).cmp(&patch_row_support_score(&a.1)))
                 .then_with(|| {
                     b.1.get("scope_label")

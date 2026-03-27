@@ -621,6 +621,7 @@ export default function CryptoMarkets() {
       ...entry,
       postApplyRealizedPnl: Number(entry.post_apply_realized_pnl ?? 0),
       currentOpenPnlBid: Number(entry.current_open_pnl_bid ?? 0),
+      blockedByLongWindowRelaxGuard: Boolean(entry.blocked_by_long_window_relax_guard),
       currentPriorityScore: Number(entry.current_priority_score ?? 0),
       currentCooldownSeverityScore: Number(entry.current_cooldown_severity_score ?? 0),
       currentWindowPressureScore: Number(entry.current_window_pressure_score ?? 0),
@@ -752,6 +753,11 @@ export default function CryptoMarkets() {
       windowPressureScore: Number(row.window_pressure_score ?? 0),
       longWindowPressureScore: Number(row.long_window_pressure_score ?? 0),
       priorityReasonLabel: row.priority_reason_label ?? "当前压力较低",
+    })) ?? [];
+  const longWindowRelaxGuardRows =
+    status?.crypto_auto_patch_effectiveness_summary?.long_window_relax_guard_summary?.rows.map((row) => ({
+      ...row,
+      currentOpenPnlBid: Number(row.current_open_pnl_bid ?? 0),
     })) ?? [];
   const cooldownBuckets = status?.crypto_cooldown_summary?.buckets ?? [];
   const cooldownEvaluations = cooldownBuckets.map((bucket) => {
@@ -2263,6 +2269,56 @@ export default function CryptoMarkets() {
                     {" "}
                     {status?.crypto_auto_patch_effectiveness_summary?.priority_bucket_summary?.leader_action_label}
                   </div>
+                  <div className="mb-2 text-[11px] text-base-content/70">
+                    字段建议：
+                    {" "}
+                    {status?.crypto_auto_patch_effectiveness_summary?.priority_bucket_summary?.leader_field_action_label}
+                  </div>
+                  <div className="mb-2 text-[11px] text-base-content/70">
+                    {status?.crypto_auto_patch_effectiveness_summary?.priority_bucket_summary?.subtype_focus_label}
+                  </div>
+                  <div className="mb-2 text-[11px] text-base-content/70">
+                    {status?.crypto_auto_patch_effectiveness_summary?.priority_bucket_summary?.subtype_focus_action_label}
+                  </div>
+                  <div className="mb-2 text-[11px] text-base-content/70">
+                    {status?.crypto_auto_patch_effectiveness_summary?.priority_bucket_summary?.asset_focus_label}
+                  </div>
+                  <div className="mb-2 text-[11px] text-base-content/70">
+                    {status?.crypto_auto_patch_effectiveness_summary?.priority_bucket_summary?.asset_focus_action_label}
+                  </div>
+                  {longWindowRelaxGuardRows.length > 0 ? (
+                    <div className="mb-2 rounded-box bg-base-100/60 px-2 py-2 text-[11px] text-base-content/70">
+                      <div className="font-medium">
+                        24h 回撤保护拦住回退 {longWindowRelaxGuardRows.length}
+                      </div>
+                      <div className="overflow-x-auto">
+                        <table className="table table-xs">
+                          <thead>
+                            <tr>
+                              <th>Scope</th>
+                              <th>有效连击</th>
+                              <th>24h 压力</th>
+                              <th>当前持仓</th>
+                              <th>当前浮盈亏(Bid)</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {longWindowRelaxGuardRows.map((row, index) => (
+                              <tr key={`${row.runtime_applied_at}-${index}`}>
+                                <td className="text-[11px]">{row.scope_labels.join(", ") || "-"}</td>
+                                <td>{row.effective_streak}</td>
+                                <td>{row.current_long_window_pressure_score}</td>
+                                <td>{row.current_open_positions}</td>
+                                <td className={row.currentOpenPnlBid >= 0 ? "text-success" : "text-error"}>
+                                  ${row.currentOpenPnlBid.toFixed(2)}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  ) : null}
                   <div className="overflow-x-auto">
                     <table className="table table-xs">
                       <thead>

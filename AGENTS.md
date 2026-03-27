@@ -83,6 +83,21 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Fixed crypto auto-patch `effective_streak` to mean a true most-recent consecutive effective streak instead of a lifetime effective count, reused that stricter streak for repeated-effective suppression, made the `24h` relax guard compute slow-window pressure directly from scope labels instead of only from currently active cooldown buckets, and expanded the read-only `24h` guard panel to show every blocked scope rather than just the first row.
+- Why: The previous implementation could suggest `consider_relax` after merely accumulating three historical effective outcomes and silently dropped the slow-window guard as soon as a bucket left cooldown, while the UI also hid all but one blocked scope from operators.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Taught crypto auto-tighten row selection to prioritize higher-value target fields inside the same stressed bucket, added a read-only `24h` relax-guard audit summary for scopes that stay blocked from `consider_relax` by lingering slow-window pressure, and expanded the cooldown leader panel with subtype- and asset-level action summaries tied to the currently worst bucket.
+- Why: After the earlier optimization pass exposed field-level intent and `24h` rollback protection, the next gap was making backend auto-tighten actually follow that field ordering in practice while also showing which buckets remain blocked from relax and which subtype/asset the backend currently wants to act on.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Extended the crypto cooldown priority summary from action-level conclusions to field-level read-only guidance by adding leader target fields and a human-readable field-action sentence, added `24h` rollback protection so buckets with lingering slow-window pressure no longer enter `consider_relax` just because recent windows turned green, and surfaced new subtype-focus and asset-focus labels alongside the worst-cooldown-bucket summary.
+- Why: After the first optimization pass could already identify the worst cooldown bucket and recommend `tighten/observe/relax`, the remaining operational gap was telling AI/operators which specific knobs that recommendation points to and preventing short-window improvements from triggering premature relax candidates while longer-window losses still persisted.
+
+### 2026-03-27
 - Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
 - Change: Extended crypto auto-patch scoring and read-only diagnostics with a low-weight `24h` slow variable, added a dedicated `Subtype 滚动窗口` summary over `1h / 6h / 24h` for `same_day / next_day × major / alt × event_subtype × shape`, and surfaced the new `24h` pressure component in the cooldown Top-N and auto-patch effectiveness tables.
 - Why: The optimization plan called for making automatic tightening less sensitive to pure short-window noise while also exposing a subtype-level rolling-window view so operators and AI tooling can tell whether recent crypto deterioration is transient, persistent, or isolated to a specific subtype.

@@ -266,7 +266,11 @@ pub fn record_weather_rejection(
     let normalized_location = location
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| normalize_weather_location_name(value).unwrap_or(value).to_string());
+        .map(|value| {
+            normalize_weather_location_name(value)
+                .unwrap_or(value)
+                .to_string()
+        });
 
     if let Some(bucket) = buckets.front_mut() {
         if bucket.minute_start_unix == minute_start_unix {

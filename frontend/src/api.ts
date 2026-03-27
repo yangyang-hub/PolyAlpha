@@ -236,6 +236,12 @@ export interface StatusResponse {
       leader_label: string;
       leader_recommended_action: "hold" | "observe" | "continue_tighten" | "consider_relax";
       leader_action_label: string;
+      leader_field_action_label: string;
+      leader_target_fields: string[];
+      subtype_focus_label: string;
+      subtype_focus_action_label: string;
+      asset_focus_label: string;
+      asset_focus_action_label: string;
       rows: {
         scope_label: string;
         resolution_bucket: string;
@@ -263,6 +269,7 @@ export interface StatusResponse {
       outcome: "effective" | "observe" | "retain_or_tighten";
       effective_streak: number;
       recommended_action: "hold" | "observe" | "continue_tighten" | "consider_relax";
+      blocked_by_long_window_relax_guard?: boolean;
       current_priority_score: number;
       current_cooldown_severity_score: number;
       current_window_pressure_score: number;
@@ -272,6 +279,18 @@ export interface StatusResponse {
       relax_uses_fallback_post_entry: boolean;
       relax_uses_entry_fallback: boolean;
     }[];
+    long_window_relax_guard_summary?: {
+      blocked_count: number;
+      rows: {
+        runtime_applied_at: string;
+        scope_labels: string[];
+        effective_streak: number;
+        current_long_window_pressure_score: number;
+        current_open_positions: number;
+        current_open_pnl_bid: string;
+        note: string;
+      }[];
+    };
   };
   crypto_bucket_window_summary?: {
     row_count: number;
