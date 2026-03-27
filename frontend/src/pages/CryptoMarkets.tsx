@@ -624,6 +624,7 @@ export default function CryptoMarkets() {
       currentPriorityScore: Number(entry.current_priority_score ?? 0),
       currentCooldownSeverityScore: Number(entry.current_cooldown_severity_score ?? 0),
       currentWindowPressureScore: Number(entry.current_window_pressure_score ?? 0),
+      currentLongWindowPressureScore: Number(entry.current_long_window_pressure_score ?? 0),
       priorityReasonLabel: entry.priority_reason_label ?? "当前压力较低",
       relaxUsesConservativePostEntry: Boolean(entry.relax_uses_conservative_post_entry),
       relaxUsesFallbackPostEntry: Boolean(entry.relax_uses_fallback_post_entry),
@@ -749,6 +750,7 @@ export default function CryptoMarkets() {
       priorityScore: Number(row.priority_score ?? 0),
       cooldownSeverityScore: Number(row.cooldown_severity_score ?? 0),
       windowPressureScore: Number(row.window_pressure_score ?? 0),
+      longWindowPressureScore: Number(row.long_window_pressure_score ?? 0),
       priorityReasonLabel: row.priority_reason_label ?? "当前压力较低",
     })) ?? [];
   const cooldownBuckets = status?.crypto_cooldown_summary?.buckets ?? [];
@@ -821,6 +823,12 @@ export default function CryptoMarkets() {
     ) ?? [];
   const bucketWindowRows =
     status?.crypto_bucket_window_summary?.rows.map((row) => ({
+      ...row,
+      realizedPnl: Number(row.realized_pnl ?? 0),
+      openPnlBid: Number(row.open_pnl_bid ?? 0),
+    })) ?? [];
+  const subtypeWindowRows =
+    status?.crypto_subtype_window_summary?.rows.map((row) => ({
       ...row,
       realizedPnl: Number(row.realized_pnl ?? 0),
       openPnlBid: Number(row.open_pnl_bid ?? 0),
@@ -1437,6 +1445,61 @@ export default function CryptoMarkets() {
                       <td className={row.openPnlBid >= 0 ? "text-success" : "text-error"}>
                         ${row.openPnlBid.toFixed(2)}
                       </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!!subtypeWindowRows.length && (
+        <div className="card bg-base-200 shadow-sm">
+          <div className="card-body p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="card-title text-base">Subtype 滚动窗口</h2>
+                <div className="text-xs opacity-60">
+                  按 1h / 6h / 24h 查看 same-day / next-day × major / alt × subtype × shape 的收益和坏退出
+                </div>
+              </div>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="table table-sm">
+                <thead>
+                  <tr>
+                    <th>窗口</th>
+                    <th>Bucket</th>
+                    <th>资产级别</th>
+                    <th>Subtype</th>
+                    <th>形态</th>
+                    <th>成交数</th>
+                    <th>已实现</th>
+                    <th>当前持仓</th>
+                    <th>当前浮盈亏(Bid)</th>
+                    <th>坏退出</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {subtypeWindowRows.map((row) => (
+                    <tr
+                      key={`${row.window_label}-${row.resolution_bucket}-${row.asset_class}-${row.event_subtype}-${row.shape}`}
+                    >
+                      <td>{row.window_label}</td>
+                      <td>{bucketLabel(row.resolution_bucket)}</td>
+                      <td>{row.asset_class}</td>
+                      <td>{row.event_subtype}</td>
+                      <td>{shapeLabel(row.shape as "range" | "directional")}</td>
+                      <td>{row.trade_count}</td>
+                      <td className={row.realizedPnl >= 0 ? "text-success" : "text-error"}>
+                        ${row.realizedPnl.toFixed(2)}
+                      </td>
+                      <td>{row.open_positions}</td>
+                      <td className={row.openPnlBid >= 0 ? "text-success" : "text-error"}>
+                        ${row.openPnlBid.toFixed(2)}
+                      </td>
+                      <td>{row.bad_exit_count}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -2195,6 +2258,11 @@ export default function CryptoMarkets() {
                   <div className="mb-2 text-[11px] text-base-content/70">
                     {status?.crypto_auto_patch_effectiveness_summary?.priority_bucket_summary?.leader_label}
                   </div>
+                  <div className="mb-2 text-[11px] text-base-content/70">
+                    建议动作：
+                    {" "}
+                    {status?.crypto_auto_patch_effectiveness_summary?.priority_bucket_summary?.leader_action_label}
+                  </div>
                   <div className="overflow-x-auto">
                     <table className="table table-xs">
                       <thead>
@@ -2211,7 +2279,7 @@ export default function CryptoMarkets() {
                             <td className="font-mono text-[11px]">
                               <div>{row.priorityScore}</div>
                               <div className="text-base-content/60">
-                                冷却 {row.cooldownSeverityScore} / 窗口 {row.windowPressureScore}
+                                冷却 {row.cooldownSeverityScore} / 短窗 {row.windowPressureScore} / 24h {row.longWindowPressureScore}
                               </div>
                             </td>
                             <td className="text-[11px] text-base-content/70">{row.priorityReasonLabel}</td>
@@ -2263,7 +2331,7 @@ export default function CryptoMarkets() {
                         <td className="font-mono text-[11px]">
                           <div>{entry.currentPriorityScore}</div>
                           <div className="text-base-content/60">
-                            冷却 {entry.currentCooldownSeverityScore} / 窗口 {entry.currentWindowPressureScore}
+                            冷却 {entry.currentCooldownSeverityScore} / 短窗 {entry.currentWindowPressureScore} / 24h {entry.currentLongWindowPressureScore}
                           </div>
                         </td>
                         <td className="text-[11px] text-base-content/70">{entry.priorityReasonLabel}</td>

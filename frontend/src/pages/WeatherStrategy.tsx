@@ -109,6 +109,10 @@ export default function WeatherStrategy() {
   const recent6hRows = status?.weather_rejection_summary?.recent_6h.top_reasons ?? [];
   const recent1hTop = recent1hRows[0];
   const recent6hTop = recent6hRows[0];
+  const recent1hSpreadCities = status?.weather_rejection_summary?.recent_1h.top_spread_cities ?? [];
+  const recent6hSpreadCities = status?.weather_rejection_summary?.recent_6h.top_spread_cities ?? [];
+  const recent1hPriceCities = status?.weather_rejection_summary?.recent_1h.top_price_cities ?? [];
+  const recent6hPriceCities = status?.weather_rejection_summary?.recent_6h.top_price_cities ?? [];
 
   const totalCost = (positions ?? []).reduce((s, p) => s + Number(p.cost_basis), 0);
   const totalPnl = (positions ?? []).reduce((s, p) => s + Number(p.unrealized_pnl ?? 0), 0);
@@ -262,6 +266,50 @@ export default function WeatherStrategy() {
                 </div>
                 <div className="font-mono text-xs opacity-70">{recent6hTop?.label ?? "-"}</div>
                 <div className="mt-1">{recent6hTop ? recent6hTop.count.toLocaleString() : "-"}</div>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+              <div className="rounded-lg bg-base-100 p-3">
+                <div className="text-xs opacity-60">最近 1 小时城市分布</div>
+                <div className="space-y-2 mt-2">
+                  <div>
+                    <div className="text-xs opacity-60">价差过宽 Top 城市</div>
+                    <div className="font-medium">
+                      {recent1hSpreadCities[0]
+                        ? `${recent1hSpreadCities[0].label} (${recent1hSpreadCities[0].count.toLocaleString()})`
+                        : "暂无"}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs opacity-60">价格过高 Top 城市</div>
+                    <div className="font-medium">
+                      {recent1hPriceCities[0]
+                        ? `${recent1hPriceCities[0].label} (${recent1hPriceCities[0].count.toLocaleString()})`
+                        : "暂无"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="rounded-lg bg-base-100 p-3">
+                <div className="text-xs opacity-60">最近 6 小时城市分布</div>
+                <div className="space-y-2 mt-2">
+                  <div>
+                    <div className="text-xs opacity-60">价差过宽 Top 城市</div>
+                    <div className="font-medium">
+                      {recent6hSpreadCities[0]
+                        ? `${recent6hSpreadCities[0].label} (${recent6hSpreadCities[0].count.toLocaleString()})`
+                        : "暂无"}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs opacity-60">价格过高 Top 城市</div>
+                    <div className="font-medium">
+                      {recent6hPriceCities[0]
+                        ? `${recent6hPriceCities[0].label} (${recent6hPriceCities[0].count.toLocaleString()})`
+                        : "暂无"}
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>

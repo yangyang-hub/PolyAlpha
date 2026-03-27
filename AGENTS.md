@@ -83,9 +83,44 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Extended crypto auto-patch scoring and read-only diagnostics with a low-weight `24h` slow variable, added a dedicated `Subtype 滚动窗口` summary over `1h / 6h / 24h` for `same_day / next_day × major / alt × event_subtype × shape`, and surfaced the new `24h` pressure component in the cooldown Top-N and auto-patch effectiveness tables.
+- Why: The optimization plan called for making automatic tightening less sensitive to pure short-window noise while also exposing a subtype-level rolling-window view so operators and AI tooling can tell whether recent crypto deterioration is transient, persistent, or isolated to a specific subtype.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`
+- Change: Refined the read-only crypto `relax_candidate` pipeline so conservative rollback now stages fields in a stricter order (`hold_edge_multiplier` first, then `capital_efficiency_multiplier` and `model_reversal_buffer_multiplier`, then broader post-entry, and only then entry fallback), and reused that staged helper in both relax-tier evaluation and relax patch export generation.
+- Why: After introducing conservative relax tiers, the remaining safety gap was that even the safest post-entry rollback tier still loosened several fields at once; the rollback path is now stepped so healthy buckets first ease pure holding pressure before touching broader post-entry or entry controls.
+
+### 2026-03-27
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Increased the preferred-city weather edge relief from `-75bps` to `-100bps`, leaving conservative and default-protected cities unchanged, and updated the preferred-city edge regression expectations (including short-dated validated-city thresholds and city-feedback tests).
+- Why: After multiple spread and entry-price loosening rounds, weather still had no new trades, so the next bounded experiment in the optimization plan is a small additional edge reduction only for the highest-confidence NOAA cities.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/diagnostics.rs`, `crates/pa-monitor/src/api.rs`, `crates/pa-strategy/src/weather.rs`, `frontend/src/api.ts`, `frontend/src/pages/WeatherStrategy.tsx`
+- Change: Extended retained-window weather rejection aggregation to preserve city counts for location-aware reasons, exposed recent `1h/6h` top-city summaries for `spread_too_wide` and `price_above_max_entry` on `/api/status.weather_rejection_summary`, surfaced those city leaders on the weather page, and fixed an unrelated `pa-monitor` cooldown-summary tuple destructuring mismatch so the new monitor build path compiles again.
+- Why: Knowing that spread or price is the dominant blocker is useful, but tuning weather entry thresholds safely still requires seeing which cities are contributing those blockers so parameter changes can stay scoped to high-confidence locations, and the pre-existing monitor compile break had to be cleared to validate the new diagnostics end to end.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/diagnostics.rs`, `crates/pa-monitor/src/api.rs`
+- Change: Canonicalized weather rejection city labels through shared weather metadata before storing city summaries, and switched `/api/status.weather_rejection_summary.retained_window_minutes` to read the monitor retention horizon from a single diagnostics helper instead of duplicating `12 * 60`.
+- Why: The new weather city blocker summary should not split aliases like `NYC` vs `New York`, and the retained-window label should stay tied to the actual diagnostics retention setting instead of drifting through duplicated constants.
+
+### 2026-03-27
 - Area: `crates/pa-monitor/src/diagnostics.rs`, `crates/pa-monitor/src/api.rs`, `crates/pa-strategy/src/weather.rs`, `frontend/src/api.ts`, `frontend/src/pages/WeatherStrategy.tsx`
 - Change: Replaced per-event weather rejection logging with minute-bucket aggregation retained for a bounded recent window, switched `/api/status.weather_rejection_summary` to report retained-window plus recent `1h/6h` reason counts from those buckets, and updated the weather page copy/top blockers to use the retained window instead of implying full process lifetime totals.
 - Why: The first weather rejection summary implementation stored only the most recent raw events, which made `1h/6h` windows inaccurate under high rejection volume and added unnecessary hot-path mutex/string overhead on every weather rejection.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added a backend-owned recommended action for the current worst crypto cooldown bucket by teaching `priority_bucket_summary` to carry the top scope's matched auto-patch action (`hold/observe/continue_tighten/consider_relax`) plus a human-readable label, and surfaced that read-only action directly above the Top-N cooldown bucket table.
+- Why: The crypto page could already show which cooldown bucket was currently worst and why, but the next useful step in the optimization plan was to have the backend explicitly say what action that diagnosis implies instead of forcing operators or AI tooling to infer it from separate rows.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`
+- Change: Fixed the runtime `cooldown_priority` patch generator so auto-applied crypto tighten rows now reuse the same subtype-aware cooldown scope scoring as `/api/status`, including `event_subtype` when evaluating post-trigger realized/open losses and when ranking selected scopes for automatic tightening.
+- Why: After making the read-only crypto priority explanations subtype-aware, the remaining gap was that the actual backend auto-apply path still used a coarser bucket score and could therefore tighten the wrong subtype even while the UI explained a different one.
 
 ### 2026-03-27
 - Area: `crates/pa-monitor/src/api.rs`, `frontend/src/pages/CryptoMarkets.tsx`

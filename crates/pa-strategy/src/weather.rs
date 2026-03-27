@@ -2514,7 +2514,7 @@ impl WeatherAlphaStrategy {
                 0
             });
         let after_preferred = if Self::uses_preferred_city_overlay(location) {
-            base.saturating_sub(75)
+            base.saturating_sub(100)
         } else {
             base
         };
@@ -2629,18 +2629,26 @@ impl WeatherAlphaStrategy {
     }
 
     fn record_rejection(reason: &'static str) {
-        Self::record_rejection_for_provider("unknown", reason);
+        Self::record_rejection_for_provider("unknown", reason, None);
     }
 
     fn record_rejection_for_location(location: &str, reason: &'static str) {
-        Self::record_rejection_for_provider(Self::provider_metric_label(location), reason);
+        Self::record_rejection_for_provider(
+            Self::provider_metric_label(location),
+            reason,
+            Some(location),
+        );
     }
 
-    fn record_rejection_for_provider(provider: &'static str, reason: &'static str) {
+    fn record_rejection_for_provider(
+        provider: &'static str,
+        reason: &'static str,
+        location: Option<&str>,
+    ) {
         pa_monitor::metrics::WEATHER_REJECTIONS
             .with_label_values(&[provider, reason])
             .inc();
-        pa_monitor::diagnostics::record_weather_rejection(provider, reason);
+        pa_monitor::diagnostics::record_weather_rejection(provider, reason, location);
     }
 
     /// Convert a USDC budget into share size at a given token ask price.
@@ -2744,6 +2752,7 @@ impl WeatherAlphaStrategy {
             Self::record_rejection_for_provider(
                 Self::provider_metric_label(entry.canonical_name),
                 "unsupported_city",
+                Some(entry.canonical_name),
             );
             return false;
         }
@@ -2884,7 +2893,7 @@ impl WeatherAlphaStrategy {
             let spread_bps = (spread * dec!(10000)).to_u32().unwrap_or(u32::MAX);
             let max_spread_bps = self.effective_max_spread_bps(location);
             if spread_bps > max_spread_bps {
-                Self::record_rejection("spread_too_wide");
+                Self::record_rejection_for_location(location, "spread_too_wide");
                 tracing::debug!(
                     question = %question,
                     location = %location,
@@ -2906,12 +2915,12 @@ impl WeatherAlphaStrategy {
         if ask_price
             > self.effective_max_entry_price_for_resolution(location, hours_until_resolution)
         {
-            Self::record_rejection("price_above_max_entry");
+            Self::record_rejection_for_location(location, "price_above_max_entry");
             return None;
         }
 
         if effective_prob <= ask_price {
-            Self::record_rejection("no_positive_edge");
+            Self::record_rejection_for_location(location, "no_positive_edge");
             return None;
         }
 
@@ -7197,7 +7206,7 @@ mod tests {
         );
         assert_eq!(
             strategy.effective_min_edge_bps("Miami"),
-            strategy.config.min_edge_bps.saturating_sub(75)
+            strategy.config.min_edge_bps.saturating_sub(100)
         );
         assert_eq!(
             strategy.effective_max_spread_bps("Miami"),
@@ -7279,7 +7288,7 @@ mod tests {
 
         assert_eq!(
             strategy.effective_min_edge_bps_for_resolution("Miami", Some(30)),
-            425
+            400
         );
         assert_eq!(
             strategy.effective_max_entry_price_for_resolution("Miami", Some(30)),
@@ -7292,7 +7301,7 @@ mod tests {
 
         assert_eq!(
             strategy.effective_min_edge_bps_for_resolution("Miami", Some(24)),
-            475
+            450
         );
         assert_eq!(
             strategy.effective_max_entry_price_for_resolution("Miami", Some(24)),
@@ -7305,7 +7314,7 @@ mod tests {
 
         assert_eq!(
             strategy.effective_min_edge_bps_for_resolution("Miami", Some(12)),
-            525
+            500
         );
         assert_eq!(
             strategy.effective_max_entry_price_for_resolution("Miami", Some(12)),
@@ -7381,11 +7390,11 @@ mod tests {
             },
         );
 
-        assert_eq!(strategy.effective_min_edge_bps("Miami"), 375);
+        assert_eq!(strategy.effective_min_edge_bps("Miami"), 350);
         assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(4.60));
 
         strategy.record_city_feedback("Miami", 2);
-        assert_eq!(strategy.effective_min_edge_bps("Miami"), 350);
+        assert_eq!(strategy.effective_min_edge_bps("Miami"), 325);
         assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(5.060));
 
         assert_eq!(strategy.effective_min_edge_bps("Chicago"), 500);

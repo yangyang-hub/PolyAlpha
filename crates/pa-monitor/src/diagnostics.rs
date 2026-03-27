@@ -3,6 +3,7 @@ use std::sync::{LazyLock, Mutex};
 
 use alloy::primitives::B256;
 use chrono::{DateTime, Duration, Utc};
+use pa_core::weather::normalize_weather_location_name;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -87,6 +88,7 @@ pub struct CryptoOverridePatchExportDecision {
 pub struct WeatherRejectionBucket {
     pub minute_start_unix: i64,
     pub reason_counts: HashMap<String, usize>,
+    pub reason_city_counts: HashMap<String, HashMap<String, usize>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -253,28 +255,58 @@ pub fn clear_crypto_override_patch_exports() {
     CRYPTO_PATCH_EXPORT_DECISIONS.lock().unwrap().clear();
 }
 
-pub fn record_weather_rejection(_provider: &'static str, reason: &'static str) {
+pub fn record_weather_rejection(
+    _provider: &'static str,
+    reason: &'static str,
+    location: Option<&str>,
+) {
     let minute_start_unix = (Utc::now().timestamp() / 60) * 60;
     let min_retained_unix = minute_start_unix - WEATHER_REJECTION_RETENTION_MINUTES * 60;
     let mut buckets = WEATHER_REJECTION_BUCKETS.lock().unwrap();
+    let normalized_location = location
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| normalize_weather_location_name(value).unwrap_or(value).to_string());
 
     if let Some(bucket) = buckets.front_mut() {
         if bucket.minute_start_unix == minute_start_unix {
             *bucket.reason_counts.entry(reason.to_string()).or_insert(0) += 1;
+            if let Some(location) = normalized_location.as_ref() {
+                *bucket
+                    .reason_city_counts
+                    .entry(reason.to_string())
+                    .or_default()
+                    .entry(location.clone())
+                    .or_insert(0) += 1;
+            }
         } else {
             let mut reason_counts = HashMap::new();
             reason_counts.insert(reason.to_string(), 1);
+            let mut reason_city_counts = HashMap::new();
+            if let Some(location) = normalized_location.as_ref() {
+                let mut city_counts = HashMap::new();
+                city_counts.insert(location.clone(), 1);
+                reason_city_counts.insert(reason.to_string(), city_counts);
+            }
             buckets.push_front(WeatherRejectionBucket {
                 minute_start_unix,
                 reason_counts,
+                reason_city_counts,
             });
         }
     } else {
         let mut reason_counts = HashMap::new();
         reason_counts.insert(reason.to_string(), 1);
+        let mut reason_city_counts = HashMap::new();
+        if let Some(location) = normalized_location.as_ref() {
+            let mut city_counts = HashMap::new();
+            city_counts.insert(location.clone(), 1);
+            reason_city_counts.insert(reason.to_string(), city_counts);
+        }
         buckets.push_front(WeatherRejectionBucket {
             minute_start_unix,
             reason_counts,
+            reason_city_counts,
         });
     }
 
@@ -290,6 +322,10 @@ pub fn recent_weather_rejection_buckets() -> Vec<WeatherRejectionBucket> {
         .iter()
         .cloned()
         .collect()
+}
+
+pub fn weather_rejection_retention_minutes() -> i64 {
+    WEATHER_REJECTION_RETENTION_MINUTES
 }
 
 pub fn clear_weather_rejections() {

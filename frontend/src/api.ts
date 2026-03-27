@@ -40,11 +40,15 @@ export interface StatusResponse {
       count: number;
       top_reasons: { label: string; count: number }[];
       top_reason: { label: string; count: number } | null;
+      top_spread_cities: { label: string; count: number }[];
+      top_price_cities: { label: string; count: number }[];
     };
     recent_6h: {
       count: number;
       top_reasons: { label: string; count: number }[];
       top_reason: { label: string; count: number } | null;
+      top_spread_cities: { label: string; count: number }[];
+      top_price_cities: { label: string; count: number }[];
     };
   };
   positions_snapshot_updated_at: string | null;
@@ -230,6 +234,8 @@ export interface StatusResponse {
       row_count: number;
       leader_scope_label: string;
       leader_label: string;
+      leader_recommended_action: "hold" | "observe" | "continue_tighten" | "consider_relax";
+      leader_action_label: string;
       rows: {
         scope_label: string;
         resolution_bucket: string;
@@ -239,6 +245,7 @@ export interface StatusResponse {
         priority_score: number;
         cooldown_severity_score: number;
         window_pressure_score: number;
+        long_window_pressure_score: number;
         priority_reason_label: string;
       }[];
     };
@@ -259,6 +266,7 @@ export interface StatusResponse {
       current_priority_score: number;
       current_cooldown_severity_score: number;
       current_window_pressure_score: number;
+      current_long_window_pressure_score: number;
       priority_reason_label: string;
       relax_uses_conservative_post_entry: boolean;
       relax_uses_fallback_post_entry: boolean;
@@ -272,6 +280,21 @@ export interface StatusResponse {
       resolution_bucket: string;
       shape: string;
       asset_class: string;
+      trade_count: number;
+      realized_pnl: string;
+      open_positions: number;
+      open_pnl_bid: string;
+      bad_exit_count: number;
+    }[];
+  };
+  crypto_subtype_window_summary?: {
+    row_count: number;
+    rows: {
+      window_label: string;
+      resolution_bucket: string;
+      shape: string;
+      asset_class: string;
+      event_subtype: string;
       trade_count: number;
       realized_pnl: string;
       open_positions: number;
