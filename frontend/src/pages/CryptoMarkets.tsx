@@ -624,8 +624,132 @@ export default function CryptoMarkets() {
       currentPriorityScore: Number(entry.current_priority_score ?? 0),
       currentCooldownSeverityScore: Number(entry.current_cooldown_severity_score ?? 0),
       currentWindowPressureScore: Number(entry.current_window_pressure_score ?? 0),
+      priorityReasonLabel: entry.priority_reason_label ?? "当前压力较低",
+      relaxUsesConservativePostEntry: Boolean(entry.relax_uses_conservative_post_entry),
+      relaxUsesFallbackPostEntry: Boolean(entry.relax_uses_fallback_post_entry),
+      relaxUsesEntryFallback: Boolean(entry.relax_uses_entry_fallback),
       outcomeBadge: autoPatchOutcomeLabel(entry.outcome),
       actionLabel: autoPatchActionLabel(entry.recommended_action),
+    })) ?? [];
+  const relaxTierBucketSummary = autoPatchEffectRows.reduce(
+    (summary, entry) => {
+      if (entry.recommended_action !== "consider_relax") {
+        return summary;
+      }
+      const hasSameDay = entry.scope_labels.some((label) => label.startsWith("same_day / "));
+      const hasNextDay = entry.scope_labels.some((label) => label.startsWith("next_day / "));
+      const bucket = hasSameDay && hasNextDay ? "mixed" : hasNextDay ? "next_day" : hasSameDay ? "same_day" : "unknown";
+      summary[bucket] += 1;
+      return summary;
+    },
+    {
+      same_day: 0,
+      next_day: 0,
+      mixed: 0,
+      unknown: 0,
+    } as Record<"same_day" | "next_day" | "mixed" | "unknown", number>,
+  );
+  const relaxTierByBucketSummary = autoPatchEffectRows.reduce(
+    (summary, entry) => {
+      if (entry.recommended_action !== "consider_relax") {
+        return summary;
+      }
+      const hasSameDay = entry.scope_labels.some((label) => label.startsWith("same_day / "));
+      const hasNextDay = entry.scope_labels.some((label) => label.startsWith("next_day / "));
+      const bucket = hasSameDay && hasNextDay ? "mixed" : hasNextDay ? "next_day" : hasSameDay ? "same_day" : "unknown";
+      if (entry.relaxUsesEntryFallback) {
+        summary[bucket].entryFallback += 1;
+      } else if (entry.relaxUsesFallbackPostEntry) {
+        summary[bucket].fallbackPostEntry += 1;
+      } else if (entry.relaxUsesConservativePostEntry) {
+        summary[bucket].conservativePostEntry += 1;
+      } else {
+        summary[bucket].unknown += 1;
+      }
+      return summary;
+    },
+    {
+      same_day: {
+        conservativePostEntry: 0,
+        fallbackPostEntry: 0,
+        entryFallback: 0,
+        unknown: 0,
+      },
+      next_day: {
+        conservativePostEntry: 0,
+        fallbackPostEntry: 0,
+        entryFallback: 0,
+        unknown: 0,
+      },
+      mixed: {
+        conservativePostEntry: 0,
+        fallbackPostEntry: 0,
+        entryFallback: 0,
+        unknown: 0,
+      },
+      unknown: {
+        conservativePostEntry: 0,
+        fallbackPostEntry: 0,
+        entryFallback: 0,
+        unknown: 0,
+      },
+    } as Record<
+      "same_day" | "next_day" | "mixed" | "unknown",
+      {
+        conservativePostEntry: number;
+        fallbackPostEntry: number;
+        entryFallback: number;
+        unknown: number;
+      }
+    >,
+  );
+  const relaxTierSummary = autoPatchEffectRows.reduce(
+    (summary, entry) => {
+      if (entry.recommended_action !== "consider_relax") {
+        return summary;
+      }
+      if (entry.relaxUsesEntryFallback) {
+        summary.entryFallback += 1;
+      } else if (entry.relaxUsesFallbackPostEntry) {
+        summary.fallbackPostEntry += 1;
+      } else if (entry.relaxUsesConservativePostEntry) {
+        summary.conservativePostEntry += 1;
+      } else {
+        summary.unknown += 1;
+      }
+      return summary;
+    },
+    {
+      conservativePostEntry: 0,
+      fallbackPostEntry: 0,
+      entryFallback: 0,
+      unknown: 0,
+    },
+  );
+  const sameDayRelaxPressureScore =
+    relaxTierByBucketSummary.same_day.conservativePostEntry +
+    relaxTierByBucketSummary.same_day.fallbackPostEntry * 2 +
+    relaxTierByBucketSummary.same_day.entryFallback * 3;
+  const nextDayRelaxPressureScore =
+    relaxTierByBucketSummary.next_day.conservativePostEntry +
+    relaxTierByBucketSummary.next_day.fallbackPostEntry * 2 +
+    relaxTierByBucketSummary.next_day.entryFallback * 3;
+  const relaxPressureLeaderLabel =
+    status?.crypto_auto_patch_effectiveness_summary?.relax_pressure_summary?.leader_label ??
+    (sameDayRelaxPressureScore === 0 && nextDayRelaxPressureScore === 0
+      ? "暂无明确回退压力"
+      : sameDayRelaxPressureScore > nextDayRelaxPressureScore
+        ? "当前回退压力主要来自 same-day"
+        : nextDayRelaxPressureScore > sameDayRelaxPressureScore
+          ? "当前回退压力主要来自 next-day"
+          : "same-day / next-day 回退压力接近");
+  const priorityBucketRows =
+    status?.crypto_auto_patch_effectiveness_summary?.priority_bucket_summary?.rows.map((row) => ({
+      ...row,
+      priorityScore: Number(row.priority_score ?? 0),
+      cooldownSeverityScore: Number(row.cooldown_severity_score ?? 0),
+      windowPressureScore: Number(row.window_pressure_score ?? 0),
+      priorityReasonLabel: row.priority_reason_label ?? "当前压力较低",
     })) ?? [];
   const cooldownBuckets = status?.crypto_cooldown_summary?.buckets ?? [];
   const cooldownEvaluations = cooldownBuckets.map((bucket) => {
@@ -1950,6 +2074,7 @@ export default function CryptoMarkets() {
                       <th>时间</th>
                       <th>动作</th>
                       <th>模式</th>
+                      <th>回退层级</th>
                       <th>Scope</th>
                       <th>文件</th>
                       <th>SHA</th>
@@ -1963,6 +2088,24 @@ export default function CryptoMarkets() {
                         <td>{new Date(entry.created_at).toLocaleString("zh-CN")}</td>
                         <td>{entry.action}</td>
                         <td>{entry.mode}</td>
+                        <td>
+                          <div className="flex flex-wrap gap-1">
+                            {entry.uses_conservative_post_entry ? (
+                              <span className="badge badge-success badge-sm">保守 post-entry</span>
+                            ) : null}
+                            {entry.uses_fallback_post_entry ? (
+                              <span className="badge badge-warning badge-sm">扩展 post-entry</span>
+                            ) : null}
+                            {entry.uses_entry_fallback ? (
+                              <span className="badge badge-error badge-sm">含 entry 回退</span>
+                            ) : null}
+                            {!entry.uses_conservative_post_entry &&
+                            !entry.uses_fallback_post_entry &&
+                            !entry.uses_entry_fallback ? (
+                              <span className="text-base-content/50">-</span>
+                            ) : null}
+                          </div>
+                        </td>
                         <td>{entry.scope_label ?? "-"}</td>
                         <td className="font-mono text-[11px]">{entry.filename}</td>
                         <td className="font-mono text-[11px]">{entry.export_sha.slice(0, 12)}</td>
@@ -2010,7 +2153,89 @@ export default function CryptoMarkets() {
           )}
           {autoPatchEffectRows.length > 0 && (
             <div className="mb-3 rounded-box bg-base-100/70 px-3 py-2 text-xs">
-              <div className="mb-2 font-medium">最近自动 Patch 效果</div>
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div className="font-medium">最近自动 Patch 效果</div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="badge badge-outline badge-sm">
+                    same-day {relaxTierBucketSummary.same_day}
+                  </span>
+                  <span className="badge badge-outline badge-sm">
+                    next-day {relaxTierBucketSummary.next_day}
+                  </span>
+                  {relaxTierBucketSummary.mixed > 0 ? (
+                    <span className="badge badge-ghost badge-sm">
+                      mixed {relaxTierBucketSummary.mixed}
+                    </span>
+                  ) : null}
+                  {relaxTierBucketSummary.unknown > 0 ? (
+                    <span className="badge badge-ghost badge-sm">
+                      unknown {relaxTierBucketSummary.unknown}
+                    </span>
+                  ) : null}
+                  <span className="badge badge-success badge-sm">
+                    保守 post-entry {relaxTierSummary.conservativePostEntry}
+                  </span>
+                  <span className="badge badge-warning badge-sm">
+                    扩展 post-entry {relaxTierSummary.fallbackPostEntry}
+                  </span>
+                  <span className="badge badge-error badge-sm">
+                    含 entry 回退 {relaxTierSummary.entryFallback}
+                  </span>
+                  {relaxTierSummary.unknown > 0 ? (
+                    <span className="badge badge-ghost badge-sm">
+                      未分层 {relaxTierSummary.unknown}
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+              <div className="mb-2 text-[11px] text-base-content/70">{relaxPressureLeaderLabel}</div>
+              {priorityBucketRows.length > 0 ? (
+                <div className="mb-3 rounded-box bg-base-200/40 px-2 py-2">
+                  <div className="mb-2 text-[11px] font-medium">当前最差冷却 Bucket Top {priorityBucketRows.length}</div>
+                  <div className="mb-2 text-[11px] text-base-content/70">
+                    {status?.crypto_auto_patch_effectiveness_summary?.priority_bucket_summary?.leader_label}
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="table table-xs">
+                      <thead>
+                        <tr>
+                          <th>Scope</th>
+                          <th>优先级</th>
+                          <th>原因</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {priorityBucketRows.map((row) => (
+                          <tr key={row.scope_label}>
+                            <td className="text-[11px]">{row.scope_label}</td>
+                            <td className="font-mono text-[11px]">
+                              <div>{row.priorityScore}</div>
+                              <div className="text-base-content/60">
+                                冷却 {row.cooldownSeverityScore} / 窗口 {row.windowPressureScore}
+                              </div>
+                            </td>
+                            <td className="text-[11px] text-base-content/70">{row.priorityReasonLabel}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : null}
+              <div className="mb-2 flex flex-wrap items-center gap-3 text-[11px] text-base-content/70">
+                <span>
+                  same-day:
+                  {" "}保守 {relaxTierByBucketSummary.same_day.conservativePostEntry}
+                  {" / "}扩展 {relaxTierByBucketSummary.same_day.fallbackPostEntry}
+                  {" / "}entry {relaxTierByBucketSummary.same_day.entryFallback}
+                </span>
+                <span>
+                  next-day:
+                  {" "}保守 {relaxTierByBucketSummary.next_day.conservativePostEntry}
+                  {" / "}扩展 {relaxTierByBucketSummary.next_day.fallbackPostEntry}
+                  {" / "}entry {relaxTierByBucketSummary.next_day.entryFallback}
+                </span>
+              </div>
               <div className="overflow-x-auto">
                 <table className="table table-sm">
                   <thead>
@@ -2018,6 +2243,7 @@ export default function CryptoMarkets() {
                       <th>应用时间</th>
                       <th>Scope</th>
                       <th>当前优先级</th>
+                      <th>优先级原因</th>
                       <th>熔断后坏退出</th>
                       <th>熔断后已实现</th>
                       <th>当前持仓</th>
@@ -2025,6 +2251,7 @@ export default function CryptoMarkets() {
                       <th>结论</th>
                       <th>有效连击</th>
                       <th>后端动作</th>
+                      <th>建议回退层级</th>
                       <th>SHA</th>
                     </tr>
                   </thead>
@@ -2039,6 +2266,7 @@ export default function CryptoMarkets() {
                             冷却 {entry.currentCooldownSeverityScore} / 窗口 {entry.currentWindowPressureScore}
                           </div>
                         </td>
+                        <td className="text-[11px] text-base-content/70">{entry.priorityReasonLabel}</td>
                         <td>{entry.post_apply_bad_exit_count}</td>
                         <td className={entry.postApplyRealizedPnl >= 0 ? "text-success" : "text-error"}>
                           ${entry.postApplyRealizedPnl.toFixed(2)}
@@ -2054,6 +2282,30 @@ export default function CryptoMarkets() {
                         </td>
                         <td>{entry.effective_streak}</td>
                         <td>{entry.actionLabel}</td>
+                        <td>
+                          <div className="flex flex-wrap gap-1">
+                            {entry.recommended_action === "consider_relax" ? (
+                              <>
+                                {entry.relaxUsesConservativePostEntry ? (
+                                  <span className="badge badge-success badge-sm">保守 post-entry</span>
+                                ) : null}
+                                {entry.relaxUsesFallbackPostEntry ? (
+                                  <span className="badge badge-warning badge-sm">扩展 post-entry</span>
+                                ) : null}
+                                {entry.relaxUsesEntryFallback ? (
+                                  <span className="badge badge-error badge-sm">含 entry 回退</span>
+                                ) : null}
+                                {!entry.relaxUsesConservativePostEntry &&
+                                !entry.relaxUsesFallbackPostEntry &&
+                                !entry.relaxUsesEntryFallback ? (
+                                  <span className="text-base-content/50">-</span>
+                                ) : null}
+                              </>
+                            ) : (
+                              <span className="text-base-content/50">-</span>
+                            )}
+                          </div>
+                        </td>
                         <td className="font-mono text-[11px]">{entry.export_sha.slice(0, 12)}</td>
                       </tr>
                     ))}
@@ -2071,6 +2323,15 @@ export default function CryptoMarkets() {
                     <span className="badge badge-ghost badge-sm">
                       sha {relaxPatchExport.export_sha.slice(0, 8)}
                     </span>
+                  ) : null}
+                  {relaxPatchExport?.uses_conservative_post_entry ? (
+                    <span className="badge badge-success badge-sm">保守 post-entry</span>
+                  ) : null}
+                  {relaxPatchExport?.uses_fallback_post_entry ? (
+                    <span className="badge badge-warning badge-sm">扩展 post-entry</span>
+                  ) : null}
+                  {relaxPatchExport?.uses_entry_fallback ? (
+                    <span className="badge badge-error badge-sm">含 entry 回退</span>
                   ) : null}
                 </div>
                 <div className="flex items-center gap-2">

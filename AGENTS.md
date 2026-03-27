@@ -82,6 +82,106 @@ This file records repository-specific working agreements, high-level project con
 
 ## Change Log
 
+### 2026-03-27
+- Area: `crates/pa-monitor/src/diagnostics.rs`, `crates/pa-monitor/src/api.rs`, `crates/pa-strategy/src/weather.rs`, `frontend/src/api.ts`, `frontend/src/pages/WeatherStrategy.tsx`
+- Change: Replaced per-event weather rejection logging with minute-bucket aggregation retained for a bounded recent window, switched `/api/status.weather_rejection_summary` to report retained-window plus recent `1h/6h` reason counts from those buckets, and updated the weather page copy/top blockers to use the retained window instead of implying full process lifetime totals.
+- Why: The first weather rejection summary implementation stored only the most recent raw events, which made `1h/6h` windows inaccurate under high rejection volume and added unnecessary hot-path mutex/string overhead on every weather rejection.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Fixed crypto cooldown-priority scoring so near-window pressure is now computed per `event_subtype` instead of sharing one `same_day/next_day × shape × asset_class` window score across every subtype, and clarified the read-only Top-N wording from “当前最差 Bucket” to “当前最差冷却 Bucket” to reflect that the summary is intentionally scoped to active cooldown buckets rather than all possible crypto buckets.
+- Why: The previous auto-tighten ranking could still borrow 1h/6h deterioration from one subtype into another within the same asset-class/shape bucket, while the read-only Top-N label overstated the scope of that ranking by implying it covered every live bucket instead of only the currently cooled-down ones.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/diagnostics.rs`, `crates/pa-monitor/src/api.rs`, `crates/pa-strategy/src/weather.rs`, `frontend/src/api.ts`, `frontend/src/pages/WeatherStrategy.tsx`
+- Change: Added in-process weather rejection event recording, exposed a `weather_rejection_summary` with lifetime plus recent `1h/6h` reason windows on `/api/status`, and updated the weather page to show recent-window blockers alongside the existing lifetime Top 3 rejection summary.
+- Why: Cumulative weather rejection counts were useful for identifying the dominant long-run blocker, but operators still could not tell whether recent tuning changes were improving the latest hour(s) without manually sampling raw metrics over time.
+
+### 2026-03-27
+- Area: `frontend/src/pages/WeatherStrategy.tsx`
+- Change: Added a read-only “当前最常见阻塞” summary above the weather strategy metrics, highlighting the top three cumulative weather rejection reasons from `/metrics` and mapping the dominant blocker to a short tuning recommendation.
+- Why: Weather trading had been staying idle while operators still had to inspect raw metrics manually to tell whether spread, price, edge, or forecast failures were dominating; the weather page now surfaces that bottleneck directly.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`
+- Change: Refined the backend-owned crypto `priority_bucket_summary.leader_label` again so the single-line “worst bucket” conclusion now also includes the dominant `event_subtype` when it is more specific than `any/generic`, for example surfacing `unlock` or `regulatory` directly in the summary sentence.
+- Why: The previous leader sentence already named the worst bucket and whether cooldown damage or near-window losses were driving it, but operators and AI consumers still had to inspect the Top-N table to recover which event subtype was actually responsible for that deterioration.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`
+- Change: Refined the backend-owned crypto `priority_bucket_summary.leader_label` so it now combines both the dominant live bucket shape (`same_day/next_day × asset_class × shape`) and that bucket's current `priority_reason_label`, producing a single read-only conclusion such as “当前最差 bucket 主导在 next_day alt range，且近窗损失主导”.
+- Why: The first bucket-leader sentence still told operators which bucket was worst but not why it was worst, leaving them to cross-reference the first Top-N row to recover the reason.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added a backend-owned `leader_label` to the crypto `priority_bucket_summary`, summarizing the current worst live bucket in one sentence (for example `same_day alt range`), and surfaced that conclusion above the read-only Top-N bucket table.
+- Why: Even with the new Top-N pressure table, operators and AI tooling still had to scan the first row to tell which live crypto bucket was currently the dominant deterioration source.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added a backend-owned `priority_bucket_summary` under `crypto_auto_patch_effectiveness_summary`, exposing the current worst-scoring crypto cooldown scopes as a compact Top-N list with bucket selector parts, combined priority score, cooldown/window sub-scores, and the existing priority-reason label, and surfaced that list above the read-only auto-patch effectiveness table.
+- Why: Even after each auto-patch row showed why it was prioritized, operators and AI tooling still had no short read-only summary of which live crypto buckets were currently the worst overall without scanning the full effectiveness table row by row.
+
+### 2026-03-27
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Raised the preferred-city weather entry-price ceiling from `0.42` to `0.45` while leaving conservative and default-protected cities unchanged, and updated the validated-city overlay regression expectations.
+- Why: Live weather metrics continued to show `price_above_max_entry` as the second-largest rejection bucket even after earlier NOAA-city loosening, so the next bounded experiment is a small additional entry-price increase only for the highest-confidence cities.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added a backend-owned `priority_reason_label` to each `crypto_auto_patch_effectiveness_summary` patch row, classifying whether the current auto-tighten priority is mainly driven by cooldown bad exits, near-window losses, both together, or currently low pressure, and surfaced that reason as a dedicated read-only column on the crypto auto-patch effectiveness table.
+- Why: Once the crypto page showed both cooldown severity and rolling-window pressure scores, operators and AI consumers still had to manually compare the two numbers to infer why a bucket was currently being prioritized for automatic tightening.
+
+### 2026-03-27
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Increased the preferred-city weather spread overlay from `+300bps` to `+500bps`, leaving conservative and default-protected cities on the global spread cap, and updated the overlay regression expectations.
+- Why: Live weather metrics still showed `spread_too_wide` overwhelmingly dominating all other rejection reasons even after earlier NOAA-city loosening, so the next bounded experiment is to widen spread tolerance further only for the highest-confidence cities.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added a backend-owned `relax_pressure_summary` under `crypto_auto_patch_effectiveness_summary`, including `same_day/next_day` relax counts, weighted pressure scores, and a single `leader_label`, and switched the crypto page to prefer that server-side conclusion over local-only calculation.
+- Why: The read-only page could already infer whether rollback pressure leaned toward same-day or next-day, but AI clients and other consumers of `/api/status` still had no shared backend-owned version of that conclusion.
+
+### 2026-03-27
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added a read-only “current relax pressure leader” conclusion above the crypto auto-patch effectiveness table, scoring same-day and next-day relax backlogs with heavier weight on broader fallback tiers and labeling whether rollback pressure is currently dominated by `same-day`, `next-day`, or roughly balanced.
+- Why: Even with the new bucket-by-tier cross summary, operators still had to visually compare two lines of counts to decide which horizon bucket was now exerting more rollback pressure.
+
+### 2026-03-27
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Expanded the read-only relax backlog summary into a bucket-by-tier cross summary so the crypto page now shows `same-day` and `next-day` counts broken down by `保守 post-entry` / `扩展 post-entry` / `含 entry 回退`.
+- Why: Bucket-level counts alone still could not show whether `same-day` or `next-day` relax pressure was already pushing into entry fallback, which made the rollback backlog harder to compare at a glance.
+
+### 2026-03-27
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Split the read-only relax backlog summary above “最近自动 Patch 效果” into `same-day` versus `next-day` counts (plus fallback `mixed/unknown` buckets) while keeping the existing conservative/fallback/entry-tier totals.
+- Why: The first relax-tier summary showed how risky the current rollback backlog was, but it still did not reveal whether that pressure was concentrated in same-day or next-day buckets without scanning the full effectiveness table row by row.
+
+### 2026-03-27
+- Area: `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added a read-only relax-tier summary above the crypto “最近自动 Patch 效果” table, counting how many current `consider_relax` buckets would remain in the conservative post-entry tier, require broader post-entry fallback, or already spill into entry fallback.
+- Why: Even after exposing per-row relax tiers, operators still had to scan the whole effectiveness table to tell whether the current relax backlog was mostly safe holding/exit rollback or had already escalated toward entry-level rollback.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added relax-tier hints to `crypto_auto_patch_effectiveness_summary` so each `consider_relax` auto-patch row now carries whether a matching relax would stay in the conservative post-entry tier, require broader post-entry fallback, or already spill into entry fallback, and surfaced that tier on the read-only “最近自动 Patch 效果” table.
+- Why: After making relax patches staged and exposing their tier on the dedicated relax preview and audit tables, operators still had to cross-reference a separate panel to understand what kind of rollback a `consider_relax` recommendation actually implied for a bucket.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Persisted `relax_candidate` tier metadata (`uses_conservative_post_entry`, `uses_fallback_post_entry`, `uses_entry_fallback`) into `crypto_override_patch` audit records and surfaced those tiers on the read-only CryptoMarkets “最近已审 Patch” table.
+- Why: After making the relax patch generator staged and conservative, the remaining audit gap was that saved patch history could no longer show whether a reviewed/runtime-applied relax patch had stayed in the safest holding/exit tier or had already escalated into broader post-entry or entry fallback.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added relax-tier metadata to crypto patch exports so `relax_candidate` now reports whether it is using only the conservative post-entry tier, had to widen into the broader post-entry fallback, or already includes entry-row fallback, and surfaced those tiers as read-only badges on the CryptoMarkets relax-patch panel.
+- Why: Once the backend staged relax candidates conservatively, operators still could not tell from `/crypto` whether a suggested relax patch was safely limited to hold/exit controls or had already progressed into broader post-entry or entry-level rollback.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`
+- Change: Refined the read-only crypto `relax_candidate` patch generator so small-step relax now first loosens only `hold_edge_multiplier`, `capital_efficiency_multiplier`, and `model_reversal_buffer_multiplier`, then falls back to the broader post-entry relax set only for scopes that have no candidates in that conservative tier, and still only considers entry-row relax after post-entry coverage is exhausted.
+- Why: Once the backend could emit bucket-aware relax candidates, the next safety gap was that a single relax patch could still reopen entry front-door fields too early; the relax path is now explicitly staged to back off holding/exit pressure before touching broader post-entry or entry controls.
+
 ### 2026-03-26
 - Area: `crates/pa-monitor/src/api.rs`
 - Change: Fixed three crypto auto-patch logic issues by making runtime/effectiveness `scope_labels` include the real `resolution_bucket`, teaching auto-patch effectiveness and relax-candidate matching to honor `same_day` versus `next_day`, and isolating cooldown severity/current-priority scoring by `event_subtype` instead of blending all same-asset same-shape losses together.

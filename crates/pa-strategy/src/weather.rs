@@ -2556,7 +2556,7 @@ impl WeatherAlphaStrategy {
         if Self::uses_conservative_city_overlay(location) {
             self.config.max_entry_price.min(dec!(0.30))
         } else if Self::uses_preferred_city_overlay(location) {
-            self.config.max_entry_price.max(dec!(0.42))
+            self.config.max_entry_price.max(dec!(0.45))
         } else {
             self.config.max_entry_price
         }
@@ -2577,7 +2577,7 @@ impl WeatherAlphaStrategy {
 
     fn effective_max_spread_bps(&self, location: &str) -> u32 {
         if Self::uses_preferred_city_overlay(location) {
-            self.config.max_spread_bps.saturating_add(300)
+            self.config.max_spread_bps.saturating_add(500)
         } else {
             self.config.max_spread_bps
         }
@@ -2640,6 +2640,7 @@ impl WeatherAlphaStrategy {
         pa_monitor::metrics::WEATHER_REJECTIONS
             .with_label_values(&[provider, reason])
             .inc();
+        pa_monitor::diagnostics::record_weather_rejection(provider, reason);
     }
 
     /// Convert a USDC budget into share size at a given token ask price.
@@ -7200,7 +7201,7 @@ mod tests {
         );
         assert_eq!(
             strategy.effective_max_spread_bps("Miami"),
-            strategy.config.max_spread_bps + 300
+            strategy.config.max_spread_bps + 500
         );
         assert_eq!(
             strategy.effective_max_spread_bps("Chicago"),
@@ -7226,7 +7227,7 @@ mod tests {
             },
         );
 
-        assert_eq!(strategy.effective_max_entry_price("Miami"), dec!(0.42));
+        assert_eq!(strategy.effective_max_entry_price("Miami"), dec!(0.45));
         assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(4.60));
 
         assert_eq!(strategy.effective_max_entry_price("Chicago"), dec!(0.30));
@@ -7282,7 +7283,7 @@ mod tests {
         );
         assert_eq!(
             strategy.effective_max_entry_price_for_resolution("Miami", Some(30)),
-            dec!(0.42)
+            dec!(0.45)
         );
         assert_eq!(
             strategy.effective_max_position_usdc_for_resolution("Miami", Some(30)),

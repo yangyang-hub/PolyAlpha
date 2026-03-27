@@ -32,6 +32,21 @@ export interface StatusResponse {
     portfolio_value: string;
     realized_pnl: string;
   }>;
+  weather_rejection_summary?: {
+    retained_window_minutes: number;
+    retained_count: number;
+    retained_top: { label: string; count: number }[];
+    recent_1h: {
+      count: number;
+      top_reasons: { label: string; count: number }[];
+      top_reason: { label: string; count: number } | null;
+    };
+    recent_6h: {
+      count: number;
+      top_reasons: { label: string; count: number }[];
+      top_reason: { label: string; count: number } | null;
+    };
+  };
   positions_snapshot_updated_at: string | null;
   crypto_gate_reject_summary?: {
     recent_count: number;
@@ -202,6 +217,31 @@ export interface StatusResponse {
   }[];
   crypto_auto_patch_effectiveness_summary?: {
     recent_count: number;
+    relax_pressure_summary?: {
+      leader_label: string;
+      same_day_count: number;
+      next_day_count: number;
+      mixed_count: number;
+      unknown_count: number;
+      same_day_pressure_score: number;
+      next_day_pressure_score: number;
+    };
+    priority_bucket_summary?: {
+      row_count: number;
+      leader_scope_label: string;
+      leader_label: string;
+      rows: {
+        scope_label: string;
+        resolution_bucket: string;
+        asset_class: string;
+        event_subtype: string;
+        shape: string;
+        priority_score: number;
+        cooldown_severity_score: number;
+        window_pressure_score: number;
+        priority_reason_label: string;
+      }[];
+    };
     patches: {
       created_at: string;
       runtime_applied_at: string;
@@ -219,6 +259,10 @@ export interface StatusResponse {
       current_priority_score: number;
       current_cooldown_severity_score: number;
       current_window_pressure_score: number;
+      priority_reason_label: string;
+      relax_uses_conservative_post_entry: boolean;
+      relax_uses_fallback_post_entry: boolean;
+      relax_uses_entry_fallback: boolean;
     }[];
   };
   crypto_bucket_window_summary?: {
@@ -598,6 +642,9 @@ export interface CryptoOverridePatchExport {
   selected_bucket_count?: number;
   entry_row_count?: number;
   post_entry_row_count?: number;
+  uses_conservative_post_entry?: boolean;
+  uses_fallback_post_entry?: boolean;
+  uses_entry_fallback?: boolean;
 }
 
 export interface CryptoOverridePatchAuditEntry {
@@ -612,6 +659,9 @@ export interface CryptoOverridePatchAuditEntry {
   generated_at?: string | null;
   runtime_applied: boolean;
   runtime_applied_at?: string | null;
+  uses_conservative_post_entry: boolean;
+  uses_fallback_post_entry: boolean;
+  uses_entry_fallback: boolean;
 }
 
 export interface ApplyCryptoOverridePatchResponse {
@@ -778,6 +828,9 @@ export async function applyCryptoOverridePatch(payload: {
   toml: string;
   scope_label?: string | null;
   generated_at?: string | null;
+  uses_conservative_post_entry?: boolean;
+  uses_fallback_post_entry?: boolean;
+  uses_entry_fallback?: boolean;
 }): Promise<ApplyCryptoOverridePatchResponse> {
   const res = await fetch(`${BASE}/api/crypto/override-patch/apply`, {
     method: "POST",

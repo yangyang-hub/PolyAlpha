@@ -13,6 +13,7 @@ const MAX_CRYPTO_PATCH_EXPORTS: usize = 100;
 const MAX_SMART_MONEY_DECISIONS: usize = 200;
 const MAX_SMART_MONEY_EXITS: usize = 100;
 const CRYPTO_EXIT_DEDUP_WINDOW_SECS: i64 = 5;
+const WEATHER_REJECTION_RETENTION_MINUTES: i64 = 12 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CryptoCandidateDecision {
@@ -83,6 +84,12 @@ pub struct CryptoOverridePatchExportDecision {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeatherRejectionBucket {
+    pub minute_start_unix: i64,
+    pub reason_counts: HashMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartMoneyDecision {
     pub recorded_at: DateTime<Utc>,
     pub token_id: String,
@@ -144,6 +151,8 @@ static CRYPTO_CANDIDATE_DECISIONS: LazyLock<Mutex<VecDeque<CryptoCandidateDecisi
 static CRYPTO_EXIT_DECISIONS: LazyLock<Mutex<VecDeque<CryptoExitDecision>>> =
     LazyLock::new(|| Mutex::new(VecDeque::new()));
 static CRYPTO_PATCH_EXPORT_DECISIONS: LazyLock<Mutex<VecDeque<CryptoOverridePatchExportDecision>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
+static WEATHER_REJECTION_BUCKETS: LazyLock<Mutex<VecDeque<WeatherRejectionBucket>>> =
     LazyLock::new(|| Mutex::new(VecDeque::new()));
 static SMART_MONEY_DECISIONS: LazyLock<Mutex<VecDeque<SmartMoneyDecision>>> =
     LazyLock::new(|| Mutex::new(VecDeque::new()));
@@ -242,6 +251,49 @@ pub fn recent_crypto_override_patch_exports() -> Vec<CryptoOverridePatchExportDe
 
 pub fn clear_crypto_override_patch_exports() {
     CRYPTO_PATCH_EXPORT_DECISIONS.lock().unwrap().clear();
+}
+
+pub fn record_weather_rejection(_provider: &'static str, reason: &'static str) {
+    let minute_start_unix = (Utc::now().timestamp() / 60) * 60;
+    let min_retained_unix = minute_start_unix - WEATHER_REJECTION_RETENTION_MINUTES * 60;
+    let mut buckets = WEATHER_REJECTION_BUCKETS.lock().unwrap();
+
+    if let Some(bucket) = buckets.front_mut() {
+        if bucket.minute_start_unix == minute_start_unix {
+            *bucket.reason_counts.entry(reason.to_string()).or_insert(0) += 1;
+        } else {
+            let mut reason_counts = HashMap::new();
+            reason_counts.insert(reason.to_string(), 1);
+            buckets.push_front(WeatherRejectionBucket {
+                minute_start_unix,
+                reason_counts,
+            });
+        }
+    } else {
+        let mut reason_counts = HashMap::new();
+        reason_counts.insert(reason.to_string(), 1);
+        buckets.push_front(WeatherRejectionBucket {
+            minute_start_unix,
+            reason_counts,
+        });
+    }
+
+    while matches!(buckets.back(), Some(bucket) if bucket.minute_start_unix < min_retained_unix) {
+        buckets.pop_back();
+    }
+}
+
+pub fn recent_weather_rejection_buckets() -> Vec<WeatherRejectionBucket> {
+    WEATHER_REJECTION_BUCKETS
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect()
+}
+
+pub fn clear_weather_rejections() {
+    WEATHER_REJECTION_BUCKETS.lock().unwrap().clear();
 }
 
 pub fn record_smart_money_decision(entry: SmartMoneyDecision) {

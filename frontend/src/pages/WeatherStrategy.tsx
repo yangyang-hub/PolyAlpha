@@ -35,6 +35,25 @@ const FRESHNESS_REJECTION_LABELS: Record<string, string> = {
   sell_lot_size_invalid: "执行前卖单低于最小可执行手数",
 };
 
+function weatherPriorityHint(reason: string | undefined): string {
+  switch (reason) {
+    case "spread_too_wide":
+      return "当前主要被盘口价差挡住，优先看高质量城市的 spread 上限是否还偏紧。";
+    case "price_above_max_entry":
+      return "当前主要被价格上限挡住，优先看高质量城市的 max_entry_price 是否还偏低。";
+    case "no_positive_edge":
+      return "当前模型给出的有效概率优势不足，先别盲目放宽，优先继续观察高质量城市。";
+    case "edge_too_small":
+      return "当前更多是 edge 刚好不够，只有在 spread / 价格放宽后仍无单时，再考虑放概率阈值。";
+    case "forecast_fetch_failed":
+      return "当前有数据源拉取失败，优先排查 provider 限流或数据源稳定性。";
+    case "no_tradable_side":
+      return "当前不少市场缺少可交易方向，通常说明双边盘口质量仍然偏弱。";
+    default:
+      return "当前没有明显单一阻塞项，可以继续观察拒单分布是否开始变化。";
+  }
+}
+
 export default function WeatherStrategy() {
   const posFetcher = useCallback(() => fetchPositions("weather"), []);
   const metricsFetcher = useCallback(() => fetchMetrics(), []);
@@ -82,6 +101,14 @@ export default function WeatherStrategy() {
         .filter((sample) => sample.labels.strategy === "weather" && sample.labels.side === "sell")
         .reduce((sum, sample) => sum + sample.value, 0)
     : 0;
+  const retainedRows = status?.weather_rejection_summary?.retained_top ?? [];
+  const topRejection = retainedRows[0] ? { reason: retainedRows[0].label, value: retainedRows[0].count } : rejectionRows[0];
+  const secondRejection = retainedRows[1] ? { reason: retainedRows[1].label, value: retainedRows[1].count } : rejectionRows[1];
+  const thirdRejection = retainedRows[2] ? { reason: retainedRows[2].label, value: retainedRows[2].count } : rejectionRows[2];
+  const recent1hRows = status?.weather_rejection_summary?.recent_1h.top_reasons ?? [];
+  const recent6hRows = status?.weather_rejection_summary?.recent_6h.top_reasons ?? [];
+  const recent1hTop = recent1hRows[0];
+  const recent6hTop = recent6hRows[0];
 
   const totalCost = (positions ?? []).reduce((s, p) => s + Number(p.cost_basis), 0);
   const totalPnl = (positions ?? []).reduce((s, p) => s + Number(p.unrealized_pnl ?? 0), 0);
@@ -192,6 +219,55 @@ export default function WeatherStrategy() {
       </div>
 
       {/* Activity metrics */}
+      {metrics && (
+        <div className="card bg-base-200 shadow-sm">
+          <div className="card-body p-4 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="card-title text-base">当前最常见阻塞</h2>
+              <span className="text-xs opacity-60">
+                基于后端保留窗口聚合的天气拒单计数
+              </span>
+            </div>
+            <div className="text-sm">
+              {weatherPriorityHint(recent1hTop?.label ?? recent6hTop?.label ?? topRejection?.reason)}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+              {[topRejection, secondRejection, thirdRejection].map((row, index) => (
+                <div key={row?.reason ?? index} className="rounded-lg bg-base-100 p-3">
+                  <div className="text-xs opacity-60">Top {index + 1}</div>
+                  <div className="font-medium">{row ? (REJECTION_LABELS[row.reason] ?? row.reason) : "-"}</div>
+                  <div className="font-mono text-xs opacity-70">{row?.reason ?? "-"}</div>
+                  <div className="mt-1 text-sm">{row ? row.value.toLocaleString() : "-"}</div>
+                </div>
+              ))}
+            </div>
+            <div className="text-xs opacity-60">
+              当前保留窗口: 最近 {status?.weather_rejection_summary?.retained_window_minutes
+                ? Math.round(status.weather_rejection_summary.retained_window_minutes / 60)
+                : 12} 小时
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+              <div className="rounded-lg bg-base-100 p-3">
+                <div className="text-xs opacity-60">最近 1 小时</div>
+                <div className="font-medium">
+                  {recent1hTop ? (REJECTION_LABELS[recent1hTop.label] ?? recent1hTop.label) : "暂无近期拒单"}
+                </div>
+                <div className="font-mono text-xs opacity-70">{recent1hTop?.label ?? "-"}</div>
+                <div className="mt-1">{recent1hTop ? recent1hTop.count.toLocaleString() : "-"}</div>
+              </div>
+              <div className="rounded-lg bg-base-100 p-3">
+                <div className="text-xs opacity-60">最近 6 小时</div>
+                <div className="font-medium">
+                  {recent6hTop ? (REJECTION_LABELS[recent6hTop.label] ?? recent6hTop.label) : "暂无近期拒单"}
+                </div>
+                <div className="font-mono text-xs opacity-70">{recent6hTop?.label ?? "-"}</div>
+                <div className="mt-1">{recent6hTop ? recent6hTop.count.toLocaleString() : "-"}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {metrics && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           <MetricCard label="机会检测" value={strategyCounterValue("opportunities_detected_by_strategy_total")} />

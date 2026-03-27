@@ -207,6 +207,9 @@ pub struct CryptoOverridePatchAuditEntry {
     pub generated_at: Option<String>,
     pub runtime_applied: bool,
     pub runtime_applied_at: Option<String>,
+    pub uses_conservative_post_entry: bool,
+    pub uses_fallback_post_entry: bool,
+    pub uses_entry_fallback: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -504,6 +507,28 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
                 count_a.cmp(count_b).then_with(|| label_b.cmp(label_a))
             })
             .map(|(label, count)| json!({ "label": label, "count": count }))
+    }
+
+    fn count_weather_reasons(
+        buckets: &[crate::diagnostics::WeatherRejectionBucket],
+        min_minute_start_unix: Option<i64>,
+    ) -> std::collections::HashMap<String, usize> {
+        let mut counts = std::collections::HashMap::new();
+        for bucket in buckets {
+            if min_minute_start_unix
+                .is_some_and(|cutoff| bucket.minute_start_unix < cutoff)
+            {
+                continue;
+            }
+            for (reason, count) in &bucket.reason_counts {
+                *counts.entry(reason.clone()).or_insert(0) += *count;
+            }
+        }
+        counts
+    }
+
+    fn sum_counts(counts: &std::collections::HashMap<String, usize>) -> usize {
+        counts.values().copied().sum()
     }
 
     fn count_reason_window(
@@ -973,6 +998,7 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         .load(std::sync::atomic::Ordering::Relaxed);
     let health_ready = state.health_checks.iter().all(|(_, check)| check());
     let recent_candidate_decisions = crate::diagnostics::recent_crypto_candidate_decisions();
+    let recent_weather_rejection_buckets = crate::diagnostics::recent_weather_rejection_buckets();
     let recent_smart_money_decisions = crate::diagnostics::recent_smart_money_decisions();
     let recent_smart_money_exits = crate::diagnostics::recent_smart_money_exit_decisions();
     let smart_money_leader_candidates = if let Some(repo) = &state.repository {
@@ -996,6 +1022,17 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         .take(24)
         .cloned()
         .collect();
+    let current_minute_start_unix = (Utc::now().timestamp() / 60) * 60;
+    let weather_reason_counts_retained =
+        count_weather_reasons(&recent_weather_rejection_buckets, None);
+    let weather_reason_counts_1h = count_weather_reasons(
+        &recent_weather_rejection_buckets,
+        Some(current_minute_start_unix - 60 * 60),
+    );
+    let weather_reason_counts_6h = count_weather_reasons(
+        &recent_weather_rejection_buckets,
+        Some(current_minute_start_unix - 6 * 60 * 60),
+    );
     let recent_gate_scales: Vec<_> = recent_candidate_decisions
         .iter()
         .filter(|decision| decision.action == "gate_scale")
@@ -2229,6 +2266,16 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
             .load_trade_history(500, Some("crypto_alpha"), None, None)
             .await
             .unwrap_or_default();
+        let entry_patch_rows = crypto_override_patch_preview
+            .get("rows")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let post_entry_patch_rows = crypto_post_entry_override_patch_preview
+            .get("rows")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         let current_scope_scores =
             build_current_cooldown_scope_scores(&crypto_cooldown_buckets, &trade_rows, &positions);
         let audit_rows = repo
@@ -2266,6 +2313,24 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
                     .copied()
                     .max_by_key(|(priority, _, _)| *priority)
                     .unwrap_or((0, 0, 0));
+                let priority_reason_label = auto_patch_priority_reason_label(
+                    current_priority_score,
+                    current_cooldown_severity_score,
+                    current_window_pressure_score,
+                );
+                let (
+                    relax_uses_conservative_post_entry,
+                    relax_uses_fallback_post_entry,
+                    relax_uses_entry_fallback,
+                ) = if recommended_action == "consider_relax" {
+                    compute_relax_tier_for_scope_labels(
+                        &entry_patch_rows,
+                        &post_entry_patch_rows,
+                        &entry.scope_labels,
+                    )
+                } else {
+                    (false, false, false)
+                };
                 json!({
                     "runtime_applied_at": entry.runtime_applied_at.to_rfc3339(),
                     "mode": entry.mode,
@@ -2282,17 +2347,121 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
                     "current_priority_score": current_priority_score,
                     "current_cooldown_severity_score": current_cooldown_severity_score,
                     "current_window_pressure_score": current_window_pressure_score,
+                    "priority_reason_label": priority_reason_label,
+                    "relax_uses_conservative_post_entry": relax_uses_conservative_post_entry,
+                    "relax_uses_fallback_post_entry": relax_uses_fallback_post_entry,
+                    "relax_uses_entry_fallback": relax_uses_entry_fallback,
                 })
             })
             .collect();
+        let relax_pressure_summary = {
+            let mut same_day_count = 0usize;
+            let mut next_day_count = 0usize;
+            let mut mixed_count = 0usize;
+            let mut unknown_count = 0usize;
+            let mut same_day_pressure_score = 0i64;
+            let mut next_day_pressure_score = 0i64;
+            for patch in &patches {
+                if patch.get("recommended_action").and_then(Value::as_str) != Some("consider_relax")
+                {
+                    continue;
+                }
+                let scope_labels = patch
+                    .get("scope_labels")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let has_same_day = scope_labels.iter().any(|label| {
+                    label
+                        .as_str()
+                        .map(|value| value.starts_with("same_day / "))
+                        .unwrap_or(false)
+                });
+                let has_next_day = scope_labels.iter().any(|label| {
+                    label
+                        .as_str()
+                        .map(|value| value.starts_with("next_day / "))
+                        .unwrap_or(false)
+                });
+                let tier_weight = if patch
+                    .get("relax_uses_entry_fallback")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    3
+                } else if patch
+                    .get("relax_uses_fallback_post_entry")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    2
+                } else if patch
+                    .get("relax_uses_conservative_post_entry")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    1
+                } else {
+                    0
+                };
+                match (has_same_day, has_next_day) {
+                    (true, false) => {
+                        same_day_count += 1;
+                        same_day_pressure_score += tier_weight;
+                    }
+                    (false, true) => {
+                        next_day_count += 1;
+                        next_day_pressure_score += tier_weight;
+                    }
+                    (true, true) => mixed_count += 1,
+                    (false, false) => unknown_count += 1,
+                }
+            }
+            let leader_label = if same_day_pressure_score == 0 && next_day_pressure_score == 0 {
+                "暂无明确回退压力"
+            } else if same_day_pressure_score > next_day_pressure_score {
+                "当前回退压力主要来自 same-day"
+            } else if next_day_pressure_score > same_day_pressure_score {
+                "当前回退压力主要来自 next-day"
+            } else {
+                "same-day / next-day 回退压力接近"
+            };
+            json!({
+                "leader_label": leader_label,
+                "same_day_count": same_day_count,
+                "next_day_count": next_day_count,
+                "mixed_count": mixed_count,
+                "unknown_count": unknown_count,
+                "same_day_pressure_score": same_day_pressure_score,
+                "next_day_pressure_score": next_day_pressure_score,
+            })
+        };
+        let priority_bucket_summary = build_priority_bucket_summary(&current_scope_scores);
         json!({
             "recent_count": patches.len(),
             "patches": patches,
+            "relax_pressure_summary": relax_pressure_summary,
+            "priority_bucket_summary": priority_bucket_summary,
         })
     } else {
         json!({
             "recent_count": 0,
             "patches": [],
+            "relax_pressure_summary": {
+                "leader_label": "暂无明确回退压力",
+                "same_day_count": 0,
+                "next_day_count": 0,
+                "mixed_count": 0,
+                "unknown_count": 0,
+                "same_day_pressure_score": 0,
+                "next_day_pressure_score": 0,
+            },
+            "priority_bucket_summary": {
+                "row_count": 0,
+                "leader_scope_label": "",
+                "leader_label": "当前没有明显恶化的冷却 bucket",
+                "rows": [],
+            },
         })
     };
     let crypto_bucket_window_summary = if let Some(repo) = &state.repository {
@@ -2358,6 +2527,21 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         "total_wallet_portfolio_value_mid": total_wallet_portfolio_value_mid,
         "strategy_financials": strategy_financials,
         "positions_snapshot_updated_at": positions_updated_at.map(|ts| ts.to_rfc3339()),
+        "weather_rejection_summary": {
+            "retained_window_minutes": 12 * 60,
+            "retained_count": sum_counts(&weather_reason_counts_retained),
+            "retained_top": sorted_count_entries(&weather_reason_counts_retained),
+            "recent_1h": {
+                "count": sum_counts(&weather_reason_counts_1h),
+                "top_reasons": sorted_count_entries(&weather_reason_counts_1h),
+                "top_reason": top_count_entry(&weather_reason_counts_1h),
+            },
+            "recent_6h": {
+                "count": sum_counts(&weather_reason_counts_6h),
+                "top_reasons": sorted_count_entries(&weather_reason_counts_6h),
+                "top_reason": top_count_entry(&weather_reason_counts_6h),
+            },
+        },
         "crypto_gate_reject_summary": {
             "recent_count": recent_gate_rejects.len(),
             "top_reason": top_reason,
@@ -2520,6 +2704,9 @@ struct ApplyCryptoOverridePatchRequest {
     scope_label: Option<String>,
     scope_labels: Option<Vec<String>>,
     generated_at: Option<String>,
+    uses_conservative_post_entry: Option<bool>,
+    uses_fallback_post_entry: Option<bool>,
+    uses_entry_fallback: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2545,6 +2732,9 @@ struct GeneratedCryptoOverridePatch {
     selected_bucket_count: usize,
     entry_row_count: usize,
     post_entry_row_count: usize,
+    uses_conservative_post_entry: bool,
+    uses_fallback_post_entry: bool,
+    uses_entry_fallback: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3556,6 +3746,218 @@ fn rewrite_patch_rows_direction(
         .collect()
 }
 
+fn rewrite_patch_rows_direction_for_fields(
+    rows: &[Value],
+    scope_labels: &std::collections::BTreeSet<String>,
+    direction: &str,
+    allowed_fields: &[&str],
+) -> Vec<Value> {
+    let allowed = allowed_fields
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    rows.iter()
+        .filter_map(|row| {
+            let scope_key = row_scope_key(row)?;
+            if !scope_labels.contains(&scope_key) {
+                return None;
+            }
+            let mut cloned = row.clone();
+            if let Some(fields) = cloned.get_mut("fields").and_then(Value::as_array_mut) {
+                let rewritten = fields
+                    .iter()
+                    .filter_map(|field| {
+                        let target_field = field.get("target_field").and_then(Value::as_str)?;
+                        if !allowed.contains(target_field) {
+                            return None;
+                        }
+                        let preview_value =
+                            patch_preview_multiplier_for(target_field, direction)?.to_string();
+                        Some(json!({
+                            "target_field": target_field,
+                            "direction": direction,
+                            "source_reason": field.get("source_reason").and_then(Value::as_str).unwrap_or_default(),
+                            "support_count": field.get("support_count").and_then(Value::as_u64).unwrap_or(0),
+                            "preview_value": preview_value,
+                        }))
+                    })
+                    .collect::<Vec<_>>();
+                *fields = rewritten;
+            }
+            let field_count = cloned
+                .get("fields")
+                .and_then(Value::as_array)
+                .map(|fields| fields.len())
+                .unwrap_or(0);
+            if field_count == 0 { None } else { Some(cloned) }
+        })
+        .collect()
+}
+
+fn compute_relax_tier_for_scope_labels(
+    entry_rows: &[Value],
+    post_entry_rows: &[Value],
+    scope_labels: &[String],
+) -> (bool, bool, bool) {
+    let relax_scope_labels = scope_labels
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let conservative_post_entry_fields = [
+        "hold_edge_multiplier",
+        "capital_efficiency_multiplier",
+        "model_reversal_buffer_multiplier",
+    ];
+    let mut post_entry_selected = rewrite_patch_rows_direction_for_fields(
+        post_entry_rows,
+        &relax_scope_labels,
+        "loosen",
+        &conservative_post_entry_fields,
+    )
+    .into_iter()
+    .filter(|row| row.get("source_bucket").and_then(Value::as_str) != Some("legacy"))
+    .collect::<Vec<_>>();
+    let covered_by_conservative_post_entry = post_entry_selected
+        .iter()
+        .filter_map(row_scope_key)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut uses_fallback_post_entry = false;
+    if covered_by_conservative_post_entry.len() < relax_scope_labels.len() {
+        let fallback_post_entry =
+            rewrite_patch_rows_direction(post_entry_rows, &relax_scope_labels, "loosen")
+                .into_iter()
+                .filter(|row| row.get("source_bucket").and_then(Value::as_str) != Some("legacy"))
+                .filter(|row| {
+                    row_scope_key(row)
+                        .map(|label| !covered_by_conservative_post_entry.contains(&label))
+                        .unwrap_or(false)
+                })
+                .collect::<Vec<_>>();
+        uses_fallback_post_entry = !fallback_post_entry.is_empty();
+        post_entry_selected.extend(fallback_post_entry);
+    }
+    let post_entry_scope_labels = post_entry_selected
+        .iter()
+        .filter_map(row_scope_key)
+        .collect::<std::collections::BTreeSet<_>>();
+    let uses_entry_fallback =
+        rewrite_patch_rows_direction(entry_rows, &relax_scope_labels, "loosen")
+            .into_iter()
+            .filter(|row| {
+                row.get("source_bucket").and_then(Value::as_str) != Some("legacy")
+                    && row_scope_key(row)
+                        .map(|label| !post_entry_scope_labels.contains(&label))
+                        .unwrap_or(false)
+            })
+            .next()
+            .is_some();
+    (
+        !covered_by_conservative_post_entry.is_empty(),
+        uses_fallback_post_entry,
+        uses_entry_fallback,
+    )
+}
+
+fn auto_patch_priority_reason_label(
+    current_priority_score: i64,
+    current_cooldown_severity_score: i64,
+    current_window_pressure_score: i64,
+) -> &'static str {
+    if current_priority_score <= 0 {
+        "当前压力较低"
+    } else if current_cooldown_severity_score > 0 && current_window_pressure_score > 0 {
+        let gap = (current_cooldown_severity_score - current_window_pressure_score).abs();
+        if gap <= 2 {
+            "冷却坏退出与近窗损失共同主导"
+        } else if current_cooldown_severity_score > current_window_pressure_score {
+            "冷却坏退出主导"
+        } else {
+            "近窗损失主导"
+        }
+    } else if current_cooldown_severity_score > 0 {
+        "冷却坏退出主导"
+    } else if current_window_pressure_score > 0 {
+        "近窗损失主导"
+    } else {
+        "当前压力较低"
+    }
+}
+
+fn build_priority_bucket_summary(
+    current_scope_scores: &std::collections::HashMap<String, (i64, i64, i64)>,
+) -> Value {
+    let mut rows = current_scope_scores
+        .iter()
+        .filter_map(
+            |(scope_label, (priority_score, cooldown_severity_score, window_pressure_score))| {
+                if *priority_score <= 0 {
+                    return None;
+                }
+                let (resolution_bucket, asset_class, event_subtype, shape) =
+                    parse_bucketed_shaped_scope_label(scope_label)?;
+                Some(json!({
+                    "scope_label": scope_label,
+                    "resolution_bucket": resolution_bucket,
+                    "asset_class": asset_class,
+                    "event_subtype": event_subtype,
+                    "shape": shape,
+                    "priority_score": priority_score,
+                    "cooldown_severity_score": cooldown_severity_score,
+                    "window_pressure_score": window_pressure_score,
+                    "priority_reason_label": auto_patch_priority_reason_label(
+                        *priority_score,
+                        *cooldown_severity_score,
+                        *window_pressure_score,
+                    ),
+                }))
+            },
+        )
+        .collect::<Vec<_>>();
+    rows.sort_by(|a, b| {
+        let a_priority = a.get("priority_score").and_then(Value::as_i64).unwrap_or(0);
+        let b_priority = b.get("priority_score").and_then(Value::as_i64).unwrap_or(0);
+        b_priority.cmp(&a_priority).then_with(|| {
+            b.get("scope_label")
+                .and_then(Value::as_str)
+                .cmp(&a.get("scope_label").and_then(Value::as_str))
+        })
+    });
+    if rows.len() > 5 {
+        rows.truncate(5);
+    }
+    let leader_scope_label = rows
+        .first()
+        .and_then(|row| row.get("scope_label"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let leader_label = rows
+        .first()
+        .and_then(|row| {
+            let event_subtype = row.get("event_subtype")?.as_str()?;
+            let subtype_label = if matches!(event_subtype, "any" | "generic" | "") {
+                String::new()
+            } else {
+                format!(" / {}", event_subtype)
+            };
+            Some(format!(
+                "当前最差冷却 bucket 主导在 {} {}{} {}，且 {}",
+                row.get("resolution_bucket")?.as_str()?,
+                row.get("asset_class")?.as_str()?,
+                subtype_label,
+                row.get("shape")?.as_str()?,
+                row.get("priority_reason_label")?.as_str()?,
+            ))
+        })
+        .unwrap_or_else(|| "当前没有明显恶化的冷却 bucket".to_string());
+    json!({
+        "row_count": rows.len(),
+        "leader_scope_label": leader_scope_label,
+        "leader_label": leader_label,
+        "rows": rows,
+    })
+}
+
 fn render_patch_rows_to_toml(rows: &[Value]) -> String {
     rows.iter()
         .map(|row| {
@@ -3658,6 +4060,84 @@ fn decimal_loss_score(value: Decimal) -> i64 {
     }
 }
 
+fn compute_scope_window_pressure_score(
+    trade_rows: &[TradeHistoryRow],
+    positions: &[PositionApiEntry],
+    recent_exits: &[crate::diagnostics::CryptoExitDecision],
+    resolution_bucket: &str,
+    shape: &str,
+    asset_class: &str,
+    event_subtype: &str,
+) -> i64 {
+    let now = Utc::now();
+    let windows = [chrono::Duration::hours(1), chrono::Duration::hours(6)];
+    let weights = [10_i64, 4_i64];
+    let mut score = 0_i64;
+
+    for (window_duration, window_weight) in windows.into_iter().zip(weights) {
+        let window_start = now - window_duration;
+        let realized_pnl: Decimal = trade_rows
+            .iter()
+            .filter(|trade| {
+                let executed_at = trade.executed_at.unwrap_or(trade.created_at);
+                executed_at >= window_start
+                    && infer_trade_resolution_bucket(
+                        trade.question.as_deref(),
+                        trade.executed_at,
+                        trade.created_at,
+                    ) == resolution_bucket
+                    && infer_trade_shape(trade.question.as_deref()) == shape
+                    && asset_class_for_asset_label(infer_trade_asset(trade.question.as_deref()))
+                        == asset_class
+                    && (event_subtype == "any"
+                        || infer_question_event_subtype(trade.question.as_deref()) == event_subtype)
+            })
+            .map(|trade| trade.actual_profit.unwrap_or(Decimal::ZERO))
+            .sum();
+        let open_pnl_bid: Decimal = positions
+            .iter()
+            .filter(|position| {
+                position.resolution_bucket.as_deref() == Some(resolution_bucket)
+                    && infer_position_shape(position) == shape
+                    && asset_class_for_asset_label(position.asset.as_deref().unwrap_or_default())
+                        == asset_class
+                    && (event_subtype == "any"
+                        || infer_question_event_subtype(position.question.as_deref())
+                            == event_subtype)
+            })
+            .map(|position| {
+                position
+                    .unrealized_pnl_bid
+                    .or(position.unrealized_pnl)
+                    .unwrap_or(Decimal::ZERO)
+            })
+            .sum();
+        let bad_exit_count = recent_exits
+            .iter()
+            .filter(|decision| {
+                decision.recorded_at >= window_start
+                    && normalized_resolution_bucket_label(decision.days_to_resolution)
+                        == resolution_bucket
+                    && normalized_market_shape_label(decision.market_type.as_deref()) == shape
+                    && asset_class_for_asset_label(decision.asset.as_deref().unwrap_or_default())
+                        == asset_class
+                    && (event_subtype == "any"
+                        || infer_question_event_subtype(Some(decision.question.as_str()))
+                            == event_subtype)
+                    && matches!(
+                        decision.reason.as_str(),
+                        "model_reversal" | "relative_stop_loss"
+                    )
+            })
+            .count();
+        score += (bad_exit_count as i64) * 4_000 * window_weight
+            + decimal_loss_score(realized_pnl) * 5 * window_weight
+            + decimal_loss_score(open_pnl_bid) * 2 * window_weight;
+    }
+
+    score
+}
+
 fn build_bucket_window_pressure_scores(
     entries: &[CryptoBucketWindowSummaryEntry],
 ) -> std::collections::HashMap<(String, String, String), i64> {
@@ -3697,9 +4177,6 @@ fn build_current_cooldown_scope_scores(
         .into_iter()
         .take(24)
         .collect::<Vec<_>>();
-    let bucket_window_scores = build_bucket_window_pressure_scores(
-        &build_crypto_bucket_window_summary(trade_rows, positions, &recent_exits),
-    );
     let mut scores = std::collections::HashMap::new();
 
     for bucket in cooldown_buckets {
@@ -3768,14 +4245,15 @@ fn build_current_cooldown_scope_scores(
         let cooldown_severity_score = (post_trigger_bad_exit_count as i64) * 10_000
             + decimal_loss_score(post_trigger_realized) * 10
             + decimal_loss_score(open_pnl_bid);
-        let window_pressure_score = bucket_window_scores
-            .get(&(
-                resolution_bucket.to_string(),
-                shape.to_string(),
-                asset_class_for_asset_label(asset).to_string(),
-            ))
-            .copied()
-            .unwrap_or(0);
+        let window_pressure_score = compute_scope_window_pressure_score(
+            trade_rows,
+            positions,
+            &recent_exits,
+            resolution_bucket,
+            shape,
+            asset_class_for_asset_label(asset),
+            event_subtype,
+        );
         let scope_label = bucketed_scope_label(
             resolution_bucket,
             asset_class_for_asset_label(asset),
@@ -4124,6 +4602,9 @@ async fn build_cooldown_priority_patch_export(
         selected_bucket_count: selected_scopes.len(),
         entry_row_count: entry_selected.len(),
         post_entry_row_count: post_entry_selected.len(),
+        uses_conservative_post_entry: false,
+        uses_fallback_post_entry: false,
+        uses_entry_fallback: false,
     })
 }
 
@@ -4170,11 +4651,39 @@ async fn build_relax_candidate_patch_export(
         .cloned()
         .unwrap_or_default();
 
-    let post_entry_selected =
-        rewrite_patch_rows_direction(&post_entry_rows, &relax_scope_labels, "loosen")
-            .into_iter()
-            .filter(|row| row.get("source_bucket").and_then(Value::as_str) != Some("legacy"))
-            .collect::<Vec<_>>();
+    let conservative_post_entry_fields = [
+        "hold_edge_multiplier",
+        "capital_efficiency_multiplier",
+        "model_reversal_buffer_multiplier",
+    ];
+    let mut post_entry_selected = rewrite_patch_rows_direction_for_fields(
+        &post_entry_rows,
+        &relax_scope_labels,
+        "loosen",
+        &conservative_post_entry_fields,
+    )
+    .into_iter()
+    .filter(|row| row.get("source_bucket").and_then(Value::as_str) != Some("legacy"))
+    .collect::<Vec<_>>();
+    let covered_by_conservative_post_entry = post_entry_selected
+        .iter()
+        .filter_map(row_scope_key)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut uses_fallback_post_entry = false;
+    if covered_by_conservative_post_entry.len() < relax_scope_labels.len() {
+        let fallback_post_entry =
+            rewrite_patch_rows_direction(&post_entry_rows, &relax_scope_labels, "loosen")
+                .into_iter()
+                .filter(|row| row.get("source_bucket").and_then(Value::as_str) != Some("legacy"))
+                .filter(|row| {
+                    row_scope_key(row)
+                        .map(|label| !covered_by_conservative_post_entry.contains(&label))
+                        .unwrap_or(false)
+                })
+                .collect::<Vec<_>>();
+        uses_fallback_post_entry = !fallback_post_entry.is_empty();
+        post_entry_selected.extend(fallback_post_entry);
+    }
     let post_entry_scope_labels = post_entry_selected
         .iter()
         .filter_map(row_scope_key)
@@ -4188,6 +4697,7 @@ async fn build_relax_candidate_patch_export(
                     .unwrap_or(false)
         })
         .collect::<Vec<_>>();
+    let uses_entry_fallback = !entry_selected.is_empty();
 
     let toml = [
         render_patch_rows_to_toml(&entry_selected),
@@ -4224,6 +4734,9 @@ async fn build_relax_candidate_patch_export(
         selected_bucket_count: 0,
         entry_row_count: entry_selected.len(),
         post_entry_row_count: post_entry_selected.len(),
+        uses_conservative_post_entry: !covered_by_conservative_post_entry.is_empty(),
+        uses_fallback_post_entry,
+        uses_entry_fallback,
     })
 }
 
@@ -4409,6 +4922,9 @@ async fn get_crypto_override_patch(
                 "selected_bucket_count": generated.selected_bucket_count,
                 "entry_row_count": generated.entry_row_count,
                 "post_entry_row_count": generated.post_entry_row_count,
+                "uses_conservative_post_entry": generated.uses_conservative_post_entry,
+                "uses_fallback_post_entry": generated.uses_fallback_post_entry,
+                "uses_entry_fallback": generated.uses_entry_fallback,
                 "toml": generated.toml,
             })),
         )
@@ -4457,6 +4973,9 @@ async fn get_crypto_override_patch(
             "selected_bucket_count": generated.selected_bucket_count,
             "entry_row_count": generated.entry_row_count,
             "post_entry_row_count": generated.post_entry_row_count,
+            "uses_conservative_post_entry": generated.uses_conservative_post_entry,
+            "uses_fallback_post_entry": generated.uses_fallback_post_entry,
+            "uses_entry_fallback": generated.uses_entry_fallback,
             "toml": generated.toml,
         })),
     )
@@ -4516,6 +5035,9 @@ async fn process_crypto_override_patch_apply(
         "scope_label": body.scope_label,
         "scope_labels": body.scope_labels,
         "generated_at": body.generated_at,
+        "uses_conservative_post_entry": body.uses_conservative_post_entry.unwrap_or(false),
+        "uses_fallback_post_entry": body.uses_fallback_post_entry.unwrap_or(false),
+        "uses_entry_fallback": body.uses_entry_fallback.unwrap_or(false),
         "toml": body.toml,
         "runtime_applied": action == "apply_runtime",
         "runtime_applied_at": runtime_applied_at.map(|ts| ts.to_rfc3339()),
@@ -4610,6 +5132,21 @@ async fn get_crypto_override_patch_audit(
                         .get("runtime_applied_at")
                         .and_then(Value::as_str)
                         .map(str::to_string),
+                    uses_conservative_post_entry: row
+                        .data
+                        .get("uses_conservative_post_entry")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    uses_fallback_post_entry: row
+                        .data
+                        .get("uses_fallback_post_entry")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    uses_entry_fallback: row
+                        .data
+                        .get("uses_entry_fallback")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
                 })
                 .collect();
             (
@@ -4827,6 +5364,9 @@ pub fn spawn_crypto_override_patch_auto_apply(state: Arc<ApiState>) {
                 scope_label: generated.scope_label,
                 scope_labels: Some(generated.scope_labels),
                 generated_at: Some(generated.generated_at),
+                uses_conservative_post_entry: Some(generated.uses_conservative_post_entry),
+                uses_fallback_post_entry: Some(generated.uses_fallback_post_entry),
+                uses_entry_fallback: Some(generated.uses_entry_fallback),
             };
             match process_crypto_override_patch_apply(
                 &state,
