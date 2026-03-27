@@ -35,9 +35,11 @@ export interface StatusResponse {
   weather_rejection_summary?: {
     retained_window_minutes: number;
     retained_count: number;
+    unsupported_city_count?: number;
     retained_top: { label: string; count: number }[];
     recent_1h: {
       count: number;
+      unsupported_city_count?: number;
       top_reasons: { label: string; count: number }[];
       top_reason: { label: string; count: number } | null;
       top_spread_cities: { label: string; count: number }[];
@@ -45,6 +47,7 @@ export interface StatusResponse {
     };
     recent_6h: {
       count: number;
+      unsupported_city_count?: number;
       top_reasons: { label: string; count: number }[];
       top_reason: { label: string; count: number } | null;
       top_spread_cities: { label: string; count: number }[];
@@ -240,8 +243,20 @@ export interface StatusResponse {
       leader_target_fields: string[];
       subtype_focus_label: string;
       subtype_focus_action_label: string;
+      subtype_focus_summary_label: string;
+      subtype_focus_field_summary_label: string;
+      subtype_focus_event_subtype: string;
+      subtype_focus_scope_labels: string[];
+      subtype_focus_recommended_action: "hold" | "observe" | "continue_tighten" | "consider_relax";
+      subtype_focus_target_fields: string[];
       asset_focus_label: string;
       asset_focus_action_label: string;
+      asset_focus_summary_label: string;
+      asset_focus_field_summary_label: string;
+      asset_focus_asset: string;
+      asset_focus_scope_labels: string[];
+      asset_focus_recommended_action: "hold" | "observe" | "continue_tighten" | "consider_relax";
+      asset_focus_target_fields: string[];
       rows: {
         scope_label: string;
         resolution_bucket: string;
@@ -281,6 +296,10 @@ export interface StatusResponse {
     }[];
     long_window_relax_guard_summary?: {
       blocked_count: number;
+      continuing_pressure_count: number;
+      stabilizing_count: number;
+      leader_label: string;
+      cadence_blocked_count: number;
       rows: {
         runtime_applied_at: string;
         scope_labels: string[];
@@ -288,6 +307,10 @@ export interface StatusResponse {
         current_long_window_pressure_score: number;
         current_open_positions: number;
         current_open_pnl_bid: string;
+        post_apply_bad_exit_count: number;
+        post_apply_realized_pnl: string;
+        effect_label: string;
+        window_effect_label: string;
         note: string;
       }[];
     };
@@ -319,6 +342,21 @@ export interface StatusResponse {
       open_positions: number;
       open_pnl_bid: string;
       bad_exit_count: number;
+    }[];
+  };
+  crypto_asset_long_window_summary?: {
+    row_count: number;
+    leader_asset?: string | null;
+    leader_label: string;
+    leader_action_label: string;
+    rows: {
+      asset: string;
+      trade_count: number;
+      realized_pnl: string;
+      open_positions: number;
+      open_pnl_bid: string;
+      bad_exit_count: number;
+      pressure_score: number;
     }[];
   };
   smart_money_signal_summary?: {
@@ -679,14 +717,21 @@ export interface CryptoOverridePatchExport {
   toml: string;
   filename?: string;
   scope_label?: string;
+  focus_label?: string;
   export_sha?: string;
   generated_at?: string;
   selected_bucket_count?: number;
   entry_row_count?: number;
   post_entry_row_count?: number;
+  selected_field_count?: number;
+  field_level?: boolean;
+  selected_target_fields?: string[];
   uses_conservative_post_entry?: boolean;
   uses_fallback_post_entry?: boolean;
   uses_entry_fallback?: boolean;
+  recommended_action?: string;
+  action_label?: string;
+  note?: string;
 }
 
 export interface CryptoOverridePatchAuditEntry {
@@ -844,7 +889,13 @@ export function fetchCryptoTrades(limit = 200): Promise<CryptoTradeEntry[]> {
 }
 
 export function fetchCryptoOverridePatch(
-  mode: "full" | "cooldown_priority" | "relax_candidate" = "full",
+  mode:
+    | "full"
+    | "cooldown_priority"
+    | "relax_candidate"
+    | "subtype_focus"
+    | "asset_focus"
+    | "asset_long_window_focus" = "full",
 ): Promise<CryptoOverridePatchExport> {
   return get(`/api/crypto/override-patch?mode=${encodeURIComponent(mode)}`);
 }
@@ -887,7 +938,14 @@ export async function applyCryptoOverridePatch(payload: {
 }
 
 export function cryptoOverridePatchDownloadPath(
-  mode: "full" | "cooldown_priority" | "relax_candidate" | "selected",
+  mode:
+    | "full"
+    | "cooldown_priority"
+    | "relax_candidate"
+    | "selected"
+    | "subtype_focus"
+    | "asset_focus"
+    | "asset_long_window_focus",
   options?: { bucket?: string; shape?: "range" | "directional" },
 ): string {
   const params = new URLSearchParams({ mode, format: "toml" });

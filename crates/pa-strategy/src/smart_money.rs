@@ -23,6 +23,7 @@ use pa_monitor::diagnostics::{
 };
 
 use crate::profitability::ProfitCalculator;
+use crate::utils::floor_price_to_tick;
 
 // ──── Aggregated Signal ────
 
@@ -700,8 +701,9 @@ impl SmartMoneyStrategy {
             price = %best_bid,
             "SmartMoney: following exit signal"
         );
+        let executable_bid = floor_price_to_tick(best_bid, market.tick_size);
         let est = self.profit_calc.directional_sell_profit(
-            best_bid,
+            executable_bid,
             avg_cost,
             sell_size,
             market.fee_rate_bps,
@@ -714,7 +716,7 @@ impl SmartMoneyStrategy {
             condition_id: format!("{:#x}", agg.condition_id),
             reason: "leader_exit".to_string(),
             question: market.question.clone(),
-            best_bid,
+            best_bid: executable_bid,
             avg_cost,
             size: sell_size,
             estimated_profit: est.net_profit,
@@ -740,7 +742,7 @@ impl SmartMoneyStrategy {
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id: agg.token_id,
                 side: TradeSide::Sell,
-                price: best_bid,
+                price: executable_bid,
                 size: sell_size,
                 condition_id: agg.condition_id,
             },
@@ -969,15 +971,18 @@ impl SmartMoneyStrategy {
         condition_id: B256,
         question: String,
         fee_rate_bps: u32,
+        tick_size: Decimal,
         reason: &str,
     ) -> TradingOpportunity {
+        let executable_bid = floor_price_to_tick(best_bid, tick_size);
         let est = self
             .profit_calc
-            .directional_sell_profit(best_bid, avg_cost, size, fee_rate_bps);
+            .directional_sell_profit(executable_bid, avg_cost, size, fee_rate_bps);
         let attributed_leaders = self.attribute_exit_to_leaders(token_id, size, est.net_profit);
         tracing::info!(
             token_id = %token_id,
             best_bid = %best_bid,
+            executable_bid = %executable_bid,
             avg_cost = %avg_cost,
             reason,
             "SmartMoney: strategy exit trigger"
@@ -988,7 +993,7 @@ impl SmartMoneyStrategy {
             condition_id: format!("{:#x}", condition_id),
             reason: reason.to_string(),
             question: question.clone(),
-            best_bid,
+            best_bid: executable_bid,
             avg_cost,
             size,
             estimated_profit: est.net_profit,
@@ -1000,7 +1005,7 @@ impl SmartMoneyStrategy {
             strategy_type: StrategyType::SmartMoney,
             condition_id,
             question: format!("[EXIT:{reason}] {question}"),
-            spread: best_bid - avg_cost,
+            spread: executable_bid - avg_cost,
             estimated_profit: est.net_profit,
             size,
             min_profit_retention_ratio_multiplier: None,
@@ -1013,7 +1018,7 @@ impl SmartMoneyStrategy {
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id,
                 side: TradeSide::Sell,
-                price: best_bid,
+                price: executable_bid,
                 size,
                 condition_id,
             },
@@ -1043,21 +1048,13 @@ impl SmartMoneyStrategy {
                 None => continue,
             };
 
-            let condition_id = markets
+            let market = markets
                 .values()
-                .find(|m| m.tokens.iter().any(|t| t.token_id == *token_id))
-                .map(|m| m.condition_id)
-                .unwrap_or_default();
-            let question = markets
-                .values()
-                .find(|m| m.tokens.iter().any(|t| t.token_id == *token_id))
-                .map(|m| m.question.clone())
-                .unwrap_or_default();
-            let fee_rate_bps = markets
-                .values()
-                .find(|m| m.tokens.iter().any(|t| t.token_id == *token_id))
-                .map(|m| m.fee_rate_bps)
-                .unwrap_or(200);
+                .find(|m| m.tokens.iter().any(|t| t.token_id == *token_id));
+            let condition_id = market.map(|m| m.condition_id).unwrap_or_default();
+            let question = market.map(|m| m.question.clone()).unwrap_or_default();
+            let fee_rate_bps = market.map(|m| m.fee_rate_bps).unwrap_or(200);
+            let tick_size = market.map(|m| m.tick_size).unwrap_or(Decimal::new(1, 2));
             let held_secs = self
                 .position_first_seen_at
                 .read()
@@ -1101,6 +1098,7 @@ impl SmartMoneyStrategy {
                     condition_id,
                     question,
                     fee_rate_bps,
+                    tick_size,
                     reason,
                 ));
             }
@@ -1471,6 +1469,7 @@ mod tests {
             cid,
             market.question,
             market.fee_rate_bps,
+            market.tick_size,
             "capital_efficiency",
         );
         assert!(exit_opp.estimated_profit > Decimal::ZERO);

@@ -109,6 +109,11 @@ export default function WeatherStrategy() {
   const recent6hRows = status?.weather_rejection_summary?.recent_6h.top_reasons ?? [];
   const recent1hTop = recent1hRows[0];
   const recent6hTop = recent6hRows[0];
+  const retainedUnsupportedCityCount = status?.weather_rejection_summary?.unsupported_city_count ?? 0;
+  const recent1hUnsupportedCityCount =
+    status?.weather_rejection_summary?.recent_1h.unsupported_city_count ?? 0;
+  const recent6hUnsupportedCityCount =
+    status?.weather_rejection_summary?.recent_6h.unsupported_city_count ?? 0;
   const recent1hSpreadCities = status?.weather_rejection_summary?.recent_1h.top_spread_cities ?? [];
   const recent6hSpreadCities = status?.weather_rejection_summary?.recent_6h.top_spread_cities ?? [];
   const recent1hPriceCities = status?.weather_rejection_summary?.recent_1h.top_price_cities ?? [];
@@ -250,6 +255,11 @@ export default function WeatherStrategy() {
                 ? Math.round(status.weather_rejection_summary.retained_window_minutes / 60)
                 : 12} 小时
             </div>
+            {retainedUnsupportedCityCount > 0 && (
+              <div className="text-xs opacity-60">
+                已忽略非交易城市扫描量: {retainedUnsupportedCityCount.toLocaleString()}
+              </div>
+            )}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
               <div className="rounded-lg bg-base-100 p-3">
                 <div className="text-xs opacity-60">最近 1 小时</div>
@@ -258,6 +268,11 @@ export default function WeatherStrategy() {
                 </div>
                 <div className="font-mono text-xs opacity-70">{recent1hTop?.label ?? "-"}</div>
                 <div className="mt-1">{recent1hTop ? recent1hTop.count.toLocaleString() : "-"}</div>
+                {recent1hUnsupportedCityCount > 0 && (
+                  <div className="mt-1 text-xs opacity-60">
+                    非交易城市扫描: {recent1hUnsupportedCityCount.toLocaleString()}
+                  </div>
+                )}
               </div>
               <div className="rounded-lg bg-base-100 p-3">
                 <div className="text-xs opacity-60">最近 6 小时</div>
@@ -266,6 +281,11 @@ export default function WeatherStrategy() {
                 </div>
                 <div className="font-mono text-xs opacity-70">{recent6hTop?.label ?? "-"}</div>
                 <div className="mt-1">{recent6hTop ? recent6hTop.count.toLocaleString() : "-"}</div>
+                {recent6hUnsupportedCityCount > 0 && (
+                  <div className="mt-1 text-xs opacity-60">
+                    非交易城市扫描: {recent6hUnsupportedCityCount.toLocaleString()}
+                  </div>
+                )}
               </div>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">

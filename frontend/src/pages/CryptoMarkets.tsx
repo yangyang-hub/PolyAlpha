@@ -358,6 +358,18 @@ export default function CryptoMarkets() {
     () => fetchCryptoOverridePatch("relax_candidate"),
     [],
   );
+  const subtypePatchFetcher = useCallback(
+    () => fetchCryptoOverridePatch("subtype_focus"),
+    [],
+  );
+  const assetPatchFetcher = useCallback(
+    () => fetchCryptoOverridePatch("asset_focus"),
+    [],
+  );
+  const assetLongWindowPatchFetcher = useCallback(
+    () => fetchCryptoOverridePatch("asset_long_window_focus"),
+    [],
+  );
   const { data: positions, loading } = usePolling<PositionEntry[]>(posFetcher, 15000);
   const { data: config } = usePolling<CryptoAlphaConfigSection>(configFetcher, 30000);
   const { data: status } = usePolling<StatusResponse>(statusFetcher, 15000);
@@ -371,6 +383,12 @@ export default function CryptoMarkets() {
     15000,
   );
   const { data: relaxPatchExport } = usePolling<CryptoOverridePatchExport>(relaxPatchFetcher, 15000);
+  const { data: subtypePatchExport } = usePolling<CryptoOverridePatchExport>(subtypePatchFetcher, 15000);
+  const { data: assetPatchExport } = usePolling<CryptoOverridePatchExport>(assetPatchFetcher, 15000);
+  const { data: assetLongWindowPatchExport } = usePolling<CryptoOverridePatchExport>(
+    assetLongWindowPatchFetcher,
+    15000,
+  );
 
   const totalCost = (positions ?? []).reduce((s, p) => s + Number(p.cost_basis), 0);
   const totalPnlBid = (positions ?? []).reduce(
@@ -758,6 +776,7 @@ export default function CryptoMarkets() {
     status?.crypto_auto_patch_effectiveness_summary?.long_window_relax_guard_summary?.rows.map((row) => ({
       ...row,
       currentOpenPnlBid: Number(row.current_open_pnl_bid ?? 0),
+      postApplyRealizedPnl: Number(row.post_apply_realized_pnl ?? 0),
     })) ?? [];
   const cooldownBuckets = status?.crypto_cooldown_summary?.buckets ?? [];
   const cooldownEvaluations = cooldownBuckets.map((bucket) => {
@@ -839,6 +858,12 @@ export default function CryptoMarkets() {
       realizedPnl: Number(row.realized_pnl ?? 0),
       openPnlBid: Number(row.open_pnl_bid ?? 0),
     })) ?? [];
+  const assetLongWindowRows =
+    status?.crypto_asset_long_window_summary?.rows.map((row) => ({
+      ...row,
+      realizedPnl: Number(row.realized_pnl ?? 0),
+      openPnlBid: Number(row.open_pnl_bid ?? 0),
+    })) ?? [];
   const localCooldownPriorityPatchToml = [
     renderPatchRowsToToml(cooldownPriorityEntryPatchRows),
     renderPatchRowsToToml(cooldownPriorityPostEntryPatchRows),
@@ -848,6 +873,9 @@ export default function CryptoMarkets() {
   const cooldownPriorityPatchToml =
     cooldownPatchExport?.toml?.trim() || localCooldownPriorityPatchToml;
   const relaxCandidatePatchToml = relaxPatchExport?.toml?.trim() || "";
+  const subtypeFocusPatchToml = subtypePatchExport?.toml?.trim() || "";
+  const assetFocusPatchToml = assetPatchExport?.toml?.trim() || "";
+  const assetLongWindowPatchToml = assetLongWindowPatchExport?.toml?.trim() || "";
   const localCombinedPatchToml = [
     overridePatchPreview?.toml?.trim(),
     postEntryOverridePatchPreview?.toml?.trim(),
@@ -1506,6 +1534,121 @@ export default function CryptoMarkets() {
                         ${row.openPnlBid.toFixed(2)}
                       </td>
                       <td>{row.bad_exit_count}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!!assetLongWindowRows.length && (
+        <div className="card bg-base-200 shadow-sm">
+          <div className="card-body p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="card-title text-base">资产 24h 压力</h2>
+                <div className="text-xs opacity-60">
+                  只读显示近 24h 哪些资产在 realized / open PnL / bad exits 上持续承压
+                </div>
+              </div>
+            </div>
+            <div className="mb-2 text-xs text-base-content/70">
+              {status?.crypto_asset_long_window_summary?.leader_label}
+            </div>
+            <div className="mb-3 text-xs text-base-content/70">
+              {status?.crypto_asset_long_window_summary?.leader_action_label}
+            </div>
+            {assetLongWindowPatchToml ? (
+              <div className="mb-3 rounded-box bg-base-100/70 px-3 py-2 text-xs">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 font-medium">
+                    <span>资产长期样本 Patch 候选</span>
+                    {assetLongWindowPatchExport?.export_sha ? (
+                      <span className="badge badge-ghost badge-sm">
+                        sha {assetLongWindowPatchExport.export_sha.slice(0, 8)}
+                      </span>
+                    ) : null}
+                    {assetLongWindowPatchExport?.field_level ? (
+                      <span className="badge badge-warning badge-sm">
+                        字段级 {assetLongWindowPatchExport.selected_field_count ?? 0}
+                      </span>
+                    ) : null}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      className="btn btn-xs btn-outline"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(assetLongWindowPatchToml);
+                          setPatchCopyState("copied");
+                          window.setTimeout(() => setPatchCopyState("idle"), 2000);
+                        } catch {
+                          setPatchCopyState("failed");
+                          window.setTimeout(() => setPatchCopyState("idle"), 2000);
+                        }
+                      }}
+                    >
+                      复制资产长期 Patch
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-xs btn-outline"
+                      onClick={() => {
+                        const anchor = document.createElement("a");
+                        anchor.href = cryptoOverridePatchDownloadPath("asset_long_window_focus");
+                        anchor.download =
+                          assetLongWindowPatchExport?.filename ??
+                          "crypto_asset_long_window_focus_override_patch.toml";
+                        anchor.click();
+                      }}
+                    >
+                      下载资产长期 TOML
+                    </button>
+                  </div>
+                </div>
+                <div className="mb-2 opacity-70">
+                  {assetLongWindowPatchExport?.focus_label ?? "近 24h 主导资产"}
+                  {" · "}
+                  {assetLongWindowPatchExport?.action_label ?? "资产建议：继续观察"}
+                </div>
+                {assetLongWindowPatchExport?.note ? (
+                  <div className="mb-2 opacity-60">{assetLongWindowPatchExport.note}</div>
+                ) : null}
+                <pre className="overflow-x-auto rounded-box bg-base-200/60 p-3 text-[11px] leading-5">
+                  <code>{assetLongWindowPatchToml}</code>
+                </pre>
+              </div>
+            ) : null}
+            <div className="overflow-x-auto">
+              <table className="table table-sm">
+                <thead>
+                  <tr>
+                    <th>资产</th>
+                    <th>压力分数</th>
+                    <th>成交数</th>
+                    <th>坏退出</th>
+                    <th>已实现</th>
+                    <th>当前持仓</th>
+                    <th>当前浮盈亏(Bid)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {assetLongWindowRows.map((row) => (
+                    <tr key={row.asset}>
+                      <td>{row.asset}</td>
+                      <td className="font-mono text-[11px]">{row.pressure_score}</td>
+                      <td>{row.trade_count}</td>
+                      <td>{row.bad_exit_count}</td>
+                      <td className={row.realizedPnl >= 0 ? "text-success" : "text-error"}>
+                        ${row.realizedPnl.toFixed(2)}
+                      </td>
+                      <td>{row.open_positions}</td>
+                      <td className={row.openPnlBid >= 0 ? "text-success" : "text-error"}>
+                        ${row.openPnlBid.toFixed(2)}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -2281,15 +2424,41 @@ export default function CryptoMarkets() {
                     {status?.crypto_auto_patch_effectiveness_summary?.priority_bucket_summary?.subtype_focus_action_label}
                   </div>
                   <div className="mb-2 text-[11px] text-base-content/70">
+                    {status?.crypto_auto_patch_effectiveness_summary?.priority_bucket_summary?.subtype_focus_summary_label}
+                  </div>
+                  <div className="mb-2 text-[11px] text-base-content/70">
+                    {status?.crypto_auto_patch_effectiveness_summary?.priority_bucket_summary?.subtype_focus_field_summary_label}
+                  </div>
+                  <div className="mb-2 text-[11px] text-base-content/70">
                     {status?.crypto_auto_patch_effectiveness_summary?.priority_bucket_summary?.asset_focus_label}
                   </div>
                   <div className="mb-2 text-[11px] text-base-content/70">
                     {status?.crypto_auto_patch_effectiveness_summary?.priority_bucket_summary?.asset_focus_action_label}
                   </div>
+                  <div className="mb-2 text-[11px] text-base-content/70">
+                    {status?.crypto_auto_patch_effectiveness_summary?.priority_bucket_summary?.asset_focus_summary_label}
+                  </div>
+                  <div className="mb-2 text-[11px] text-base-content/70">
+                    {status?.crypto_auto_patch_effectiveness_summary?.priority_bucket_summary?.asset_focus_field_summary_label}
+                  </div>
                   {longWindowRelaxGuardRows.length > 0 ? (
                     <div className="mb-2 rounded-box bg-base-100/60 px-2 py-2 text-[11px] text-base-content/70">
-                      <div className="font-medium">
+                      <div className="mb-1 font-medium">
                         24h 回撤保护拦住回退 {longWindowRelaxGuardRows.length}
+                      </div>
+                      <div className="mb-2 flex flex-wrap items-center gap-2">
+                        <span className="badge badge-error badge-sm">
+                          继续承压 {status?.crypto_auto_patch_effectiveness_summary?.long_window_relax_guard_summary?.continuing_pressure_count ?? 0}
+                        </span>
+                        <span className="badge badge-success badge-sm">
+                          逐步稳定 {status?.crypto_auto_patch_effectiveness_summary?.long_window_relax_guard_summary?.stabilizing_count ?? 0}
+                        </span>
+                        <span className="badge badge-outline badge-sm">
+                          节奏保护 {status?.crypto_auto_patch_effectiveness_summary?.long_window_relax_guard_summary?.cadence_blocked_count ?? 0}
+                        </span>
+                      </div>
+                      <div className="mb-2 text-[11px] text-base-content/70">
+                        {status?.crypto_auto_patch_effectiveness_summary?.long_window_relax_guard_summary?.leader_label}
                       </div>
                       <div className="overflow-x-auto">
                         <table className="table table-xs">
@@ -2298,8 +2467,12 @@ export default function CryptoMarkets() {
                               <th>Scope</th>
                               <th>有效连击</th>
                               <th>24h 压力</th>
+                              <th>后续坏退出</th>
+                              <th>后续已实现</th>
                               <th>当前持仓</th>
                               <th>当前浮盈亏(Bid)</th>
+                              <th>护栏效果</th>
+                              <th>窗口状态</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -2308,10 +2481,22 @@ export default function CryptoMarkets() {
                                 <td className="text-[11px]">{row.scope_labels.join(", ") || "-"}</td>
                                 <td>{row.effective_streak}</td>
                                 <td>{row.current_long_window_pressure_score}</td>
+                                <td>{row.post_apply_bad_exit_count}</td>
+                                <td
+                                  className={
+                                    row.postApplyRealizedPnl >= 0
+                                      ? "text-success"
+                                      : "text-error"
+                                  }
+                                >
+                                  ${row.postApplyRealizedPnl.toFixed(2)}
+                                </td>
                                 <td>{row.current_open_positions}</td>
                                 <td className={row.currentOpenPnlBid >= 0 ? "text-success" : "text-error"}>
                                   ${row.currentOpenPnlBid.toFixed(2)}
                                 </td>
+                                <td>{row.effect_label}</td>
+                                <td>{row.window_effect_label}</td>
                               </tr>
                             ))}
                           </tbody>
@@ -2496,6 +2681,128 @@ export default function CryptoMarkets() {
               </div>
               <pre className="overflow-x-auto rounded-box bg-base-100/70 p-3 text-[11px] leading-5">
                 <code>{relaxCandidatePatchToml}</code>
+              </pre>
+            </div>
+          ) : null}
+          {subtypeFocusPatchToml ? (
+            <div className="mb-3 rounded-box bg-info/10 px-3 py-2 text-xs">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 font-medium">
+                  <span>Subtype Patch 建议</span>
+                  {subtypePatchExport?.export_sha ? (
+                    <span className="badge badge-ghost badge-sm">
+                      sha {subtypePatchExport.export_sha.slice(0, 8)}
+                    </span>
+                  ) : null}
+                  {subtypePatchExport?.field_level ? (
+                    <span className="badge badge-info badge-sm">
+                      字段级 {subtypePatchExport.selected_field_count ?? 0}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="btn btn-xs btn-outline"
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(subtypeFocusPatchToml);
+                        setPatchCopyState("copied");
+                        window.setTimeout(() => setPatchCopyState("idle"), 2000);
+                      } catch {
+                        setPatchCopyState("failed");
+                        window.setTimeout(() => setPatchCopyState("idle"), 2000);
+                      }
+                    }}
+                  >
+                    复制 subtype Patch
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-xs btn-outline"
+                    onClick={() => {
+                      const anchor = document.createElement("a");
+                      anchor.href = cryptoOverridePatchDownloadPath("subtype_focus");
+                      anchor.download =
+                        subtypePatchExport?.filename ?? "crypto_subtype_focus_override_patch.toml";
+                      anchor.click();
+                    }}
+                  >
+                    下载 subtype TOML
+                  </button>
+                </div>
+              </div>
+              <div className="mb-2 opacity-70">
+                {subtypePatchExport?.focus_label ?? "当前主导 subtype"}
+                {" · "}
+                {subtypePatchExport?.action_label ?? "继续观察"}
+              </div>
+              {subtypePatchExport?.note ? (
+                <div className="mb-2 opacity-60">{subtypePatchExport.note}</div>
+              ) : null}
+              <pre className="overflow-x-auto rounded-box bg-base-100/70 p-3 text-[11px] leading-5">
+                <code>{subtypeFocusPatchToml}</code>
+              </pre>
+            </div>
+          ) : null}
+          {assetFocusPatchToml ? (
+            <div className="mb-3 rounded-box bg-warning/10 px-3 py-2 text-xs">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 font-medium">
+                  <span>资产 Patch 建议</span>
+                  {assetPatchExport?.export_sha ? (
+                    <span className="badge badge-ghost badge-sm">
+                      sha {assetPatchExport.export_sha.slice(0, 8)}
+                    </span>
+                  ) : null}
+                  {assetPatchExport?.field_level ? (
+                    <span className="badge badge-warning badge-sm">
+                      字段级 {assetPatchExport.selected_field_count ?? 0}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="btn btn-xs btn-outline"
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(assetFocusPatchToml);
+                        setPatchCopyState("copied");
+                        window.setTimeout(() => setPatchCopyState("idle"), 2000);
+                      } catch {
+                        setPatchCopyState("failed");
+                        window.setTimeout(() => setPatchCopyState("idle"), 2000);
+                      }
+                    }}
+                  >
+                    复制资产 Patch
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-xs btn-outline"
+                    onClick={() => {
+                      const anchor = document.createElement("a");
+                      anchor.href = cryptoOverridePatchDownloadPath("asset_focus");
+                      anchor.download =
+                        assetPatchExport?.filename ?? "crypto_asset_focus_override_patch.toml";
+                      anchor.click();
+                    }}
+                  >
+                    下载资产 TOML
+                  </button>
+                </div>
+              </div>
+              <div className="mb-2 opacity-70">
+                {assetPatchExport?.focus_label ?? "当前主导资产"}
+                {" · "}
+                {assetPatchExport?.action_label ?? "继续观察"}
+              </div>
+              {assetPatchExport?.note ? (
+                <div className="mb-2 opacity-60">{assetPatchExport.note}</div>
+              ) : null}
+              <pre className="overflow-x-auto rounded-box bg-base-100/70 p-3 text-[11px] leading-5">
+                <code>{assetFocusPatchToml}</code>
               </pre>
             </div>
           ) : null}

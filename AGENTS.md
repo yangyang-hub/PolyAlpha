@@ -83,6 +83,31 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`
+- Change: Fixed crypto auto-patch bookkeeping so relax step-cooldown now only blocks on recently runtime-applied `relax_candidate` patches instead of any reviewed/exported relax artifact, widened auto-patch effectiveness history to include every runtime-applied crypto patch rather than only the auto-apply task's records, and separated the read-only “recent rows” view from the full recent-effect set so relax-guard and relax-pressure summaries are no longer distorted by the UI's Top-8 truncation.
+- Why: The previous implementation could suppress `consider_relax` just because someone reviewed a relax patch without applying it, ignored manually/AI-applied runtime patches when computing effectiveness and repeated-effective suppression, and let display truncation leak into backend summaries that were meant to describe the full recent crypto automation state.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Tightened crypto patch pacing by storing selected target fields on generated/apply-time patch audit records, making auto-apply advance only one highest-priority field per scope per pass, adding relax step-cooldown suppression for repeated `consider_relax` on the same scopes, expanding the `24h` relax-guard summary with cadence-block counts plus short-window follow-through labels, and exposing new read-only subtype/asset field-summary sentences and an `资产 24h 压力` panel with a matching long-window asset patch candidate export.
+- Why: After moving crypto automation to field-level patches, the next gap was pacing those field steps so scopes do not tighten or relax too quickly while also surfacing clearer one-line subtype/asset actions and a long-window asset candidate view for ongoing optimization work.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Changed crypto auto-apply to act in field-level steps by collapsing auto-tighten patch rows to one highest-priority field per selected scope and limiting auto-apply to one row per scope per pass, added a richer `24h` relax-guard aftermath summary with continuing-pressure vs stabilizing labels plus per-scope follow-up bad exits/realized/open PnL, surfaced subtype/asset summary labels more directly, and added a read-only `资产 24h 压力` panel backed by a new asset-level 24h window summary.
+- Why: The next optimization pass needed auto-tightening to behave as conservatively as the field-level guidance already implied, while also showing whether the 24h slow-window guard is still blocking buckets that remain under pressure and which assets are carrying the longest-lived crypto stress.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Converted crypto override export artifacts (`full`, `selected`, `cooldown_priority`, `relax_candidate`) to field-level outputs that collapse each selected row to its highest-priority field, added read-only `subtype_focus` and `asset_focus` patch export modes plus `/crypto` panels for those focused TOML previews, expanded the `24h` relax-guard summary with continuing-pressure vs stabilizing counts and per-scope follow-up bad-exit/realized/effect labels, and exposed the new focus metadata through `/api/status`.
+- Why: The optimization plan called for making exported patch artifacts match the backend's field-level guidance instead of still shipping whole-row changes, while also adding operator-visible evidence for whether the `24h` relax guard is helping and giving AI/read-only consumers direct subtype/asset patch candidates.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`
+- Change: Refined the staged crypto relax path again so fallback now walks single-field post-entry steps in order (`hold_edge`, `capital_efficiency`, `model_buffer`, then edge-decay controls) before widening into broader post-entry or entry fallback, and reused the same staged helper in both relax-tier evaluation and focused relax export generation.
+- Why: After the previous relax pass still allowed broader post-entry loosening sooner than necessary, the next safety improvement was to make rollback proceed in smaller single-field steps before touching wider holding/exit or entry controls.
+
+### 2026-03-27
 - Area: `crates/pa-monitor/src/api.rs`, `frontend/src/pages/CryptoMarkets.tsx`
 - Change: Fixed crypto auto-patch `effective_streak` to mean a true most-recent consecutive effective streak instead of a lifetime effective count, reused that stricter streak for repeated-effective suppression, made the `24h` relax guard compute slow-window pressure directly from scope labels instead of only from currently active cooldown buckets, and expanded the read-only `24h` guard panel to show every blocked scope rather than just the first row.
 - Why: The previous implementation could suggest `consider_relax` after merely accumulating three historical effective outcomes and silently dropped the slow-window guard as soon as a bucket left cooldown, while the UI also hid all but one blocked scope from operators.
@@ -121,6 +146,21 @@ This file records repository-specific working agreements, high-level project con
 - Area: `crates/pa-monitor/src/diagnostics.rs`, `crates/pa-monitor/src/api.rs`
 - Change: Canonicalized weather rejection city labels through shared weather metadata before storing city summaries, and switched `/api/status.weather_rejection_summary.retained_window_minutes` to read the monitor retention horizon from a single diagnostics helper instead of duplicating `12 * 60`.
 - Why: The new weather city blocker summary should not split aliases like `NYC` vs `New York`, and the retained-window label should stay tied to the actual diagnostics retention setting instead of drifting through duplicated constants.
+
+### 2026-03-27
+- Area: `crates/pa-core/src/weather.rs`
+- Change: Moved London back to `trade_enabled = false` and removed it from `trade_enabled_weather_location_names()`, updating the shared weather metadata tests to treat London as audit-only again.
+- Why: Met Office forecast calls were repeatedly hitting `429` rate limits and London was adding unstable international noise to the live weather path, so it should be paused while keeping the provider/archive audit wiring intact.
+
+### 2026-03-27
+- Area: `crates/pa-strategy/src/utils.rs`, `crates/pa-strategy/src/weather.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `crates/pa-strategy/src/smart_money.rs`, `crates/pa-strategy/src/engine.rs`
+- Change: Added a shared `floor_price_to_tick()` helper and applied it to weather/crypto/smart-money exit opportunities plus the universal stop-loss safety net so sell prices are floored to each market's `tick_size` before execution, and extended engine cooldown handling so deterministic tick-size validation failures cool down for `600s` instead of retrying every minute.
+- Why: Live sell exits were trying to post invalid prices like `0.995` into `0.01`-tick markets, causing local CLOB order-builder failures and repeated retry spam even though the fix is simply to align exit prices to valid market ticks.
+
+### 2026-03-27
+- Area: `crates/pa-monitor/src/api.rs`, `crates/pa-strategy/src/weather.rs`, `frontend/src/api.ts`, `frontend/src/pages/WeatherStrategy.tsx`
+- Change: Removed `unsupported_city` from the weather blocker Top summaries while preserving it as a separate ignored-scan count on `/api/status` and the weather page, and updated the weather strategy test suite so the empty-target-city path now correctly treats London as non-tradeable after its audit-only rollback.
+- Why: Once London/Seoul were paused or audit-only, `unsupported_city` began dominating the blocker summary and hiding the real trading frictions, and the weather tests needed to match the new shared trade-enabled city set instead of still expecting London to pass through.
 
 ### 2026-03-27
 - Area: `crates/pa-monitor/src/diagnostics.rs`, `crates/pa-monitor/src/api.rs`, `crates/pa-strategy/src/weather.rs`, `frontend/src/api.ts`, `frontend/src/pages/WeatherStrategy.tsx`

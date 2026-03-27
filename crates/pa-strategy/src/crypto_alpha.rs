@@ -26,6 +26,7 @@ use pa_monitor::diagnostics::{
 };
 
 use crate::profitability::ProfitCalculator;
+use crate::utils::floor_price_to_tick;
 use crate::weather::{contains_word, normal_cdf, parse_target_date_server_local, with_retry};
 
 // ──── Asset Mapping ────
@@ -5939,17 +5940,20 @@ impl CryptoAlphaStrategy {
         let condition_id = market.map(|m| m.condition_id).unwrap_or_default();
         let question = market.map(|m| m.question.clone()).unwrap_or_default();
         let fee_rate_bps = market.map(|m| m.fee_rate_bps).unwrap_or(200);
+        let executable_bid = market
+            .map(|m| floor_price_to_tick(best_bid, m.tick_size))
+            .unwrap_or_else(|| best_bid.round_dp(2));
 
         let est = self
             .profit_calc
-            .directional_sell_profit(best_bid, avg_cost, size, fee_rate_bps);
+            .directional_sell_profit(executable_bid, avg_cost, size, fee_rate_bps);
 
         TradingOpportunity {
             id: Uuid::now_v7(),
             strategy_type: StrategyType::CryptoAlpha,
             condition_id,
             question: format!("[EXIT] {}", question),
-            spread: best_bid - avg_cost,
+            spread: executable_bid - avg_cost,
             estimated_profit: est.net_profit,
             size,
             min_profit_retention_ratio_multiplier: None,
@@ -5962,7 +5966,7 @@ impl CryptoAlphaStrategy {
             execution_plan: ExecutionPlan::DirectionalBuy {
                 token_id,
                 side: TradeSide::Sell,
-                price: best_bid,
+                price: executable_bid,
                 size,
                 condition_id,
             },

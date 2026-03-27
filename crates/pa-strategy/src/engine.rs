@@ -1,4 +1,5 @@
 use crate::profitability::ProfitCalculator;
+use crate::utils::floor_price_to_tick;
 use crate::weather::weather_event_key_for_opportunity_question;
 use alloy::primitives::{B256, U256};
 use chrono::{TimeDelta, Utc};
@@ -1601,6 +1602,13 @@ impl StrategyEngine {
                 // significantly — use a longer cooldown to avoid retry spam.
                 if err_msg.contains("lot size") {
                     self.set_cooldown(opp.condition_id, opp.strategy_type, 600);
+                } else if err_msg.contains("Minimum tick size")
+                    || (err_msg.contains("decimal places") && err_msg.contains("Price"))
+                {
+                    // Price precision mismatches are deterministic local build failures.
+                    // Give them a longer cooldown so we do not retry the same broken exit
+                    // every scan tick while waiting for a code/config fix or a new book price.
+                    self.set_cooldown(opp.condition_id, opp.strategy_type, 600);
                 } else if err_msg.contains("couldn't be fully filled")
                     || err_msg.contains("fully filled or killed")
                 {
@@ -1913,14 +1921,17 @@ impl StrategyEngine {
                 "[STOP-LOSS] Forced exit — position lost >= 50%"
             );
 
+            let executable_bid = market
+                .map(|m| floor_price_to_tick(best_bid, m.tick_size))
+                .unwrap_or_else(|| best_bid.round_dp(2));
             let opp = TradingOpportunity {
                 id: Uuid::new_v4(),
                 condition_id,
                 question: format!("[STOP-LOSS] Force exit token {}", pos.token_id),
                 strategy_type: st,
-                spread: pos.avg_cost - best_bid,
+                spread: pos.avg_cost - executable_bid,
                 size: sell_size,
-                estimated_profit: (best_bid - pos.avg_cost) * sell_size, // negative = loss
+                estimated_profit: (executable_bid - pos.avg_cost) * sell_size, // negative = loss
                 min_profit_retention_ratio_multiplier: None,
                 max_slippage_bps_multiplier: None,
                 min_size_retention_ratio_multiplier: None,
@@ -1931,7 +1942,7 @@ impl StrategyEngine {
                 execution_plan: ExecutionPlan::DirectionalBuy {
                     token_id: pos.token_id,
                     side: TradeSide::Sell,
-                    price: best_bid,
+                    price: executable_bid,
                     size: sell_size,
                     condition_id,
                 },
