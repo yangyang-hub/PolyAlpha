@@ -975,9 +975,9 @@ impl SmartMoneyStrategy {
         reason: &str,
     ) -> TradingOpportunity {
         let executable_bid = floor_price_to_tick(best_bid, tick_size);
-        let est = self
-            .profit_calc
-            .directional_sell_profit(executable_bid, avg_cost, size, fee_rate_bps);
+        let est =
+            self.profit_calc
+                .directional_sell_profit(executable_bid, avg_cost, size, fee_rate_bps);
         let attributed_leaders = self.attribute_exit_to_leaders(token_id, size, est.net_profit);
         tracing::info!(
             token_id = %token_id,

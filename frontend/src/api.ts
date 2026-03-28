@@ -359,6 +359,32 @@ export interface StatusResponse {
       pressure_score: number;
     }[];
   };
+  crypto_same_day_major_range_summary?: {
+    leader_scope_label: string;
+    leader_label: string;
+    recommended_action: "hold" | "observe" | "continue_tighten" | "consider_relax";
+    action_label: string;
+    field_summary_label: string;
+    uses_template_guidance?: boolean;
+    target_fields: string[];
+    trade_count_24h: number;
+    realized_pnl_24h: string;
+    bad_exit_count_24h: number;
+    open_positions: number;
+    open_pnl_bid: string;
+  };
+  crypto_eth_same_day_range_window_summary?: {
+    leader_label: string;
+    row_count: number;
+    rows: {
+      window_label: string;
+      trade_count: number;
+      realized_pnl: string;
+      bad_exit_count: number;
+      open_positions: number;
+      open_pnl_bid: string;
+    }[];
+  };
   smart_money_signal_summary?: {
     recent_signal_count: number;
     recent_entry_attempts: number;

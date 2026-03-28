@@ -864,6 +864,15 @@ export default function CryptoMarkets() {
       realizedPnl: Number(row.realized_pnl ?? 0),
       openPnlBid: Number(row.open_pnl_bid ?? 0),
     })) ?? [];
+  const sameDayMajorRangeSummary = status?.crypto_same_day_major_range_summary;
+  const sameDayMajorRangeRealizedPnl = Number(sameDayMajorRangeSummary?.realized_pnl_24h ?? 0);
+  const sameDayMajorRangeOpenPnlBid = Number(sameDayMajorRangeSummary?.open_pnl_bid ?? 0);
+  const ethSameDayRangeWindowRows =
+    status?.crypto_eth_same_day_range_window_summary?.rows.map((row) => ({
+      ...row,
+      realizedPnl: Number(row.realized_pnl ?? 0),
+      openPnlBid: Number(row.open_pnl_bid ?? 0),
+    })) ?? [];
   const localCooldownPriorityPatchToml = [
     renderPatchRowsToToml(cooldownPriorityEntryPatchRows),
     renderPatchRowsToToml(cooldownPriorityPostEntryPatchRows),
@@ -1470,6 +1479,113 @@ export default function CryptoMarkets() {
                       <td>{bucketLabel(row.resolution_bucket)}</td>
                       <td>{shapeLabel(row.shape as "range" | "directional")}</td>
                       <td>{row.asset_class}</td>
+                      <td>{row.trade_count}</td>
+                      <td>{row.bad_exit_count}</td>
+                      <td className={row.realizedPnl >= 0 ? "text-success" : "text-error"}>
+                        ${row.realizedPnl.toFixed(2)}
+                      </td>
+                      <td>{row.open_positions}</td>
+                      <td className={row.openPnlBid >= 0 ? "text-success" : "text-error"}>
+                        ${row.openPnlBid.toFixed(2)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {sameDayMajorRangeSummary ? (
+        <div className="card bg-base-200 shadow-sm">
+          <div className="card-body p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="card-title text-base">same-day major range</h2>
+                <div className="text-xs opacity-60">
+                  只读汇总当前最需要关注的主流币 same-day 区间盘压力，用来判断是否仍要继续收紧 ETH/BTC 这类 range churn
+                </div>
+              </div>
+              <span className="badge badge-outline badge-sm">
+                {sameDayMajorRangeSummary.recommended_action}
+              </span>
+            </div>
+            <div className="mb-2 text-xs text-base-content/70">
+              {sameDayMajorRangeSummary.leader_label}
+            </div>
+            <div className="mb-2 text-xs text-base-content/70">
+              {sameDayMajorRangeSummary.action_label}
+            </div>
+            <div className="mb-3 text-xs text-base-content/70">
+              {sameDayMajorRangeSummary.field_summary_label}
+            </div>
+            {sameDayMajorRangeSummary.uses_template_guidance ? (
+              <div className="mb-3 text-xs text-warning">
+                当前没有 active cooldown scope，这里显示的是模板级收紧方向，不是 live auto-patch 已选中的字段。
+              </div>
+            ) : null}
+            <div className="stats stats-vertical bg-base-100/70 shadow-sm md:stats-horizontal">
+              <div className="stat px-4 py-3">
+                <div className="stat-title text-xs">24h 成交</div>
+                <div className="stat-value text-lg">{sameDayMajorRangeSummary.trade_count_24h}</div>
+              </div>
+              <div className="stat px-4 py-3">
+                <div className="stat-title text-xs">24h 坏退出</div>
+                <div className="stat-value text-lg">{sameDayMajorRangeSummary.bad_exit_count_24h}</div>
+              </div>
+              <div className="stat px-4 py-3">
+                <div className="stat-title text-xs">24h 已实现</div>
+                <div
+                  className={`stat-value text-lg ${sameDayMajorRangeRealizedPnl >= 0 ? "text-success" : "text-error"}`}
+                >
+                  ${sameDayMajorRangeRealizedPnl.toFixed(2)}
+                </div>
+              </div>
+              <div className="stat px-4 py-3">
+                <div className="stat-title text-xs">当前持仓 / Bid</div>
+                <div className="stat-value text-lg">{sameDayMajorRangeSummary.open_positions}</div>
+                <div
+                  className={`stat-desc ${sameDayMajorRangeOpenPnlBid >= 0 ? "text-success" : "text-error"}`}
+                >
+                  ${sameDayMajorRangeOpenPnlBid.toFixed(2)}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {!!ethSameDayRangeWindowRows.length && (
+        <div className="card bg-base-200 shadow-sm">
+          <div className="card-body p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="card-title text-base">ETH same-day range</h2>
+                <div className="text-xs opacity-60">
+                  只读展示 ETH same-day 区间盘近窗 churn，方便判断这类盘是否还在持续小亏
+                </div>
+              </div>
+            </div>
+            <div className="mb-3 text-xs text-base-content/70">
+              {status?.crypto_eth_same_day_range_window_summary?.leader_label}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="table table-sm">
+                <thead>
+                  <tr>
+                    <th>窗口</th>
+                    <th>成交数</th>
+                    <th>坏退出</th>
+                    <th>已实现</th>
+                    <th>当前持仓</th>
+                    <th>当前浮盈亏(Bid)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {ethSameDayRangeWindowRows.map((row) => (
+                    <tr key={row.window_label}>
+                      <td>{row.window_label}</td>
                       <td>{row.trade_count}</td>
                       <td>{row.bad_exit_count}</td>
                       <td className={row.realizedPnl >= 0 ? "text-success" : "text-error"}>

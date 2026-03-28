@@ -82,6 +82,16 @@ This file records repository-specific working agreements, high-level project con
 
 ## Change Log
 
+### 2026-03-28
+- Area: `crates/pa-monitor/src/api.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `crates/pa-core/src/config.rs`, `config/default.toml`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Fixed crypto exit-shape attribution so binary “between” questions now count as `range` in exit windows, bad-exit counts, cooldown scoring, and auto-patch evaluation; added dedicated `same_day major range` tightening knobs (probability, size, min-edge, max-spread, capital-efficiency, hold-edge) to the runtime strategy; and added read-only `/crypto` summaries for `same_day major range` plus `ETH same-day range` rolling churn.
+- Why: Live losses were concentrated in repeated ETH same-day range churn, but grouped binary range exits were still being summarized as directional, which prevented cooldown/auto-patch state from lining up with the actual losing shape and left no focused read-only view of the stressed major-range bucket.
+
+### 2026-03-28
+- Area: `crates/pa-strategy/src/crypto_alpha.rs`, `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Taught the strategy's same-day/next-day range bad-exit cooldown gates to infer grouped-binary crypto `range` questions from market text instead of only trusting `market_type == "range"`, and marked the read-only `same_day major range` summary as explicit template guidance whenever no live active-cooldown scope exists.
+- Why: The monitor/UI path had already learned to classify binary “between” markets as `range`, but runtime entry cooldown gating could still miss those bad exits, while the major-range summary could otherwise look live-data-driven even when it was only showing fallback guidance.
+
 ### 2026-03-27
 - Area: `crates/pa-monitor/src/api.rs`
 - Change: Fixed crypto auto-patch bookkeeping so relax step-cooldown now only blocks on recently runtime-applied `relax_candidate` patches instead of any reviewed/exported relax artifact, widened auto-patch effectiveness history to include every runtime-applied crypto patch rather than only the auto-apply task's records, and separated the read-only “recent rows” view from the full recent-effect set so relax-guard and relax-pressure summaries are no longer distorted by the UI's Top-8 truncation.

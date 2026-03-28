@@ -4354,9 +4354,9 @@ impl WeatherAlphaStrategy {
             .map(|m| floor_price_to_tick(best_bid, m.tick_size))
             .unwrap_or_else(|| best_bid.round_dp(2));
 
-        let est = self
-            .profit_calc
-            .directional_sell_profit(executable_bid, avg_cost, size, fee_rate_bps);
+        let est =
+            self.profit_calc
+                .directional_sell_profit(executable_bid, avg_cost, size, fee_rate_bps);
 
         TradingOpportunity {
             id: Uuid::now_v7(),

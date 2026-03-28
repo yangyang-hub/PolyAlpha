@@ -2808,6 +2808,76 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
             "rows": [],
         })
     };
+    let crypto_same_day_major_range_summary = if let Some(repo) = &state.repository {
+        let positions = state.positions.read().await.clone();
+        let trade_rows = repo
+            .load_trade_history(500, Some("crypto_alpha"), None, None)
+            .await
+            .unwrap_or_default();
+        let recent_exits = crate::diagnostics::recent_crypto_exit_decisions()
+            .into_iter()
+            .take(200)
+            .collect::<Vec<_>>();
+        let current_scope_scores =
+            build_current_cooldown_scope_scores(&crypto_cooldown_buckets, &trade_rows, &positions);
+        let patches = crypto_auto_patch_effectiveness_summary
+            .get("patches")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let entry_patch_rows = crypto_override_patch_preview
+            .get("rows")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let post_entry_patch_rows = crypto_post_entry_override_patch_preview
+            .get("rows")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        build_same_day_major_range_summary(
+            &current_scope_scores,
+            &patches,
+            &entry_patch_rows,
+            &post_entry_patch_rows,
+            &trade_rows,
+            &positions,
+            &recent_exits,
+        )
+    } else {
+        json!({
+            "leader_scope_label": "",
+            "leader_label": "same_day major range 当前无明显样本压力",
+            "recommended_action": "observe",
+            "action_label": "same_day major range 建议：当前无 active cooldown scope，以下为模板级收紧方向",
+            "field_summary_label": "same_day major range 模板字段建议：先看 max_spread_multiplier",
+            "uses_template_guidance": true,
+            "target_fields": [],
+            "trade_count_24h": 0,
+            "realized_pnl_24h": Decimal::ZERO,
+            "bad_exit_count_24h": 0,
+            "open_positions": 0,
+            "open_pnl_bid": Decimal::ZERO,
+        })
+    };
+    let crypto_eth_same_day_range_window_summary = if let Some(repo) = &state.repository {
+        let positions = state.positions.read().await.clone();
+        let trade_rows = repo
+            .load_trade_history(500, Some("crypto_alpha"), None, None)
+            .await
+            .unwrap_or_default();
+        let recent_exits = crate::diagnostics::recent_crypto_exit_decisions()
+            .into_iter()
+            .take(200)
+            .collect::<Vec<_>>();
+        build_eth_same_day_range_window_summary(&trade_rows, &positions, &recent_exits)
+    } else {
+        json!({
+            "leader_label": "ETH same-day range 当前无明显样本压力",
+            "row_count": 0,
+            "rows": [],
+        })
+    };
 
     if top_count(&gate_scale_reason_counts_view) > top_count(&reason_counts)
         && !gate_scale_reason_counts_view.is_empty()
@@ -2922,6 +2992,8 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         "crypto_bucket_window_summary": crypto_bucket_window_summary,
         "crypto_subtype_window_summary": crypto_subtype_window_summary,
         "crypto_asset_long_window_summary": crypto_asset_long_window_summary,
+        "crypto_same_day_major_range_summary": crypto_same_day_major_range_summary,
+        "crypto_eth_same_day_range_window_summary": crypto_eth_same_day_range_window_summary,
         "smart_money_signal_summary": {
             "recent_signal_count": smart_money_recent_entries.len(),
             "recent_entry_attempts": smart_money_recent_entries.len(),
@@ -3538,6 +3610,14 @@ fn normalized_market_shape_label(market_type: Option<&str>) -> &'static str {
     }
 }
 
+fn infer_exit_shape_label(market_type: Option<&str>, question: Option<&str>) -> &'static str {
+    if infer_trade_shape(question) == "range" {
+        "range"
+    } else {
+        normalized_market_shape_label(market_type)
+    }
+}
+
 fn patch_preview_multiplier_for(target_field: &str, direction: &str) -> Option<&'static str> {
     match (target_field, direction) {
         ("min_edge_multiplier", "loosen") => Some("0.95"),
@@ -3742,8 +3822,9 @@ fn build_crypto_auto_patch_effectiveness_entries(
                                     && normalized_event_subtype_label(
                                         decision.event_subtype.as_deref(),
                                     ) == event_subtype
-                                    && normalized_market_shape_label(
+                                    && infer_exit_shape_label(
                                         decision.market_type.as_deref(),
+                                        Some(decision.question.as_str()),
                                     ) == shape
                             },
                         )
@@ -3919,8 +4000,10 @@ fn build_crypto_bucket_window_summary(
                             decision.recorded_at >= window_start
                                 && normalized_resolution_bucket_label(decision.days_to_resolution)
                                     == resolution_bucket
-                                && normalized_market_shape_label(decision.market_type.as_deref())
-                                    == shape
+                                && infer_exit_shape_label(
+                                    decision.market_type.as_deref(),
+                                    Some(decision.question.as_str()),
+                                ) == shape
                                 && asset_class_for_asset_label(
                                     decision.asset.as_deref().unwrap_or_default(),
                                 ) == asset_class
@@ -4081,8 +4164,9 @@ fn build_crypto_subtype_window_summary(
                                     && normalized_resolution_bucket_label(
                                         decision.days_to_resolution,
                                     ) == resolution_bucket
-                                    && normalized_market_shape_label(
+                                    && infer_exit_shape_label(
                                         decision.market_type.as_deref(),
+                                        Some(decision.question.as_str()),
                                     ) == shape
                                     && asset_class_for_asset_label(
                                         decision.asset.as_deref().unwrap_or_default(),
@@ -4266,6 +4350,346 @@ fn build_crypto_asset_long_window_summary(
             .then_with(|| a.asset.cmp(&b.asset))
     });
     rows
+}
+
+fn build_same_day_major_range_summary(
+    current_scope_scores: &std::collections::HashMap<String, (i64, i64, i64, i64)>,
+    patches: &[Value],
+    entry_patch_rows: &[Value],
+    post_entry_patch_rows: &[Value],
+    trade_rows: &[TradeHistoryRow],
+    positions: &[PositionApiEntry],
+    recent_exits: &[crate::diagnostics::CryptoExitDecision],
+) -> Value {
+    let now = Utc::now();
+    let window_start = now - chrono::Duration::hours(24);
+    let matching_scopes = current_scope_scores
+        .iter()
+        .filter_map(|(scope_label, (priority_score, _, _, _))| {
+            let (resolution_bucket, asset_class, _, shape) =
+                parse_bucketed_shaped_scope_label(scope_label)?;
+            if resolution_bucket == "same_day" && asset_class == "major" && shape == "range" {
+                Some((scope_label.clone(), *priority_score))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let leader_scope = matching_scopes
+        .iter()
+        .max_by_key(|(_, priority_score)| *priority_score)
+        .map(|(scope_label, _)| scope_label.clone())
+        .unwrap_or_default();
+    let recommended_action = if !leader_scope.is_empty() {
+        patches
+            .iter()
+            .find(|patch| {
+                patch
+                    .get("scope_labels")
+                    .and_then(Value::as_array)
+                    .map(|labels| {
+                        labels
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .any(|label| label == leader_scope)
+                    })
+                    .unwrap_or(false)
+            })
+            .and_then(|patch| patch.get("recommended_action"))
+            .and_then(Value::as_str)
+            .unwrap_or("observe")
+            .to_string()
+    } else {
+        "observe".to_string()
+    };
+    let using_template_guidance = leader_scope.is_empty();
+    let mut target_fields = if !leader_scope.is_empty() && recommended_action == "consider_relax" {
+        build_scope_relax_field_targets(entry_patch_rows, post_entry_patch_rows, &leader_scope, 4)
+    } else if !leader_scope.is_empty() {
+        let mut fields = collect_scope_field_targets_by_support(entry_patch_rows, &leader_scope, 4);
+        if fields.len() < 4 {
+            let remaining = 4usize.saturating_sub(fields.len());
+            let mut post_entry_fields = collect_scope_field_targets_by_support(
+                post_entry_patch_rows,
+                &leader_scope,
+                remaining,
+            );
+            fields.append(&mut post_entry_fields);
+            fields.dedup();
+            fields.truncate(4);
+        }
+        fields
+    } else {
+        vec![
+            "max_spread_multiplier".to_string(),
+            "size_multiplier".to_string(),
+            "hold_edge_multiplier".to_string(),
+            "capital_efficiency_multiplier".to_string(),
+        ]
+    };
+    target_fields.dedup();
+
+    let trade_count = trade_rows
+        .iter()
+        .filter(|trade| {
+            let executed_at = trade.executed_at.unwrap_or(trade.created_at);
+            executed_at >= window_start
+                && infer_trade_resolution_bucket(
+                    trade.question.as_deref(),
+                    trade.executed_at,
+                    trade.created_at,
+                ) == "same_day"
+                && infer_trade_shape(trade.question.as_deref()) == "range"
+                && asset_class_for_asset_label(infer_trade_asset(trade.question.as_deref()))
+                    == "major"
+        })
+        .count();
+    let realized_pnl: Decimal = trade_rows
+        .iter()
+        .filter(|trade| {
+            let executed_at = trade.executed_at.unwrap_or(trade.created_at);
+            executed_at >= window_start
+                && infer_trade_resolution_bucket(
+                    trade.question.as_deref(),
+                    trade.executed_at,
+                    trade.created_at,
+                ) == "same_day"
+                && infer_trade_shape(trade.question.as_deref()) == "range"
+                && asset_class_for_asset_label(infer_trade_asset(trade.question.as_deref()))
+                    == "major"
+        })
+        .map(|trade| trade.actual_profit.unwrap_or(Decimal::ZERO))
+        .sum();
+    let bad_exit_count = recent_exits
+        .iter()
+        .filter(|decision| {
+            decision.recorded_at >= window_start
+                && normalized_resolution_bucket_label(decision.days_to_resolution) == "same_day"
+                && infer_exit_shape_label(
+                    decision.market_type.as_deref(),
+                    Some(decision.question.as_str()),
+                ) == "range"
+                && asset_class_for_asset_label(decision.asset.as_deref().unwrap_or_default())
+                    == "major"
+                && matches!(
+                    decision.reason.as_str(),
+                    "model_reversal" | "relative_stop_loss" | "capital_efficiency"
+                )
+        })
+        .count();
+    let open_positions = positions
+        .iter()
+        .filter(|position| {
+            position.resolution_bucket.as_deref() == Some("same_day")
+                && infer_position_shape(position) == "range"
+                && asset_class_for_asset_label(position.asset.as_deref().unwrap_or_default())
+                    == "major"
+        })
+        .count();
+    let open_pnl_bid: Decimal = positions
+        .iter()
+        .filter(|position| {
+            position.resolution_bucket.as_deref() == Some("same_day")
+                && infer_position_shape(position) == "range"
+                && asset_class_for_asset_label(position.asset.as_deref().unwrap_or_default())
+                    == "major"
+        })
+        .map(|position| {
+            position
+                .unrealized_pnl_bid
+                .or(position.unrealized_pnl)
+                .unwrap_or(Decimal::ZERO)
+        })
+        .sum();
+    let leader_label = if trade_count == 0
+        && realized_pnl == Decimal::ZERO
+        && bad_exit_count == 0
+        && open_positions == 0
+        && open_pnl_bid == Decimal::ZERO
+    {
+        "same_day major range 当前无明显样本压力".to_string()
+    } else {
+        format!(
+            "same_day major range 近24h 成交 {} 笔，坏退出 {}，已实现 ${:.2}，当前持仓 {} 笔 / Bid 浮盈亏 ${:.2}",
+            trade_count, bad_exit_count, realized_pnl, open_positions, open_pnl_bid
+        )
+    };
+    let action_label = if using_template_guidance {
+        "same_day major range 建议：当前无 active cooldown scope，以下为模板级收紧方向".to_string()
+    } else if target_fields.is_empty() {
+        format!(
+            "same_day major range 建议：{}",
+            auto_patch_action_label(&recommended_action)
+        )
+    } else {
+        format!(
+            "same_day major range 建议：{}（{}）",
+            auto_patch_action_label(&recommended_action),
+            target_fields.join(" / ")
+        )
+    };
+    let field_summary_label = if using_template_guidance {
+        format!(
+            "same_day major range 模板字段建议：先看 {}",
+            target_fields
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "max_spread_multiplier".to_string())
+        )
+    } else if target_fields.is_empty() {
+        "same_day major range 字段建议：继续观察".to_string()
+    } else {
+        format!("same_day major range 字段建议：先动 {}", target_fields[0])
+    };
+
+    json!({
+        "leader_scope_label": leader_scope,
+        "leader_label": leader_label,
+        "recommended_action": recommended_action,
+        "action_label": action_label,
+        "field_summary_label": field_summary_label,
+        "uses_template_guidance": using_template_guidance,
+        "target_fields": target_fields,
+        "trade_count_24h": trade_count,
+        "realized_pnl_24h": realized_pnl,
+        "bad_exit_count_24h": bad_exit_count,
+        "open_positions": open_positions,
+        "open_pnl_bid": open_pnl_bid,
+    })
+}
+
+fn build_eth_same_day_range_window_summary(
+    trade_rows: &[TradeHistoryRow],
+    positions: &[PositionApiEntry],
+    recent_exits: &[crate::diagnostics::CryptoExitDecision],
+) -> Value {
+    let now = Utc::now();
+    let windows = [
+        ("1h", chrono::Duration::hours(1)),
+        ("6h", chrono::Duration::hours(6)),
+        ("24h", chrono::Duration::hours(24)),
+    ];
+    let mut rows = Vec::new();
+    let mut leader_trade_count = 0usize;
+    let mut leader_realized_pnl = Decimal::ZERO;
+    let mut leader_bad_exit_count = 0usize;
+    let mut leader_open_positions = 0usize;
+    let mut leader_open_pnl_bid = Decimal::ZERO;
+    for (window_label, window_duration) in windows {
+        let window_start = now - window_duration;
+        let trade_count = trade_rows
+            .iter()
+            .filter(|trade| {
+                let executed_at = trade.executed_at.unwrap_or(trade.created_at);
+                executed_at >= window_start
+                    && infer_trade_resolution_bucket(
+                        trade.question.as_deref(),
+                        trade.executed_at,
+                        trade.created_at,
+                    ) == "same_day"
+                    && infer_trade_shape(trade.question.as_deref()) == "range"
+                    && infer_trade_asset(trade.question.as_deref()) == "Ethereum"
+            })
+            .count();
+        let realized_pnl: Decimal = trade_rows
+            .iter()
+            .filter(|trade| {
+                let executed_at = trade.executed_at.unwrap_or(trade.created_at);
+                executed_at >= window_start
+                    && infer_trade_resolution_bucket(
+                        trade.question.as_deref(),
+                        trade.executed_at,
+                        trade.created_at,
+                    ) == "same_day"
+                    && infer_trade_shape(trade.question.as_deref()) == "range"
+                    && infer_trade_asset(trade.question.as_deref()) == "Ethereum"
+            })
+            .map(|trade| trade.actual_profit.unwrap_or(Decimal::ZERO))
+            .sum();
+        let bad_exit_count = recent_exits
+            .iter()
+            .filter(|decision| {
+                decision.recorded_at >= window_start
+                    && normalized_resolution_bucket_label(decision.days_to_resolution) == "same_day"
+                    && infer_exit_shape_label(
+                        decision.market_type.as_deref(),
+                        Some(decision.question.as_str()),
+                    ) == "range"
+                    && decision.asset.as_deref() == Some("Ethereum")
+                    && matches!(
+                        decision.reason.as_str(),
+                        "model_reversal" | "relative_stop_loss" | "capital_efficiency"
+                    )
+            })
+            .count();
+        let open_positions = positions
+            .iter()
+            .filter(|position| {
+                position.resolution_bucket.as_deref() == Some("same_day")
+                    && infer_position_shape(position) == "range"
+                    && position.asset.as_deref() == Some("Ethereum")
+            })
+            .count();
+        let open_pnl_bid: Decimal = positions
+            .iter()
+            .filter(|position| {
+                position.resolution_bucket.as_deref() == Some("same_day")
+                    && infer_position_shape(position) == "range"
+                    && position.asset.as_deref() == Some("Ethereum")
+            })
+            .map(|position| {
+                position
+                    .unrealized_pnl_bid
+                    .or(position.unrealized_pnl)
+                    .unwrap_or(Decimal::ZERO)
+            })
+            .sum();
+        if trade_count == 0
+            && realized_pnl == Decimal::ZERO
+            && bad_exit_count == 0
+            && open_positions == 0
+            && open_pnl_bid == Decimal::ZERO
+        {
+            continue;
+        }
+        if window_label == "24h" {
+            leader_trade_count = trade_count;
+            leader_realized_pnl = realized_pnl;
+            leader_bad_exit_count = bad_exit_count;
+            leader_open_positions = open_positions;
+            leader_open_pnl_bid = open_pnl_bid;
+        }
+        rows.push(json!({
+            "window_label": window_label,
+            "trade_count": trade_count,
+            "realized_pnl": realized_pnl,
+            "bad_exit_count": bad_exit_count,
+            "open_positions": open_positions,
+            "open_pnl_bid": open_pnl_bid,
+        }));
+    }
+    let leader_label = if leader_trade_count == 0
+        && leader_realized_pnl == Decimal::ZERO
+        && leader_bad_exit_count == 0
+        && leader_open_positions == 0
+        && leader_open_pnl_bid == Decimal::ZERO
+    {
+        "ETH same-day range 当前无明显样本压力".to_string()
+    } else {
+        format!(
+            "ETH same-day range 近24h：成交 {}，坏退出 {}，已实现 ${:.2}，当前持仓 {} / Bid 浮盈亏 ${:.2}",
+            leader_trade_count,
+            leader_bad_exit_count,
+            leader_realized_pnl,
+            leader_open_positions,
+            leader_open_pnl_bid
+        )
+    };
+    json!({
+        "leader_label": leader_label,
+        "row_count": rows.len(),
+        "rows": rows,
+    })
 }
 
 fn scope_has_repeated_effective_auto_patches(
@@ -5493,7 +5917,10 @@ fn compute_scope_window_pressure_score(
                 decision.recorded_at >= window_start
                     && normalized_resolution_bucket_label(decision.days_to_resolution)
                         == resolution_bucket
-                    && normalized_market_shape_label(decision.market_type.as_deref()) == shape
+                    && infer_exit_shape_label(
+                        decision.market_type.as_deref(),
+                        Some(decision.question.as_str()),
+                    ) == shape
                     && asset_class_for_asset_label(decision.asset.as_deref().unwrap_or_default())
                         == asset_class
                     && (event_subtype == "any"
@@ -7775,5 +8202,28 @@ fn smart_money_leader_label(row: &pa_storage::models::SmartMoneyLeaderCandidateR
         label.to_string()
     } else {
         format!("leader_{}", &row.address[2..10.min(row.address.len())])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_infer_exit_shape_prefers_range_question_text() {
+        assert_eq!(
+            infer_exit_shape_label(
+                Some("binary"),
+                Some("Will the price of Ethereum be between $2,000 and $2,100 on March 28?")
+            ),
+            "range"
+        );
+        assert_eq!(
+            infer_exit_shape_label(
+                Some("binary"),
+                Some("Will Ethereum reach $2,200 on March 28?")
+            ),
+            "directional"
+        );
     }
 }
