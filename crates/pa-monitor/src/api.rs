@@ -926,7 +926,8 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
             matches!(
                 entry.reason.as_str(),
                 "model_reversal" | "relative_stop_loss"
-            ) && entry.market_type.as_deref() == Some(market_type)
+            ) && infer_exit_shape_label(entry.market_type.as_deref(), Some(entry.question.as_str()))
+                == normalized_shape_label(Some(market_type))
                 && entry.days_to_resolution == Some(target_days_to_resolution)
                 && (now - entry.recorded_at) <= cooldown_window
         }) {
@@ -981,7 +982,7 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
                 "kind": label_kind,
                 "asset": asset,
                 "event_subtype": subtype,
-                "shape": normalized_shape_label(Some(market_type)),
+                "shape": infer_exit_shape_label(Some(market_type), None),
                 "scope_label": scope_label,
                 "trigger_count": trigger_count,
                 "current_count": timestamps.len(),
@@ -2055,7 +2056,11 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         let key = (
             asset_class_for_label(Some(asset_label)).to_string(),
             normalized_event_subtype(decision.event_subtype.as_deref()).to_string(),
-            normalized_shape_label(decision.market_type.as_deref()).to_string(),
+            infer_exit_shape_label(
+                decision.market_type.as_deref(),
+                Some(decision.question.as_str()),
+            )
+            .to_string(),
             normalized_resolution_bucket(decision.days_to_resolution).to_string(),
         );
         *exit_bucket_reason_counts
@@ -4473,8 +4478,22 @@ fn build_same_day_major_range_summary(
                     == "major"
                 && matches!(
                     decision.reason.as_str(),
-                    "model_reversal" | "relative_stop_loss" | "capital_efficiency"
+                    "model_reversal" | "relative_stop_loss"
                 )
+        })
+        .count();
+    let capital_efficiency_exit_count = recent_exits
+        .iter()
+        .filter(|decision| {
+            decision.recorded_at >= window_start
+                && normalized_resolution_bucket_label(decision.days_to_resolution) == "same_day"
+                && infer_exit_shape_label(
+                    decision.market_type.as_deref(),
+                    Some(decision.question.as_str()),
+                ) == "range"
+                && asset_class_for_asset_label(decision.asset.as_deref().unwrap_or_default())
+                    == "major"
+                && decision.reason == "capital_efficiency"
         })
         .count();
     let open_positions = positions
@@ -4510,8 +4529,13 @@ fn build_same_day_major_range_summary(
         "same_day major range 当前无明显样本压力".to_string()
     } else {
         format!(
-            "same_day major range 近24h 成交 {} 笔，坏退出 {}，已实现 ${:.2}，当前持仓 {} 笔 / Bid 浮盈亏 ${:.2}",
-            trade_count, bad_exit_count, realized_pnl, open_positions, open_pnl_bid
+            "same_day major range 近24h 成交 {} 笔，坏退出 {}，效率退出 {}，已实现 ${:.2}，当前持仓 {} 笔 / Bid 浮盈亏 ${:.2}",
+            trade_count,
+            bad_exit_count,
+            capital_efficiency_exit_count,
+            realized_pnl,
+            open_positions,
+            open_pnl_bid
         )
     };
     let action_label = if using_template_guidance {
@@ -4553,6 +4577,7 @@ fn build_same_day_major_range_summary(
         "trade_count_24h": trade_count,
         "realized_pnl_24h": realized_pnl,
         "bad_exit_count_24h": bad_exit_count,
+        "capital_efficiency_exit_count_24h": capital_efficiency_exit_count,
         "open_positions": open_positions,
         "open_pnl_bid": open_pnl_bid,
     })
@@ -4618,8 +4643,21 @@ fn build_eth_same_day_range_window_summary(
                     && decision.asset.as_deref() == Some("Ethereum")
                     && matches!(
                         decision.reason.as_str(),
-                        "model_reversal" | "relative_stop_loss" | "capital_efficiency"
+                        "model_reversal" | "relative_stop_loss"
                     )
+            })
+            .count();
+        let capital_efficiency_exit_count = recent_exits
+            .iter()
+            .filter(|decision| {
+                decision.recorded_at >= window_start
+                    && normalized_resolution_bucket_label(decision.days_to_resolution) == "same_day"
+                    && infer_exit_shape_label(
+                        decision.market_type.as_deref(),
+                        Some(decision.question.as_str()),
+                    ) == "range"
+                    && decision.asset.as_deref() == Some("Ethereum")
+                    && decision.reason == "capital_efficiency"
             })
             .count();
         let open_positions = positions
@@ -4664,6 +4702,7 @@ fn build_eth_same_day_range_window_summary(
             "trade_count": trade_count,
             "realized_pnl": realized_pnl,
             "bad_exit_count": bad_exit_count,
+            "capital_efficiency_exit_count": capital_efficiency_exit_count,
             "open_positions": open_positions,
             "open_pnl_bid": open_pnl_bid,
         }));
@@ -4677,9 +4716,14 @@ fn build_eth_same_day_range_window_summary(
         "ETH same-day range 当前无明显样本压力".to_string()
     } else {
         format!(
-            "ETH same-day range 近24h：成交 {}，坏退出 {}，已实现 ${:.2}，当前持仓 {} / Bid 浮盈亏 ${:.2}",
+            "ETH same-day range 近24h：成交 {}，坏退出 {}，效率退出 {}，已实现 ${:.2}，当前持仓 {} / Bid 浮盈亏 ${:.2}",
             leader_trade_count,
             leader_bad_exit_count,
+            rows.iter()
+                .find(|row| row.get("window_label").and_then(Value::as_str) == Some("24h"))
+                .and_then(|row| row.get("capital_efficiency_exit_count"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
             leader_realized_pnl,
             leader_open_positions,
             leader_open_pnl_bid

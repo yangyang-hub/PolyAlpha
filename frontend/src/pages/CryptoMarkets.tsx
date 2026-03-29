@@ -867,11 +867,15 @@ export default function CryptoMarkets() {
   const sameDayMajorRangeSummary = status?.crypto_same_day_major_range_summary;
   const sameDayMajorRangeRealizedPnl = Number(sameDayMajorRangeSummary?.realized_pnl_24h ?? 0);
   const sameDayMajorRangeOpenPnlBid = Number(sameDayMajorRangeSummary?.open_pnl_bid ?? 0);
+  const sameDayMajorRangeCapitalEfficiencyExits = Number(
+    sameDayMajorRangeSummary?.capital_efficiency_exit_count_24h ?? 0,
+  );
   const ethSameDayRangeWindowRows =
     status?.crypto_eth_same_day_range_window_summary?.rows.map((row) => ({
       ...row,
       realizedPnl: Number(row.realized_pnl ?? 0),
       openPnlBid: Number(row.open_pnl_bid ?? 0),
+      capitalEfficiencyExitCount: Number(row.capital_efficiency_exit_count ?? 0),
     })) ?? [];
   const localCooldownPriorityPatchToml = [
     renderPatchRowsToToml(cooldownPriorityEntryPatchRows),
@@ -1535,6 +1539,10 @@ export default function CryptoMarkets() {
                 <div className="stat-value text-lg">{sameDayMajorRangeSummary.bad_exit_count_24h}</div>
               </div>
               <div className="stat px-4 py-3">
+                <div className="stat-title text-xs">24h 效率退出</div>
+                <div className="stat-value text-lg">{sameDayMajorRangeCapitalEfficiencyExits}</div>
+              </div>
+              <div className="stat px-4 py-3">
                 <div className="stat-title text-xs">24h 已实现</div>
                 <div
                   className={`stat-value text-lg ${sameDayMajorRangeRealizedPnl >= 0 ? "text-success" : "text-error"}`}
@@ -1577,6 +1585,7 @@ export default function CryptoMarkets() {
                     <th>窗口</th>
                     <th>成交数</th>
                     <th>坏退出</th>
+                    <th>效率退出</th>
                     <th>已实现</th>
                     <th>当前持仓</th>
                     <th>当前浮盈亏(Bid)</th>
@@ -1588,6 +1597,7 @@ export default function CryptoMarkets() {
                       <td>{row.window_label}</td>
                       <td>{row.trade_count}</td>
                       <td>{row.bad_exit_count}</td>
+                      <td>{row.capitalEfficiencyExitCount}</td>
                       <td className={row.realizedPnl >= 0 ? "text-success" : "text-error"}>
                         ${row.realizedPnl.toFixed(2)}
                       </td>

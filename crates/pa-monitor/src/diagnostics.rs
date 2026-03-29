@@ -14,6 +14,7 @@ const MAX_CRYPTO_PATCH_EXPORTS: usize = 100;
 const MAX_SMART_MONEY_DECISIONS: usize = 200;
 const MAX_SMART_MONEY_EXITS: usize = 100;
 const CRYPTO_EXIT_DEDUP_WINDOW_SECS: i64 = 5;
+const CRYPTO_CAPITAL_EFFICIENCY_EXIT_DEDUP_WINDOW_SECS: i64 = 300;
 const WEATHER_REJECTION_RETENTION_MINUTES: i64 = 12 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,7 +193,10 @@ pub fn clear_crypto_candidate_decisions() {
 
 pub fn record_crypto_exit_decision(entry: CryptoExitDecision) {
     let mut entries = CRYPTO_EXIT_DECISIONS.lock().unwrap();
-    let dedup_window = Duration::seconds(CRYPTO_EXIT_DEDUP_WINDOW_SECS);
+    let dedup_window = Duration::seconds(match entry.reason.as_str() {
+        "capital_efficiency" => CRYPTO_CAPITAL_EFFICIENCY_EXIT_DEDUP_WINDOW_SECS,
+        _ => CRYPTO_EXIT_DEDUP_WINDOW_SECS,
+    });
     let duplicated_recent_exit = entries.iter().any(|recent| {
         let within_dedup_window = (entry.recorded_at - recent.recorded_at) <= dedup_window;
         let same_exit = recent.asset == entry.asset
@@ -512,6 +516,34 @@ mod tests {
         record_crypto_exit_decision(distinct_reason);
 
         record_crypto_exit_decision(sample_exit(now + Duration::seconds(2)));
+
+        let exits = recent_crypto_exit_decisions();
+        assert_eq!(exits.len(), 2);
+        clear_crypto_exit_decisions();
+    }
+
+    #[test]
+    fn record_crypto_exit_decision_deduplicates_capital_efficiency_over_longer_window() {
+        clear_crypto_exit_decisions();
+        let now = Utc::now();
+        record_crypto_exit_decision(sample_exit(now));
+        record_crypto_exit_decision(sample_exit(now + Duration::seconds(30)));
+        let exits = recent_crypto_exit_decisions();
+        assert_eq!(exits.len(), 1);
+        clear_crypto_exit_decisions();
+    }
+
+    #[test]
+    fn record_crypto_exit_decision_keeps_non_efficiency_exit_after_default_window() {
+        clear_crypto_exit_decisions();
+        let now = Utc::now();
+        let mut first = sample_exit(now);
+        first.reason = "model_reversal".into();
+        record_crypto_exit_decision(first);
+
+        let mut second = sample_exit(now + Duration::seconds(30));
+        second.reason = "model_reversal".into();
+        record_crypto_exit_decision(second);
 
         let exits = recent_crypto_exit_decisions();
         assert_eq!(exits.len(), 2);

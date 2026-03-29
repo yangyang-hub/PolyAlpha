@@ -370,6 +370,7 @@ export interface StatusResponse {
     trade_count_24h: number;
     realized_pnl_24h: string;
     bad_exit_count_24h: number;
+    capital_efficiency_exit_count_24h?: number;
     open_positions: number;
     open_pnl_bid: string;
   };
@@ -381,6 +382,7 @@ export interface StatusResponse {
       trade_count: number;
       realized_pnl: string;
       bad_exit_count: number;
+      capital_efficiency_exit_count?: number;
       open_positions: number;
       open_pnl_bid: string;
     }[];
