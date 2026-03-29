@@ -864,6 +864,7 @@ same_day_size_multiplier = 0.35
 same_day_alt_size_multiplier = 0.80
 same_day_range_size_multiplier = 0.75
 same_day_major_range_size_multiplier = 0.90
+same_day_eth_range_size_multiplier = 0.85
 short_horizon_size_multiplier = 0.60
 medium_horizon_size_multiplier = 0.80
 same_day_min_edge_multiplier = 1.90
@@ -879,6 +880,8 @@ same_day_major_range_max_spread_multiplier = 0.90
 next_day_alt_range_max_spread_multiplier = 1.10
 same_day_alt_capital_efficiency_multiplier = 0.98
 same_day_major_range_capital_efficiency_multiplier = 0.97
+same_day_eth_range_capital_efficiency_multiplier = 0.93
+same_day_eth_range_exit_buffer_multiplier = 1.10
 same_day_exit_buffer_multiplier = 0.30
 same_day_alt_exit_buffer_multiplier = 0.90
 same_day_range_exit_buffer_multiplier = 0.85
@@ -886,6 +889,7 @@ same_day_hold_edge_multiplier = 1.90
 same_day_alt_hold_edge_multiplier = 1.10
 same_day_range_hold_edge_multiplier = 1.10
 same_day_major_range_hold_edge_multiplier = 1.10
+same_day_eth_range_hold_edge_multiplier = 1.10
 
 ### Smart Money Replay CLI
 

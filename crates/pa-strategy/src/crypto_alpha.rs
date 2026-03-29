@@ -973,6 +973,10 @@ impl CryptoAlphaStrategy {
         Self::asset_class_selector(asset) == "major"
     }
 
+    fn is_ethereum_asset(asset: &CryptoAsset) -> bool {
+        asset.name == "Ethereum"
+    }
+
     fn event_subtype_selector(subtype: Option<CryptoEventSubtype>) -> &'static str {
         match subtype {
             Some(CryptoEventSubtype::Unlock) => "unlock",
@@ -1615,6 +1619,9 @@ impl CryptoAlphaStrategy {
                 multiplier *= self.config.same_day_range_size_multiplier;
                 if Self::is_major_asset(asset) {
                     multiplier *= self.config.same_day_major_range_size_multiplier;
+                    if Self::is_ethereum_asset(asset) {
+                        multiplier *= self.config.same_day_eth_range_size_multiplier;
+                    }
                 }
             }
             multiplier
@@ -2082,6 +2089,11 @@ impl CryptoAlphaStrategy {
             }
             if self.is_same_day_range_market(days_to_resolution, market_type) {
                 exit_buffer_multiplier *= self.config.same_day_range_exit_buffer_multiplier;
+                if asset.is_some_and(Self::is_major_asset)
+                    && asset.is_some_and(Self::is_ethereum_asset)
+                {
+                    exit_buffer_multiplier *= self.config.same_day_eth_range_exit_buffer_multiplier;
+                }
             }
             let capital_efficiency_threshold = if asset.is_some_and(Self::is_alt_asset) {
                 (self.config.same_day_capital_efficiency_threshold
@@ -2091,12 +2103,14 @@ impl CryptoAlphaStrategy {
             } else if asset.is_some_and(Self::is_major_asset)
                 && self.is_same_day_range_market(days_to_resolution, market_type)
             {
-                (self.config.same_day_capital_efficiency_threshold
+                let mut threshold = self.config.same_day_capital_efficiency_threshold
                     * self
                         .config
-                        .same_day_major_range_capital_efficiency_multiplier)
-                    .min(Decimal::ONE)
-                    .max(Decimal::ZERO)
+                        .same_day_major_range_capital_efficiency_multiplier;
+                if asset.is_some_and(Self::is_ethereum_asset) {
+                    threshold *= self.config.same_day_eth_range_capital_efficiency_multiplier;
+                }
+                threshold.min(Decimal::ONE).max(Decimal::ZERO)
             } else {
                 self.config.same_day_capital_efficiency_threshold
             };
@@ -2164,6 +2178,9 @@ impl CryptoAlphaStrategy {
                 multiplier *= self.config.same_day_range_hold_edge_multiplier;
                 if asset.is_some_and(Self::is_major_asset) {
                     multiplier *= self.config.same_day_major_range_hold_edge_multiplier;
+                    if asset.is_some_and(Self::is_ethereum_asset) {
+                        multiplier *= self.config.same_day_eth_range_hold_edge_multiplier;
+                    }
                 }
             }
             multiplier
@@ -6910,6 +6927,7 @@ mod tests {
             same_day_alt_size_multiplier: dec!(0.80),
             same_day_range_size_multiplier: dec!(0.75),
             same_day_major_range_size_multiplier: dec!(0.90),
+            same_day_eth_range_size_multiplier: dec!(0.85),
             short_horizon_size_multiplier: dec!(0.60),
             medium_horizon_size_multiplier: dec!(0.80),
             same_day_min_edge_multiplier: dec!(1.70),
@@ -6929,6 +6947,8 @@ mod tests {
             same_day_capital_efficiency_threshold: dec!(0.90),
             same_day_alt_capital_efficiency_multiplier: dec!(0.98),
             same_day_major_range_capital_efficiency_multiplier: dec!(0.97),
+            same_day_eth_range_capital_efficiency_multiplier: dec!(0.93),
+            same_day_eth_range_exit_buffer_multiplier: dec!(1.10),
             short_horizon_capital_efficiency_threshold: dec!(0.92),
             medium_horizon_capital_efficiency_threshold: dec!(0.95),
             same_day_exit_buffer_multiplier: dec!(0.40),
@@ -6941,6 +6961,7 @@ mod tests {
             same_day_alt_hold_edge_multiplier: dec!(1.10),
             same_day_range_hold_edge_multiplier: dec!(1.10),
             same_day_major_range_hold_edge_multiplier: dec!(1.10),
+            same_day_eth_range_hold_edge_multiplier: dec!(1.10),
             short_horizon_hold_edge_multiplier: dec!(1.50),
             medium_horizon_hold_edge_multiplier: dec!(1.20),
             edge_decay_exit_fraction: dec!(0.25),
@@ -7333,6 +7354,54 @@ mod tests {
             None,
         );
         assert!(range_hold > directional_hold);
+    }
+
+    #[tokio::test]
+    async fn test_same_day_eth_range_post_entry_is_tighter_than_btc_range() {
+        let strategy = make_crypto_strategy(HashMap::new(), vec![]);
+        let btc_asset = CRYPTO_ASSETS
+            .iter()
+            .find(|asset| asset.name == "Bitcoin")
+            .unwrap();
+        let eth_asset = CRYPTO_ASSETS
+            .iter()
+            .find(|asset| asset.name == "Ethereum")
+            .unwrap();
+
+        let (btc_cap_eff, btc_exit_buffer) = strategy.effective_exit_thresholds_for_context(
+            0,
+            Some(btc_asset),
+            CryptoMarketType::Range,
+            None,
+        );
+        let (eth_cap_eff, eth_exit_buffer) = strategy.effective_exit_thresholds_for_context(
+            0,
+            Some(eth_asset),
+            CryptoMarketType::Range,
+            None,
+        );
+        assert!(eth_cap_eff < btc_cap_eff);
+        assert!(eth_exit_buffer > btc_exit_buffer);
+
+        let btc_size =
+            strategy.effective_horizon_size_multiplier(btc_asset, 0, CryptoMarketType::Range);
+        let eth_size =
+            strategy.effective_horizon_size_multiplier(eth_asset, 0, CryptoMarketType::Range);
+        assert!(eth_size < btc_size);
+
+        let btc_hold = strategy.effective_hold_edge_threshold_for_context(
+            0,
+            Some(btc_asset),
+            CryptoMarketType::Range,
+            None,
+        );
+        let eth_hold = strategy.effective_hold_edge_threshold_for_context(
+            0,
+            Some(eth_asset),
+            CryptoMarketType::Range,
+            None,
+        );
+        assert!(eth_hold > btc_hold);
     }
 
     #[test]
@@ -8444,6 +8513,7 @@ mod tests {
             same_day_alt_size_multiplier: dec!(0.80),
             same_day_range_size_multiplier: dec!(0.75),
             same_day_major_range_size_multiplier: dec!(0.90),
+            same_day_eth_range_size_multiplier: dec!(0.85),
             short_horizon_size_multiplier: dec!(0.60),
             medium_horizon_size_multiplier: dec!(0.80),
             same_day_min_edge_multiplier: dec!(1.70),
@@ -8463,6 +8533,8 @@ mod tests {
             same_day_capital_efficiency_threshold: dec!(0.90),
             same_day_alt_capital_efficiency_multiplier: dec!(0.98),
             same_day_major_range_capital_efficiency_multiplier: dec!(0.97),
+            same_day_eth_range_capital_efficiency_multiplier: dec!(0.93),
+            same_day_eth_range_exit_buffer_multiplier: dec!(1.10),
             short_horizon_capital_efficiency_threshold: dec!(0.92),
             medium_horizon_capital_efficiency_threshold: dec!(0.95),
             same_day_exit_buffer_multiplier: dec!(0.40),
@@ -8475,6 +8547,7 @@ mod tests {
             same_day_alt_hold_edge_multiplier: dec!(1.10),
             same_day_range_hold_edge_multiplier: dec!(1.10),
             same_day_major_range_hold_edge_multiplier: dec!(1.10),
+            same_day_eth_range_hold_edge_multiplier: dec!(1.10),
             short_horizon_hold_edge_multiplier: dec!(1.50),
             medium_horizon_hold_edge_multiplier: dec!(1.20),
             edge_decay_exit_fraction: dec!(0.25),
@@ -9187,6 +9260,7 @@ mod tests {
             same_day_alt_size_multiplier: dec!(0.80),
             same_day_range_size_multiplier: dec!(0.75),
             same_day_major_range_size_multiplier: dec!(0.90),
+            same_day_eth_range_size_multiplier: dec!(0.85),
             short_horizon_size_multiplier: dec!(0.60),
             medium_horizon_size_multiplier: dec!(0.80),
             same_day_min_edge_multiplier: dec!(1.70),
@@ -9206,6 +9280,8 @@ mod tests {
             same_day_capital_efficiency_threshold: dec!(0.90),
             same_day_alt_capital_efficiency_multiplier: dec!(0.98),
             same_day_major_range_capital_efficiency_multiplier: dec!(0.97),
+            same_day_eth_range_capital_efficiency_multiplier: dec!(0.93),
+            same_day_eth_range_exit_buffer_multiplier: dec!(1.10),
             short_horizon_capital_efficiency_threshold: dec!(0.92),
             medium_horizon_capital_efficiency_threshold: dec!(0.95),
             same_day_exit_buffer_multiplier: dec!(0.40),
@@ -9218,6 +9294,7 @@ mod tests {
             same_day_alt_hold_edge_multiplier: dec!(1.10),
             same_day_range_hold_edge_multiplier: dec!(1.10),
             same_day_major_range_hold_edge_multiplier: dec!(1.10),
+            same_day_eth_range_hold_edge_multiplier: dec!(1.10),
             short_horizon_hold_edge_multiplier: dec!(1.50),
             medium_horizon_hold_edge_multiplier: dec!(1.20),
             edge_decay_exit_fraction: dec!(0.25),

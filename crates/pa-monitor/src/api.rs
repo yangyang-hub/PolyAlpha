@@ -10,7 +10,7 @@ use axum::{
     Router,
     routing::{get, post},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
@@ -2875,7 +2875,12 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
             .into_iter()
             .take(200)
             .collect::<Vec<_>>();
-        build_eth_same_day_range_window_summary(&trade_rows, &positions, &recent_exits)
+        build_eth_same_day_range_window_summary(
+            &trade_rows,
+            &positions,
+            &recent_exits,
+            &crypto_cooldown_buckets,
+        )
     } else {
         json!({
             "leader_label": "ETH same-day range 当前无明显样本压力",
@@ -3561,6 +3566,23 @@ fn infer_trade_resolution_bucket(
                 "legacy"
             };
         }
+        if let Ok(target_without_year) =
+            chrono::NaiveDate::parse_from_str(candidate.trim(), "%B %d")
+            && let Some(target_date) = chrono::NaiveDate::from_ymd_opt(
+                reference.year(),
+                target_without_year.month(),
+                target_without_year.day(),
+            )
+        {
+            let days = (target_date - reference).num_days();
+            return if days <= 0 {
+                "same_day"
+            } else if days == 1 {
+                "next_day"
+            } else {
+                "legacy"
+            };
+        }
     }
     "legacy"
 }
@@ -3620,6 +3642,20 @@ fn infer_exit_shape_label(market_type: Option<&str>, question: Option<&str>) -> 
         "range"
     } else {
         normalized_market_shape_label(market_type)
+    }
+}
+
+fn classify_capital_efficiency_exit(best_bid: Decimal, avg_cost: Decimal) -> &'static str {
+    if avg_cost <= Decimal::ZERO {
+        return "flat";
+    }
+    let tolerance = avg_cost * Decimal::new(1, 2);
+    if best_bid >= avg_cost + tolerance {
+        "profit"
+    } else if best_bid <= avg_cost - tolerance {
+        "loss"
+    } else {
+        "flat"
     }
 }
 
@@ -3955,6 +3991,7 @@ fn build_crypto_bucket_window_summary(
         ("1h", chrono::Duration::hours(1)),
         ("6h", chrono::Duration::hours(6)),
         ("24h", chrono::Duration::hours(24)),
+        ("72h", chrono::Duration::hours(72)),
     ];
     let buckets = ["same_day", "next_day"];
     let shapes = ["range", "directional"];
@@ -4368,6 +4405,20 @@ fn build_same_day_major_range_summary(
 ) -> Value {
     let now = Utc::now();
     let window_start = now - chrono::Duration::hours(24);
+    let efficiency_exit_decisions = recent_exits
+        .iter()
+        .filter(|decision| {
+            decision.recorded_at >= window_start
+                && normalized_resolution_bucket_label(decision.days_to_resolution) == "same_day"
+                && infer_exit_shape_label(
+                    decision.market_type.as_deref(),
+                    Some(decision.question.as_str()),
+                ) == "range"
+                && asset_class_for_asset_label(decision.asset.as_deref().unwrap_or_default())
+                    == "major"
+                && decision.reason == "capital_efficiency"
+        })
+        .collect::<Vec<_>>();
     let matching_scopes = current_scope_scores
         .iter()
         .filter_map(|(scope_label, (priority_score, _, _, _))| {
@@ -4482,20 +4533,21 @@ fn build_same_day_major_range_summary(
                 )
         })
         .count();
-    let capital_efficiency_exit_count = recent_exits
+    let capital_efficiency_exit_count = efficiency_exit_decisions.len();
+    let capital_efficiency_profit_exit_count = efficiency_exit_decisions
         .iter()
         .filter(|decision| {
-            decision.recorded_at >= window_start
-                && normalized_resolution_bucket_label(decision.days_to_resolution) == "same_day"
-                && infer_exit_shape_label(
-                    decision.market_type.as_deref(),
-                    Some(decision.question.as_str()),
-                ) == "range"
-                && asset_class_for_asset_label(decision.asset.as_deref().unwrap_or_default())
-                    == "major"
-                && decision.reason == "capital_efficiency"
+            classify_capital_efficiency_exit(decision.best_bid, decision.avg_cost) == "profit"
         })
         .count();
+    let capital_efficiency_loss_exit_count = efficiency_exit_decisions
+        .iter()
+        .filter(|decision| {
+            classify_capital_efficiency_exit(decision.best_bid, decision.avg_cost) == "loss"
+        })
+        .count();
+    let capital_efficiency_flat_exit_count = capital_efficiency_exit_count
+        .saturating_sub(capital_efficiency_profit_exit_count + capital_efficiency_loss_exit_count);
     let open_positions = positions
         .iter()
         .filter(|position| {
@@ -4578,6 +4630,9 @@ fn build_same_day_major_range_summary(
         "realized_pnl_24h": realized_pnl,
         "bad_exit_count_24h": bad_exit_count,
         "capital_efficiency_exit_count_24h": capital_efficiency_exit_count,
+        "capital_efficiency_profit_exit_count_24h": capital_efficiency_profit_exit_count,
+        "capital_efficiency_loss_exit_count_24h": capital_efficiency_loss_exit_count,
+        "capital_efficiency_flat_exit_count_24h": capital_efficiency_flat_exit_count,
         "open_positions": open_positions,
         "open_pnl_bid": open_pnl_bid,
     })
@@ -4587,21 +4642,53 @@ fn build_eth_same_day_range_window_summary(
     trade_rows: &[TradeHistoryRow],
     positions: &[PositionApiEntry],
     recent_exits: &[crate::diagnostics::CryptoExitDecision],
+    cooldown_buckets: &[Value],
 ) -> Value {
+    fn hourly_eth_range_pressure(
+        hours: i64,
+        bad_exit_count: usize,
+        loss_efficiency_exit_count: usize,
+        flat_efficiency_exit_count: usize,
+    ) -> f64 {
+        let hours = hours.max(1) as f64;
+        ((bad_exit_count as f64) * 3.0
+            + (loss_efficiency_exit_count as f64) * 2.0
+            + (flat_efficiency_exit_count as f64))
+            / hours
+    }
+
     let now = Utc::now();
     let windows = [
         ("1h", chrono::Duration::hours(1)),
         ("6h", chrono::Duration::hours(6)),
         ("24h", chrono::Duration::hours(24)),
+        ("72h", chrono::Duration::hours(72)),
     ];
     let mut rows = Vec::new();
     let mut leader_trade_count = 0usize;
     let mut leader_realized_pnl = Decimal::ZERO;
     let mut leader_bad_exit_count = 0usize;
+    let mut leader_capital_efficiency_exit_count = 0usize;
+    let mut leader_capital_efficiency_profit_exit_count = 0usize;
+    let mut leader_capital_efficiency_loss_exit_count = 0usize;
+    let mut leader_capital_efficiency_flat_exit_count = 0usize;
     let mut leader_open_positions = 0usize;
     let mut leader_open_pnl_bid = Decimal::ZERO;
     for (window_label, window_duration) in windows {
         let window_start = now - window_duration;
+        let efficiency_exit_decisions = recent_exits
+            .iter()
+            .filter(|decision| {
+                decision.recorded_at >= window_start
+                    && normalized_resolution_bucket_label(decision.days_to_resolution) == "same_day"
+                    && infer_exit_shape_label(
+                        decision.market_type.as_deref(),
+                        Some(decision.question.as_str()),
+                    ) == "range"
+                    && decision.asset.as_deref() == Some("Ethereum")
+                    && decision.reason == "capital_efficiency"
+            })
+            .collect::<Vec<_>>();
         let trade_count = trade_rows
             .iter()
             .filter(|trade| {
@@ -4647,19 +4734,22 @@ fn build_eth_same_day_range_window_summary(
                     )
             })
             .count();
-        let capital_efficiency_exit_count = recent_exits
+        let capital_efficiency_exit_count = efficiency_exit_decisions.len();
+        let capital_efficiency_profit_exit_count = efficiency_exit_decisions
             .iter()
             .filter(|decision| {
-                decision.recorded_at >= window_start
-                    && normalized_resolution_bucket_label(decision.days_to_resolution) == "same_day"
-                    && infer_exit_shape_label(
-                        decision.market_type.as_deref(),
-                        Some(decision.question.as_str()),
-                    ) == "range"
-                    && decision.asset.as_deref() == Some("Ethereum")
-                    && decision.reason == "capital_efficiency"
+                classify_capital_efficiency_exit(decision.best_bid, decision.avg_cost) == "profit"
             })
             .count();
+        let capital_efficiency_loss_exit_count = efficiency_exit_decisions
+            .iter()
+            .filter(|decision| {
+                classify_capital_efficiency_exit(decision.best_bid, decision.avg_cost) == "loss"
+            })
+            .count();
+        let capital_efficiency_flat_exit_count = capital_efficiency_exit_count.saturating_sub(
+            capital_efficiency_profit_exit_count + capital_efficiency_loss_exit_count,
+        );
         let open_positions = positions
             .iter()
             .filter(|position| {
@@ -4694,6 +4784,10 @@ fn build_eth_same_day_range_window_summary(
             leader_trade_count = trade_count;
             leader_realized_pnl = realized_pnl;
             leader_bad_exit_count = bad_exit_count;
+            leader_capital_efficiency_exit_count = capital_efficiency_exit_count;
+            leader_capital_efficiency_profit_exit_count = capital_efficiency_profit_exit_count;
+            leader_capital_efficiency_loss_exit_count = capital_efficiency_loss_exit_count;
+            leader_capital_efficiency_flat_exit_count = capital_efficiency_flat_exit_count;
             leader_open_positions = open_positions;
             leader_open_pnl_bid = open_pnl_bid;
         }
@@ -4703,6 +4797,9 @@ fn build_eth_same_day_range_window_summary(
             "realized_pnl": realized_pnl,
             "bad_exit_count": bad_exit_count,
             "capital_efficiency_exit_count": capital_efficiency_exit_count,
+            "capital_efficiency_profit_exit_count": capital_efficiency_profit_exit_count,
+            "capital_efficiency_loss_exit_count": capital_efficiency_loss_exit_count,
+            "capital_efficiency_flat_exit_count": capital_efficiency_flat_exit_count,
             "open_positions": open_positions,
             "open_pnl_bid": open_pnl_bid,
         }));
@@ -4719,18 +4816,206 @@ fn build_eth_same_day_range_window_summary(
             "ETH same-day range 近24h：成交 {}，坏退出 {}，效率退出 {}，已实现 ${:.2}，当前持仓 {} / Bid 浮盈亏 ${:.2}",
             leader_trade_count,
             leader_bad_exit_count,
-            rows.iter()
-                .find(|row| row.get("window_label").and_then(Value::as_str) == Some("24h"))
-                .and_then(|row| row.get("capital_efficiency_exit_count"))
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
+            leader_capital_efficiency_exit_count,
             leader_realized_pnl,
             leader_open_positions,
             leader_open_pnl_bid
         )
     };
+    let active_eth_same_day_range_cooldowns = cooldown_buckets
+        .iter()
+        .filter(|bucket| {
+            bucket.get("kind").and_then(Value::as_str) == Some("same_day_range")
+                && bucket.get("asset").and_then(Value::as_str) == Some("Ethereum")
+        })
+        .count();
+    let automation_status_label = if leader_bad_exit_count == 0
+        && leader_capital_efficiency_loss_exit_count == 0
+        && leader_capital_efficiency_flat_exit_count == 0
+        && leader_open_positions == 0
+    {
+        "ETH same-day range 当前无活跃自动化压力".to_string()
+    } else if active_eth_same_day_range_cooldowns > 0 {
+        "ETH same-day range 坏退出已进入 cooldown 观察".to_string()
+    } else if leader_bad_exit_count > 0 {
+        "ETH same-day range 仍有坏退出，但当前未见 active cooldown".to_string()
+    } else {
+        "ETH same-day range 当前主要是效率退出，不是坏退出主导".to_string()
+    };
+    let validation_label = if (leader_bad_exit_count > 0
+        || leader_capital_efficiency_loss_exit_count > 0)
+        && active_eth_same_day_range_cooldowns > 0
+    {
+        format!(
+            "ETH same-day range 验证：cooldown/auto-patch 已开始接住这类 exits（cooldown {} 个）",
+            active_eth_same_day_range_cooldowns
+        )
+    } else if leader_bad_exit_count > 0 || leader_capital_efficiency_loss_exit_count > 0 {
+        "ETH same-day range 验证：当前仍有退出压力，但 live cooldown/auto-patch 还没显式接住"
+            .to_string()
+    } else {
+        "ETH same-day range 验证：当前未见需要自动化接管的坏退出压力".to_string()
+    };
+    let (recommended_action, target_field, action_label) =
+        if leader_bad_exit_count > 0 || leader_capital_efficiency_loss_exit_count > 0 {
+            if leader_capital_efficiency_flat_exit_count
+                >= leader_capital_efficiency_loss_exit_count.max(1)
+            {
+                (
+                    "continue_tighten",
+                    "size_multiplier",
+                    "ETH same-day range 建议：先继续收紧 size，再看 capital_efficiency".to_string(),
+                )
+            } else if leader_capital_efficiency_loss_exit_count >= leader_bad_exit_count.max(1) {
+                (
+                    "continue_tighten",
+                    "capital_efficiency_multiplier",
+                    "ETH same-day range 建议：继续收紧 capital_efficiency".to_string(),
+                )
+            } else {
+                (
+                    "continue_tighten",
+                    "hold_edge_multiplier",
+                    "ETH same-day range 建议：继续收紧 hold_edge / model_buffer".to_string(),
+                )
+            }
+        } else if leader_capital_efficiency_flat_exit_count > 0 {
+            (
+                "observe",
+                "size_multiplier",
+                "ETH same-day range 建议：继续观察；如果近平盘 churn 持续，再收 size".to_string(),
+            )
+        } else if leader_capital_efficiency_profit_exit_count > 0 {
+            (
+                "observe",
+                "capital_efficiency_multiplier",
+                "ETH same-day range 建议：继续观察，当前更像盈利效率退出".to_string(),
+            )
+        } else {
+            (
+                "observe",
+                "",
+                "ETH same-day range 建议：继续观察".to_string(),
+            )
+        };
+    let final_action_label = if recommended_action == "continue_tighten" && !target_field.is_empty()
+    {
+        format!("当前优先继续收紧 ETH same-day range 的 {}", target_field)
+    } else if recommended_action == "observe" && !target_field.is_empty() {
+        format!("当前优先继续观察 ETH same-day range 的 {}", target_field)
+    } else {
+        "当前优先继续观察 ETH same-day range".to_string()
+    };
+    let row_for = |label: &str| {
+        rows.iter()
+            .find(|row| row.get("window_label").and_then(Value::as_str) == Some(label))
+    };
+    let one_hour_bad_exits = row_for("1h")
+        .and_then(|row| row.get("bad_exit_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let one_hour_loss_efficiency_exits = row_for("1h")
+        .and_then(|row| row.get("capital_efficiency_loss_exit_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let one_hour_flat_efficiency_exits = row_for("1h")
+        .and_then(|row| row.get("capital_efficiency_flat_exit_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let six_hour_bad_exits = row_for("6h")
+        .and_then(|row| row.get("bad_exit_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let six_hour_loss_efficiency_exits = row_for("6h")
+        .and_then(|row| row.get("capital_efficiency_loss_exit_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let six_hour_flat_efficiency_exits = row_for("6h")
+        .and_then(|row| row.get("capital_efficiency_flat_exit_count"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let twenty_four_hour_pressure = hourly_eth_range_pressure(
+        24,
+        leader_bad_exit_count,
+        leader_capital_efficiency_loss_exit_count,
+        leader_capital_efficiency_flat_exit_count,
+    );
+    let one_hour_pressure = hourly_eth_range_pressure(
+        1,
+        one_hour_bad_exits,
+        one_hour_loss_efficiency_exits,
+        one_hour_flat_efficiency_exits,
+    );
+    let six_hour_pressure = hourly_eth_range_pressure(
+        6,
+        six_hour_bad_exits,
+        six_hour_loss_efficiency_exits,
+        six_hour_flat_efficiency_exits,
+    );
+    let live_effect_label = if leader_trade_count == 0
+        && leader_bad_exit_count == 0
+        && leader_capital_efficiency_exit_count == 0
+    {
+        "ETH same-day range 暂无新样本，先继续观察".to_string()
+    } else if one_hour_pressure <= twenty_four_hour_pressure * 0.5
+        && six_hour_pressure <= twenty_four_hour_pressure * 0.75
+    {
+        "ETH same-day range 近窗压力低于 24h 均值，收紧后有改善迹象".to_string()
+    } else if one_hour_pressure >= twenty_four_hour_pressure * 1.25 {
+        "ETH same-day range 近 1h 压力仍高于 24h 均值，收紧效果还不够".to_string()
+    } else {
+        "ETH same-day range 近窗压力与 24h 均值接近，仍需继续观察".to_string()
+    };
+    let reactivate_threshold_label =
+        "重新激活收紧条件：1h 坏退出 >= 2，或 1h 亏损效率退出 >= 3，或 6h churn 压力重新高于 24h 均值".to_string();
+    let observation_state_label = if leader_trade_count == 0
+        && leader_bad_exit_count == 0
+        && leader_capital_efficiency_exit_count == 0
+        && active_eth_same_day_range_cooldowns == 0
+    {
+        "当前无活跃压力，保持观察，不继续收紧".to_string()
+    } else {
+        "当前仍需结合 live 样本继续观察是否要重新收紧".to_string()
+    };
+    let short_window_reactivation_label = if one_hour_bad_exits >= 2
+        || one_hour_loss_efficiency_exits >= 3
+        || six_hour_pressure > twenty_four_hour_pressure
+    {
+        "短窗恢复判定：已满足重新激活收紧条件".to_string()
+    } else {
+        "短窗恢复判定：仍未达到重新激活收紧阈值".to_string()
+    };
+    let auto_patch_rearm_label = if leader_trade_count == 0
+        && active_eth_same_day_range_cooldowns == 0
+    {
+        "自动化恢复验证：当前无活跃样本；若 same-day range 再次进入 cooldown，auto-patch 会重新参与"
+            .to_string()
+    } else if active_eth_same_day_range_cooldowns > 0 {
+        "自动化恢复验证：cooldown/auto-patch 当前已在链路中".to_string()
+    } else {
+        "自动化恢复验证：有新样本但暂未看到 cooldown/auto-patch 重新介入".to_string()
+    };
+    let spot_refresh_recommendation_label = if leader_bad_exit_count > 0
+        || leader_capital_efficiency_loss_exit_count > 0
+    {
+        "现价提频建议：暂不建议提高 spot 刷新频率，当前更像 same-day range churn / post-entry 语义问题".to_string()
+    } else {
+        "现价提频建议：继续保持当前 spot 刷新频率".to_string()
+    };
     json!({
         "leader_label": leader_label,
+        "automation_status_label": automation_status_label,
+        "validation_label": validation_label,
+        "recommended_action": recommended_action,
+        "target_field": target_field,
+        "action_label": action_label,
+        "final_action_label": final_action_label,
+        "live_effect_label": live_effect_label,
+        "reactivate_threshold_label": reactivate_threshold_label,
+        "observation_state_label": observation_state_label,
+        "short_window_reactivation_label": short_window_reactivation_label,
+        "auto_patch_rearm_label": auto_patch_rearm_label,
+        "spot_refresh_recommendation_label": spot_refresh_recommendation_label,
         "row_count": rows.len(),
         "rows": rows,
     })

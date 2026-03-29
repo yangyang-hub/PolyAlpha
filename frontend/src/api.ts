@@ -371,11 +371,26 @@ export interface StatusResponse {
     realized_pnl_24h: string;
     bad_exit_count_24h: number;
     capital_efficiency_exit_count_24h?: number;
+    capital_efficiency_profit_exit_count_24h?: number;
+    capital_efficiency_loss_exit_count_24h?: number;
+    capital_efficiency_flat_exit_count_24h?: number;
     open_positions: number;
     open_pnl_bid: string;
   };
   crypto_eth_same_day_range_window_summary?: {
     leader_label: string;
+    automation_status_label?: string;
+    validation_label?: string;
+    recommended_action?: string;
+    target_field?: string;
+    action_label?: string;
+    final_action_label?: string;
+    live_effect_label?: string;
+    reactivate_threshold_label?: string;
+    observation_state_label?: string;
+    short_window_reactivation_label?: string;
+    auto_patch_rearm_label?: string;
+    spot_refresh_recommendation_label?: string;
     row_count: number;
     rows: {
       window_label: string;
@@ -383,6 +398,9 @@ export interface StatusResponse {
       realized_pnl: string;
       bad_exit_count: number;
       capital_efficiency_exit_count?: number;
+      capital_efficiency_profit_exit_count?: number;
+      capital_efficiency_loss_exit_count?: number;
+      capital_efficiency_flat_exit_count?: number;
       open_positions: number;
       open_pnl_bid: string;
     }[];

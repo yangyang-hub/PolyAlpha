@@ -870,12 +870,24 @@ export default function CryptoMarkets() {
   const sameDayMajorRangeCapitalEfficiencyExits = Number(
     sameDayMajorRangeSummary?.capital_efficiency_exit_count_24h ?? 0,
   );
+  const sameDayMajorRangeCapitalEfficiencyProfitExits = Number(
+    sameDayMajorRangeSummary?.capital_efficiency_profit_exit_count_24h ?? 0,
+  );
+  const sameDayMajorRangeCapitalEfficiencyLossExits = Number(
+    sameDayMajorRangeSummary?.capital_efficiency_loss_exit_count_24h ?? 0,
+  );
+  const sameDayMajorRangeCapitalEfficiencyFlatExits = Number(
+    sameDayMajorRangeSummary?.capital_efficiency_flat_exit_count_24h ?? 0,
+  );
   const ethSameDayRangeWindowRows =
     status?.crypto_eth_same_day_range_window_summary?.rows.map((row) => ({
       ...row,
       realizedPnl: Number(row.realized_pnl ?? 0),
       openPnlBid: Number(row.open_pnl_bid ?? 0),
       capitalEfficiencyExitCount: Number(row.capital_efficiency_exit_count ?? 0),
+      capitalEfficiencyProfitExitCount: Number(row.capital_efficiency_profit_exit_count ?? 0),
+      capitalEfficiencyLossExitCount: Number(row.capital_efficiency_loss_exit_count ?? 0),
+      capitalEfficiencyFlatExitCount: Number(row.capital_efficiency_flat_exit_count ?? 0),
     })) ?? [];
   const localCooldownPriorityPatchToml = [
     renderPatchRowsToToml(cooldownPriorityEntryPatchRows),
@@ -1541,6 +1553,11 @@ export default function CryptoMarkets() {
               <div className="stat px-4 py-3">
                 <div className="stat-title text-xs">24h 效率退出</div>
                 <div className="stat-value text-lg">{sameDayMajorRangeCapitalEfficiencyExits}</div>
+                <div className="stat-desc text-xs">
+                  盈利 {sameDayMajorRangeCapitalEfficiencyProfitExits} / 亏损{" "}
+                  {sameDayMajorRangeCapitalEfficiencyLossExits} / 近平{" "}
+                  {sameDayMajorRangeCapitalEfficiencyFlatExits}
+                </div>
               </div>
               <div className="stat px-4 py-3">
                 <div className="stat-title text-xs">24h 已实现</div>
@@ -1578,6 +1595,64 @@ export default function CryptoMarkets() {
             <div className="mb-3 text-xs text-base-content/70">
               {status?.crypto_eth_same_day_range_window_summary?.leader_label}
             </div>
+            {status?.crypto_eth_same_day_range_window_summary?.automation_status_label ? (
+              <div className="mb-2 text-xs text-base-content/70">
+                {status.crypto_eth_same_day_range_window_summary.automation_status_label}
+              </div>
+            ) : null}
+            {status?.crypto_eth_same_day_range_window_summary?.validation_label ? (
+              <div className="mb-2 text-xs text-base-content/70">
+                {status.crypto_eth_same_day_range_window_summary.validation_label}
+              </div>
+            ) : null}
+            {status?.crypto_eth_same_day_range_window_summary?.action_label ? (
+              <div className="mb-3 text-xs text-warning">
+                {status.crypto_eth_same_day_range_window_summary.action_label}
+              </div>
+            ) : null}
+            {status?.crypto_eth_same_day_range_window_summary?.final_action_label ? (
+              <div className="mb-2 text-xs text-warning">
+                {status.crypto_eth_same_day_range_window_summary.final_action_label}
+              </div>
+            ) : null}
+            {status?.crypto_eth_same_day_range_window_summary?.live_effect_label ? (
+              <div className="mb-2 text-xs text-base-content/70">
+                {status.crypto_eth_same_day_range_window_summary.live_effect_label}
+              </div>
+            ) : null}
+            {status?.crypto_eth_same_day_range_window_summary?.observation_state_label ? (
+              <div className="mb-2 text-xs text-base-content/70">
+                {status.crypto_eth_same_day_range_window_summary.observation_state_label}
+              </div>
+            ) : null}
+            {status?.crypto_eth_same_day_range_window_summary?.short_window_reactivation_label ? (
+              <div className="mb-2 text-xs text-base-content/70">
+                {status.crypto_eth_same_day_range_window_summary.short_window_reactivation_label}
+              </div>
+            ) : null}
+            {status?.crypto_eth_same_day_range_window_summary?.reactivate_threshold_label ? (
+              <div className="mb-2 text-xs text-base-content/70">
+                {status.crypto_eth_same_day_range_window_summary.reactivate_threshold_label}
+              </div>
+            ) : null}
+            {status?.crypto_eth_same_day_range_window_summary?.auto_patch_rearm_label ? (
+              <div className="mb-2 text-xs text-base-content/70">
+                {status.crypto_eth_same_day_range_window_summary.auto_patch_rearm_label}
+              </div>
+            ) : null}
+            {status?.crypto_eth_same_day_range_window_summary?.recommended_action ? (
+              <div className="mb-2 text-xs text-base-content/70">
+                动作：{status.crypto_eth_same_day_range_window_summary.recommended_action}
+                {status.crypto_eth_same_day_range_window_summary.target_field
+                  ? `；优先字段：${status.crypto_eth_same_day_range_window_summary.target_field}`
+                  : ""}
+              </div>
+            ) : null}
+            {status?.crypto_eth_same_day_range_window_summary?.spot_refresh_recommendation_label ? (
+              <div className="mb-3 text-xs text-base-content/70">
+                {status.crypto_eth_same_day_range_window_summary.spot_refresh_recommendation_label}
+              </div>
+            ) : null}
             <div className="overflow-x-auto">
               <table className="table table-sm">
                 <thead>
@@ -1586,6 +1661,7 @@ export default function CryptoMarkets() {
                     <th>成交数</th>
                     <th>坏退出</th>
                     <th>效率退出</th>
+                    <th>效率退出(盈/亏/平)</th>
                     <th>已实现</th>
                     <th>当前持仓</th>
                     <th>当前浮盈亏(Bid)</th>
@@ -1598,6 +1674,10 @@ export default function CryptoMarkets() {
                       <td>{row.trade_count}</td>
                       <td>{row.bad_exit_count}</td>
                       <td>{row.capitalEfficiencyExitCount}</td>
+                      <td>
+                        {row.capitalEfficiencyProfitExitCount}/{row.capitalEfficiencyLossExitCount}/
+                        {row.capitalEfficiencyFlatExitCount}
+                      </td>
                       <td className={row.realizedPnl >= 0 ? "text-success" : "text-error"}>
                         ${row.realizedPnl.toFixed(2)}
                       </td>

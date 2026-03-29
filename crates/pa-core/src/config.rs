@@ -690,6 +690,9 @@ pub struct CryptoAlphaConfig {
     /// Additional size multiplier for same-day major range markets.
     #[serde(default = "default_crypto_same_day_major_range_size_multiplier")]
     pub same_day_major_range_size_multiplier: Decimal,
+    /// Additional size multiplier for same-day Ethereum range markets.
+    #[serde(default = "default_crypto_same_day_eth_range_size_multiplier")]
+    pub same_day_eth_range_size_multiplier: Decimal,
     /// Multiply entry sizing by this factor for short-dated markets.
     #[serde(default = "default_crypto_short_horizon_size_multiplier")]
     pub short_horizon_size_multiplier: Decimal,
@@ -747,6 +750,12 @@ pub struct CryptoAlphaConfig {
     /// Additional capital-efficiency multiplier for same-day major range markets.
     #[serde(default = "default_crypto_same_day_major_range_capital_efficiency_multiplier")]
     pub same_day_major_range_capital_efficiency_multiplier: Decimal,
+    /// Additional capital-efficiency multiplier for same-day Ethereum range markets.
+    #[serde(default = "default_crypto_same_day_eth_range_capital_efficiency_multiplier")]
+    pub same_day_eth_range_capital_efficiency_multiplier: Decimal,
+    /// Additional exit-buffer multiplier for same-day Ethereum range markets.
+    #[serde(default = "default_crypto_same_day_eth_range_exit_buffer_multiplier")]
+    pub same_day_eth_range_exit_buffer_multiplier: Decimal,
     /// Capital-efficiency exit threshold for short-dated markets.
     #[serde(default = "default_crypto_short_horizon_capital_efficiency_threshold")]
     pub short_horizon_capital_efficiency_threshold: Decimal,
@@ -783,6 +792,9 @@ pub struct CryptoAlphaConfig {
     /// Additional hold-edge multiplier for same-day major range markets.
     #[serde(default = "default_crypto_same_day_major_range_hold_edge_multiplier")]
     pub same_day_major_range_hold_edge_multiplier: Decimal,
+    /// Additional hold-edge multiplier for same-day Ethereum range markets.
+    #[serde(default = "default_crypto_same_day_eth_range_hold_edge_multiplier")]
+    pub same_day_eth_range_hold_edge_multiplier: Decimal,
     /// Multiply hold-min-edge by this factor for short-dated markets.
     #[serde(default = "default_crypto_short_horizon_hold_edge_multiplier")]
     pub short_horizon_hold_edge_multiplier: Decimal,
@@ -1106,6 +1118,9 @@ fn default_crypto_same_day_range_size_multiplier() -> Decimal {
 fn default_crypto_same_day_major_range_size_multiplier() -> Decimal {
     Decimal::new(90, 2)
 } // 0.90
+fn default_crypto_same_day_eth_range_size_multiplier() -> Decimal {
+    Decimal::new(85, 2)
+} // 0.85
 fn default_crypto_short_horizon_size_multiplier() -> Decimal {
     Decimal::new(60, 2)
 } // 0.60
@@ -1163,6 +1178,12 @@ fn default_crypto_same_day_alt_capital_efficiency_multiplier() -> Decimal {
 fn default_crypto_same_day_major_range_capital_efficiency_multiplier() -> Decimal {
     Decimal::new(97, 2)
 } // 0.97
+fn default_crypto_same_day_eth_range_capital_efficiency_multiplier() -> Decimal {
+    Decimal::new(93, 2)
+} // 0.93
+fn default_crypto_same_day_eth_range_exit_buffer_multiplier() -> Decimal {
+    Decimal::new(110, 2)
+} // 1.10
 fn default_crypto_short_horizon_capital_efficiency_threshold() -> Decimal {
     Decimal::new(92, 2)
 } // 0.92
@@ -1197,6 +1218,9 @@ fn default_crypto_same_day_range_hold_edge_multiplier() -> Decimal {
     Decimal::new(110, 2)
 } // 1.10
 fn default_crypto_same_day_major_range_hold_edge_multiplier() -> Decimal {
+    Decimal::new(110, 2)
+} // 1.10
+fn default_crypto_same_day_eth_range_hold_edge_multiplier() -> Decimal {
     Decimal::new(110, 2)
 } // 1.10
 fn default_crypto_short_horizon_hold_edge_multiplier() -> Decimal {
@@ -1403,6 +1427,7 @@ impl Default for CryptoAlphaConfig {
             same_day_range_size_multiplier: default_crypto_same_day_range_size_multiplier(),
             same_day_major_range_size_multiplier:
                 default_crypto_same_day_major_range_size_multiplier(),
+            same_day_eth_range_size_multiplier: default_crypto_same_day_eth_range_size_multiplier(),
             short_horizon_size_multiplier: default_crypto_short_horizon_size_multiplier(),
             medium_horizon_size_multiplier: default_crypto_medium_horizon_size_multiplier(),
             same_day_min_edge_multiplier: default_crypto_same_day_min_edge_multiplier(),
@@ -1432,6 +1457,10 @@ impl Default for CryptoAlphaConfig {
                 default_crypto_same_day_alt_capital_efficiency_multiplier(),
             same_day_major_range_capital_efficiency_multiplier:
                 default_crypto_same_day_major_range_capital_efficiency_multiplier(),
+            same_day_eth_range_capital_efficiency_multiplier:
+                default_crypto_same_day_eth_range_capital_efficiency_multiplier(),
+            same_day_eth_range_exit_buffer_multiplier:
+                default_crypto_same_day_eth_range_exit_buffer_multiplier(),
             short_horizon_capital_efficiency_threshold:
                 default_crypto_short_horizon_capital_efficiency_threshold(),
             medium_horizon_capital_efficiency_threshold:
@@ -1452,6 +1481,8 @@ impl Default for CryptoAlphaConfig {
             ),
             same_day_major_range_hold_edge_multiplier:
                 default_crypto_same_day_major_range_hold_edge_multiplier(),
+            same_day_eth_range_hold_edge_multiplier:
+                default_crypto_same_day_eth_range_hold_edge_multiplier(),
             short_horizon_hold_edge_multiplier: default_crypto_short_horizon_hold_edge_multiplier(),
             medium_horizon_hold_edge_multiplier: default_crypto_medium_horizon_hold_edge_multiplier(
             ),

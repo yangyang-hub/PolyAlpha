@@ -82,6 +82,36 @@ This file records repository-specific working agreements, high-level project con
 
 ## Change Log
 
+### 2026-03-29
+- Area: `crates/pa-monitor/src/api.rs`
+- Change: Tightened the read-only `ETH same-day range` summary so its automation/observe/rearm labels now rely only on ETH-specific live samples and ETH range cooldowns instead of piggybacking on broader `same_day major range` patch counts, and stopped treating pure profit-only efficiency exits as active automation pressure.
+- Why: The ETH-focused summary could still be contaminated by unrelated BTC/major-range patch history and overstate automation pressure when only healthy profit efficiency exits remained, which made the watch-mode labels less trustworthy.
+
+### 2026-03-29
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Extended the read-only `ETH same-day range` summary with explicit re-activation thresholds, an observe-state conclusion, short-window reactivation status, and an auto-patch rearm validation label so `/crypto` now states when this shape should stay idle versus when tightening would be re-enabled.
+- Why: Live status had already collapsed to “no active ETH same-day range pressure”, so the next gap was making the backend/frontend explicitly answer the operator question of when this shape should remain in watch mode and what conditions would reactivate tightening without manually interpreting the rolling-window rows.
+
+### 2026-03-29
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Added a backend-owned `live_effect_label` for the read-only `ETH same-day range` summary by comparing recent `1h/6h` pressure against the current `24h` baseline, and surfaced that alongside the existing validation/final-action labels on `/crypto`.
+- Why: After several ETH same-day range tightening rounds, the next gap was a concise server-side answer to whether recent churn pressure is actually improving or still elevated, so operators and AI consumers can decide whether to pause or continue tightening without manually comparing multiple window rows.
+
+### 2026-03-29
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `crates/pa-monitor/src/api.rs`, `config/default.toml`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added a dedicated `same_day_eth_range_size_multiplier` so ETH same-day range sizing can tighten independently from broader major-range sizing, extended the ETH same-day range read-only summary to `72h`, added a final one-line action conclusion plus stronger cooldown/auto-patch validation wording, and expanded efficiency-exit classification to surface profit/loss/near-flat churn with an explicit “spot refresh not recommended yet” conclusion.
+- Why: After tightening ETH same-day range capital-efficiency, hold-edge, and exit-buffer handling, the next optimization step was to trim that single loss-heavy shape's size directly and make the read-only summary answer the operator question more explicitly: whether automation is actually catching the churn and whether the next best move is still post-entry tightening rather than higher spot-refresh frequency.
+
+### 2026-03-29
+- Area: `crates/pa-monitor/src/api.rs`, `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Tightened the dedicated `ETH same-day range` post-entry path further by lowering its capital-efficiency multiplier, raising its hold-edge multiplier, and adding an ETH-specific exit-buffer multiplier; split `capital_efficiency` summaries into profit/loss/near-flat buckets for both major same-day range and ETH same-day range views; added ETH same-day range read-only validation/recommended-action/target-field labels plus a “spot refresh not recommended yet” evaluation; and surfaced the richer efficiency-exit breakdown in the crypto UI.
+- Why: After separating true bad exits from efficiency exits, the next gap was making the most loss-heavy shape (`ETH same-day range`) both stricter in runtime post-entry handling and easier to interpret operationally, especially distinguishing healthy profit-taking from near-flat churn and making it explicit that current pain still looks more like same-day range post-entry churn than stale spot pricing.
+
+### 2026-03-29
+- Area: `crates/pa-monitor/src/diagnostics.rs`, `crates/pa-monitor/src/api.rs`, `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Extended crypto trade resolution-bucket inference to parse month/day questions without a year, added dedicated ETH same-day range post-entry tightening multipliers for capital-efficiency and hold-edge thresholds, lengthened `capital_efficiency` exit deduplication, split read-only ETH/major-range summaries into `坏退出` vs `效率退出` with separate profit/loss efficiency counts, and surfaced ETH same-day range automation/action hints directly on `/crypto`.
+- Why: Live crypto losses were concentrated in repeated ETH same-day range churn, but monitor summaries were undercounting same-day trades on yearless questions, repeated efficiency exits were inflating perceived bad-exit pressure, and the runtime strategy still lacked an ETH-specific post-entry tightening path for the most stressed shape.
+
 ### 2026-03-28
 - Area: `crates/pa-monitor/src/api.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `crates/pa-core/src/config.rs`, `config/default.toml`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`, `frontend/src/components/ConfigSection.tsx`, `README.md`
 - Change: Fixed crypto exit-shape attribution so binary “between” questions now count as `range` in exit windows, bad-exit counts, cooldown scoring, and auto-patch evaluation; added dedicated `same_day major range` tightening knobs (probability, size, min-edge, max-spread, capital-efficiency, hold-edge) to the runtime strategy; and added read-only `/crypto` summaries for `same_day major range` plus `ETH same-day range` rolling churn.
