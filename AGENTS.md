@@ -83,6 +83,11 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-30
+- Area: `migrations/013_add_monitor_query_indexes.sql`
+- Change: Added missing PostgreSQL indexes for monitor-heavy reads on `trades(created_at DESC)` plus `config_history(section, created_at DESC)` and `config_history(section, changed_by, created_at DESC)`.
+- Why: Production logs showed repeated slow recent-trades and config-history reads together with long pool-acquire delays, so the next bounded fix was to add the ordered/filtering indexes those API paths rely on before changing strategy behavior.
+
+### 2026-03-30
 - Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `README.md`, `frontend/src/components/ConfigSection.tsx`
 - Change: Changed the default weather `target_cities` from empty/all-trade-enabled to the preferred NOAA set (`Atlanta`, `Miami`, `New York`, `Dallas`, `Seattle`) and updated operator-facing config copy to reflect that default posture.
 - Why: Live weather remained healthy but produced no new trades because spread/price blockers were dominated by a broad city universe, so the next bounded optimization step is to focus default scanning on the highest-confidence NOAA cities before loosening more thresholds.
