@@ -83,6 +83,11 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-30
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added dedicated same-day generic range spread multipliers for major and alt crypto markets, raised the existing same-day generic binary spread multipliers slightly, and wired the runtime entry-threshold logic so same-day generic range markets get their own narrow spread relief instead of sharing only the binary-specific path.
+- Why: Live crypto remained idle because nearly all recent same-day generic candidates were being rejected on spread, and status data showed the blocked flow was not limited to binary markets; the next bounded recovery step is to loosen spread only for the current same-day generic buckets rather than globally or via horizon changes.
+
+### 2026-03-30
 - Area: `src/app/tasks.rs`
 - Change: Fixed the weather forecast snapshot archive scheduler so it runs exactly once at startup and then waits for the configured 30-minute interval, instead of immediately consuming the first `tokio::time::interval` tick and running a second archive pass a few seconds later.
 - Why: Production startup logs showed `Weather forecast snapshots archived` firing twice within about five seconds, which meant the archive task was needlessly duplicating DB writes and startup load even though the configured cadence is one pass per 30 minutes.
@@ -101,6 +106,16 @@ This file records repository-specific working agreements, high-level project con
 - Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `README.md`, `frontend/src/components/ConfigSection.tsx`
 - Change: Changed the default weather `target_cities` from empty/all-trade-enabled to the preferred NOAA set (`Atlanta`, `Miami`, `New York`, `Dallas`, `Seattle`) and updated operator-facing config copy to reflect that default posture.
 - Why: Live weather remained healthy but produced no new trades because spread/price blockers were dominated by a broad city universe, so the next bounded optimization step is to focus default scanning on the highest-confidence NOAA cities before loosening more thresholds.
+
+### 2026-03-30
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Increased the preferred-city weather spread overlay from `+500bps` to `+700bps`, leaving conservative and default-protected cities on the global spread cap, and updated the preferred-city spread regression expectation.
+- Why: After narrowing the weather city universe to the highest-confidence NOAA locations, live blocker summaries still showed `spread_too_wide` as the dominant friction for that same preferred set, so the next bounded tuning step is another small spread relaxation only for those cities.
+
+### 2026-03-30
+- Area: `crates/pa-strategy/src/crypto_alpha.rs`
+- Change: Filled in the newly added generic-range spread multiplier fields in a legacy `CryptoAlphaConfig` test initializer so the full `pa-strategy weather` test target compiles again during weather-side validation.
+- Why: The preferred-city weather spread tuning itself was fine, but full weather regression was blocked by an unrelated crypto test fixture that no longer matched the current config struct shape.
 
 ### 2026-03-29
 - Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `crates/pa-monitor/src/api.rs`, `config/default.toml`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`, `frontend/src/components/ConfigSection.tsx`, `README.md`

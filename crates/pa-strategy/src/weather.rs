@@ -2578,7 +2578,7 @@ impl WeatherAlphaStrategy {
 
     fn effective_max_spread_bps(&self, location: &str) -> u32 {
         if Self::uses_preferred_city_overlay(location) {
-            self.config.max_spread_bps.saturating_add(500)
+            self.config.max_spread_bps.saturating_add(700)
         } else {
             self.config.max_spread_bps
         }
@@ -7214,7 +7214,7 @@ mod tests {
         );
         assert_eq!(
             strategy.effective_max_spread_bps("Miami"),
-            strategy.config.max_spread_bps + 500
+            strategy.config.max_spread_bps + 700
         );
         assert_eq!(
             strategy.effective_max_spread_bps("Chicago"),

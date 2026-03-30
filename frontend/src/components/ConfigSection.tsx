@@ -171,6 +171,10 @@ const FIELD_HINTS: Record<string, Record<string, string>> = {
     same_day_alt_max_spread_multiplier: "当日期限山寨币额外最大价差乘数",
     same_day_major_generic_max_spread_multiplier: "当日期限主流币 generic 二元盘额外最大价差乘数",
     same_day_alt_generic_max_spread_multiplier: "当日期限山寨币 generic 二元盘额外最大价差乘数",
+    same_day_major_generic_range_max_spread_multiplier:
+      "当日期限主流币 generic 区间盘额外最大价差乘数",
+    same_day_alt_generic_range_max_spread_multiplier:
+      "当日期限山寨币 generic 区间盘额外最大价差乘数",
     same_day_alt_range_max_spread_multiplier: "当日期限山寨币区间盘额外最大价差乘数",
     same_day_range_max_spread_multiplier: "当日期限区间盘额外最大价差乘数",
     same_day_major_range_max_spread_multiplier: "当日期限主流币区间盘额外最大价差乘数",

@@ -1136,6 +1136,21 @@ impl CryptoAlphaStrategy {
                     edge_multiplier *= self.config.same_day_major_range_min_edge_multiplier;
                     spread_multiplier *= self.config.same_day_major_range_max_spread_multiplier;
                 }
+                let (_event_context_source, _event_title, _event_category, event_subtype) =
+                    self.decision_event_context(market_text).await;
+                let is_generic_context = event_subtype
+                    .as_deref()
+                    .map(|subtype| subtype.eq_ignore_ascii_case("generic"))
+                    .unwrap_or(true);
+                if is_generic_context {
+                    if Self::is_alt_asset(asset) {
+                        spread_multiplier *=
+                            self.config.same_day_alt_generic_range_max_spread_multiplier;
+                    } else if Self::is_major_asset(asset) {
+                        spread_multiplier *=
+                            self.config.same_day_major_generic_range_max_spread_multiplier;
+                    }
+                }
             } else if matches!(market_type, CryptoMarketType::Binary) {
                 if Self::is_alt_asset(asset) {
                     spread_multiplier *= self.config.same_day_alt_generic_max_spread_multiplier;
@@ -6943,6 +6958,8 @@ mod tests {
             same_day_alt_max_spread_multiplier: dec!(0.85),
             same_day_major_generic_max_spread_multiplier: dec!(1.05),
             same_day_alt_generic_max_spread_multiplier: dec!(1.10),
+            same_day_major_generic_range_max_spread_multiplier: dec!(1.05),
+            same_day_alt_generic_range_max_spread_multiplier: dec!(1.10),
             same_day_alt_range_max_spread_multiplier: dec!(1.10),
             same_day_range_max_spread_multiplier: dec!(0.85),
             same_day_major_range_max_spread_multiplier: dec!(0.90),
@@ -8531,6 +8548,8 @@ mod tests {
             same_day_alt_max_spread_multiplier: dec!(0.85),
             same_day_major_generic_max_spread_multiplier: dec!(1.05),
             same_day_alt_generic_max_spread_multiplier: dec!(1.10),
+            same_day_major_generic_range_max_spread_multiplier: dec!(1.05),
+            same_day_alt_generic_range_max_spread_multiplier: dec!(1.10),
             same_day_alt_range_max_spread_multiplier: dec!(1.10),
             same_day_range_max_spread_multiplier: dec!(0.85),
             same_day_major_range_max_spread_multiplier: dec!(0.90),
@@ -9280,6 +9299,8 @@ mod tests {
             same_day_alt_max_spread_multiplier: dec!(0.85),
             same_day_major_generic_max_spread_multiplier: dec!(1.05),
             same_day_alt_generic_max_spread_multiplier: dec!(1.10),
+            same_day_major_generic_range_max_spread_multiplier: dec!(1.05),
+            same_day_alt_generic_range_max_spread_multiplier: dec!(1.10),
             same_day_alt_range_max_spread_multiplier: dec!(1.10),
             same_day_range_max_spread_multiplier: dec!(0.85),
             same_day_major_range_max_spread_multiplier: dec!(0.90),
