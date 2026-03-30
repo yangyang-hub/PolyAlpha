@@ -64,16 +64,16 @@ export interface StatusResponse {
     asset_counts: { label: string; count: number }[];
     subtype_counts: { label: string; count: number }[];
     reason_windows: {
-      recent_8: { label: string; count: number }[];
-      recent_24: { label: string; count: number }[];
+      last_8: { label: string; count: number }[];
+      last_24: { label: string; count: number }[];
     };
     asset_windows: {
-      recent_8: { label: string; count: number }[];
-      recent_24: { label: string; count: number }[];
+      last_8: { label: string; count: number }[];
+      last_24: { label: string; count: number }[];
     };
     subtype_windows: {
-      recent_8: { label: string; count: number }[];
-      recent_24: { label: string; count: number }[];
+      last_8: { label: string; count: number }[];
+      last_24: { label: string; count: number }[];
     };
     reason_details: {
       label: string;
@@ -108,16 +108,16 @@ export interface StatusResponse {
     asset_counts: { label: string; count: number }[];
     subtype_counts: { label: string; count: number }[];
     reason_windows: {
-      recent_8: { label: string; count: number }[];
-      recent_24: { label: string; count: number }[];
+      last_8: { label: string; count: number }[];
+      last_24: { label: string; count: number }[];
     };
     asset_windows: {
-      recent_8: { label: string; count: number }[];
-      recent_24: { label: string; count: number }[];
+      last_8: { label: string; count: number }[];
+      last_24: { label: string; count: number }[];
     };
     subtype_windows: {
-      recent_8: { label: string; count: number }[];
-      recent_24: { label: string; count: number }[];
+      last_8: { label: string; count: number }[];
+      last_24: { label: string; count: number }[];
     };
     reason_details: {
       label: string;

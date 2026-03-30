@@ -554,27 +554,27 @@ export default function CryptoMarkets() {
       ? status.crypto_gate_reject_summary.reason_details.slice(0, 3)
       : [];
   const gateRejectReasonWindow8 =
-    status?.crypto_gate_reject_summary?.reason_windows?.recent_8?.map(
+    status?.crypto_gate_reject_summary?.reason_windows?.last_8?.map(
       (entry) => [decisionReasonLabel(entry.label), entry.count] as [string, number],
     ) ?? [];
   const gateRejectReasonWindow24 =
-    status?.crypto_gate_reject_summary?.reason_windows?.recent_24?.map(
+    status?.crypto_gate_reject_summary?.reason_windows?.last_24?.map(
       (entry) => [decisionReasonLabel(entry.label), entry.count] as [string, number],
     ) ?? [];
   const gateRejectSubtypeWindow8 =
-    status?.crypto_gate_reject_summary?.subtype_windows?.recent_8?.map(
+    status?.crypto_gate_reject_summary?.subtype_windows?.last_8?.map(
       (entry) => [entry.label, entry.count] as [string, number],
     ) ?? [];
   const gateRejectSubtypeWindow24 =
-    status?.crypto_gate_reject_summary?.subtype_windows?.recent_24?.map(
+    status?.crypto_gate_reject_summary?.subtype_windows?.last_24?.map(
       (entry) => [entry.label, entry.count] as [string, number],
     ) ?? [];
   const gateRejectAssetWindow8 =
-    status?.crypto_gate_reject_summary?.asset_windows?.recent_8?.map(
+    status?.crypto_gate_reject_summary?.asset_windows?.last_8?.map(
       (entry) => [entry.label, entry.count] as [string, number],
     ) ?? [];
   const gateRejectAssetWindow24 =
-    status?.crypto_gate_reject_summary?.asset_windows?.recent_24?.map(
+    status?.crypto_gate_reject_summary?.asset_windows?.last_24?.map(
       (entry) => [entry.label, entry.count] as [string, number],
     ) ?? [];
   const topGateReject = status?.crypto_gate_reject_summary?.top_reason?.label ?? visibleGateRejects[0]?.reason ?? null;
@@ -1710,9 +1710,9 @@ export default function CryptoMarkets() {
           <div className="card-body p-4">
             <div className="flex items-center justify-between gap-3">
               <div>
-                <h2 className="card-title text-base">Generic day-market</h2>
+                <h2 className="card-title text-base">Generic same-day market</h2>
                 <div className="text-xs opacity-60">
-                  只读展示 generic day-market 候选里，有多少被 spread 挡掉，并区分 range / binary 混合情况
+                  只读展示 generic same-day 候选里，有多少被 spread 挡掉，并区分 range / binary 混合情况
                 </div>
               </div>
             </div>
@@ -3268,7 +3268,7 @@ export default function CryptoMarkets() {
                 <div className="mt-2 grid gap-2 sm:grid-cols-2">
                   {gateRejectReasonWindow8.length > 0 && (
                     <div>
-                      <div className="mb-1 opacity-70">最近 8 条</div>
+                      <div className="mb-1 opacity-70">最近 8 条样本</div>
                       <div className="flex flex-wrap gap-2">
                         {gateRejectReasonWindow8.map(([reason, count]) => (
                           <span key={`recent8-${reason}`} className="badge badge-sm badge-error badge-outline">
@@ -3280,7 +3280,7 @@ export default function CryptoMarkets() {
                   )}
                   {gateRejectReasonWindow24.length > 0 && (
                     <div>
-                      <div className="mb-1 opacity-70">最近 24 条</div>
+                      <div className="mb-1 opacity-70">最近 24 条样本</div>
                       <div className="flex flex-wrap gap-2">
                         {gateRejectReasonWindow24.map(([reason, count]) => (
                           <span key={`recent24-${reason}`} className="badge badge-sm badge-outline">
@@ -3296,7 +3296,7 @@ export default function CryptoMarkets() {
                 <div className="mt-2 grid gap-2 sm:grid-cols-2">
                   {gateRejectSubtypeWindow8.length > 0 && (
                     <div>
-                      <div className="mb-1 opacity-70">最近 8 条事件类型</div>
+                      <div className="mb-1 opacity-70">最近 8 条样本事件类型</div>
                       <div className="flex flex-wrap gap-2">
                         {gateRejectSubtypeWindow8.map(([subtype, count]) => (
                           <span
@@ -3311,7 +3311,7 @@ export default function CryptoMarkets() {
                   )}
                   {gateRejectSubtypeWindow24.length > 0 && (
                     <div>
-                      <div className="mb-1 opacity-70">最近 24 条事件类型</div>
+                      <div className="mb-1 opacity-70">最近 24 条样本事件类型</div>
                       <div className="flex flex-wrap gap-2">
                         {gateRejectSubtypeWindow24.map(([subtype, count]) => (
                           <span
@@ -3330,7 +3330,7 @@ export default function CryptoMarkets() {
                 <div className="mt-2 grid gap-2 sm:grid-cols-2">
                   {gateRejectAssetWindow8.length > 0 && (
                     <div>
-                      <div className="mb-1 opacity-70">最近 8 条资产</div>
+                      <div className="mb-1 opacity-70">最近 8 条样本资产</div>
                       <div className="flex flex-wrap gap-2">
                         {gateRejectAssetWindow8.map(([asset, count]) => (
                           <span
@@ -3345,7 +3345,7 @@ export default function CryptoMarkets() {
                   )}
                   {gateRejectAssetWindow24.length > 0 && (
                     <div>
-                      <div className="mb-1 opacity-70">最近 24 条资产</div>
+                      <div className="mb-1 opacity-70">最近 24 条样本资产</div>
                       <div className="flex flex-wrap gap-2">
                         {gateRejectAssetWindow24.map(([asset, count]) => (
                           <span

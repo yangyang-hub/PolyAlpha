@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use alloy::primitives::B256;
 use arc_swap::ArcSwap;
 use axum::extract::{Path, Query, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
@@ -1154,16 +1155,16 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
     let asset_counts = sorted_count_entries(&gate_asset_counts);
     let subtype_counts = sorted_count_entries(&gate_subtype_counts);
     let reason_windows = json!({
-        "recent_8": count_reason_window(&recent_gate_rejects, 8),
-        "recent_24": count_reason_window(&recent_gate_rejects, 24),
+        "last_8": count_reason_window(&recent_gate_rejects, 8),
+        "last_24": count_reason_window(&recent_gate_rejects, 24),
     });
     let subtype_windows = json!({
-        "recent_8": count_subtype_window(&recent_gate_rejects, 8),
-        "recent_24": count_subtype_window(&recent_gate_rejects, 24),
+        "last_8": count_subtype_window(&recent_gate_rejects, 8),
+        "last_24": count_subtype_window(&recent_gate_rejects, 24),
     });
     let asset_windows = json!({
-        "recent_8": count_asset_window(&recent_gate_rejects, 8),
-        "recent_24": count_asset_window(&recent_gate_rejects, 24),
+        "last_8": count_asset_window(&recent_gate_rejects, 8),
+        "last_24": count_asset_window(&recent_gate_rejects, 24),
     });
     let reason_details: Vec<_> = gate_reason_counts
         .keys()
@@ -2976,16 +2977,16 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
             "asset_counts": gate_scale_asset_counts_view,
             "subtype_counts": gate_scale_subtype_counts_view,
             "reason_windows": {
-                "recent_8": count_reason_window(&recent_gate_scales, 8),
-                "recent_24": count_reason_window(&recent_gate_scales, 24),
+                "last_8": count_reason_window(&recent_gate_scales, 8),
+                "last_24": count_reason_window(&recent_gate_scales, 24),
             },
             "subtype_windows": {
-                "recent_8": count_subtype_window(&recent_gate_scales, 8),
-                "recent_24": count_subtype_window(&recent_gate_scales, 24),
+                "last_8": count_subtype_window(&recent_gate_scales, 8),
+                "last_24": count_subtype_window(&recent_gate_scales, 24),
             },
             "asset_windows": {
-                "recent_8": count_asset_window(&recent_gate_scales, 8),
-                "recent_24": count_asset_window(&recent_gate_scales, 24),
+                "last_8": count_asset_window(&recent_gate_scales, 8),
+                "last_24": count_asset_window(&recent_gate_scales, 24),
             },
             "reason_details": gate_scale_reason_details,
         },
@@ -5035,6 +5036,8 @@ fn build_crypto_generic_day_market_summary(
     ];
     let mut rows = Vec::new();
     let mut leader_candidate_count = 0usize;
+    let mut leader_range_count = 0usize;
+    let mut leader_binary_count = 0usize;
     let mut leader_spread_reject_count = 0usize;
     let mut leader_viable_count = 0usize;
     let mut leader_top_assets: Vec<(String, usize)> = Vec::new();
@@ -5045,7 +5048,7 @@ fn build_crypto_generic_day_market_summary(
             .iter()
             .filter(|decision| {
                 decision.recorded_at >= window_start
-                    && decision.selected_days_to_resolution <= 1
+                    && decision.selected_days_to_resolution == 0
                     && decision.event_subtype.as_deref().unwrap_or("generic") == "generic"
             })
             .collect::<Vec<_>>();
@@ -5087,15 +5090,22 @@ fn build_crypto_generic_day_market_summary(
             .map(|decision| decision.selected_condition_id)
             .collect::<std::collections::HashSet<_>>()
             .len();
-        let mut spread_asset_counts: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        let mut spread_asset_conditions: std::collections::HashMap<
+            String,
+            std::collections::HashSet<B256>,
+        > = std::collections::HashMap::new();
         for decision in matching.iter().filter(|decision| {
             decision.action == "gate_reject" && decision.reason == "spread_too_wide"
         }) {
-            *spread_asset_counts
+            spread_asset_conditions
                 .entry(decision.asset.clone())
-                .or_insert(0) += 1;
+                .or_default()
+                .insert(decision.selected_condition_id);
         }
+        let spread_asset_counts: std::collections::HashMap<String, usize> = spread_asset_conditions
+            .into_iter()
+            .map(|(asset, conditions)| (asset, conditions.len()))
+            .collect();
         let mut top_assets = spread_asset_counts
             .iter()
             .map(|(label, count)| json!({ "label": label, "count": count }))
@@ -5115,6 +5125,8 @@ fn build_crypto_generic_day_market_summary(
 
         if window_label == "24h" {
             leader_candidate_count = candidate_count;
+            leader_range_count = range_count;
+            leader_binary_count = binary_count;
             leader_spread_reject_count = spread_reject_count;
             leader_viable_count = viable_count;
             leader_top_assets = top_assets
@@ -5142,7 +5154,7 @@ fn build_crypto_generic_day_market_summary(
     }
 
     let leader_asset_label = if leader_top_assets.is_empty() {
-        "generic day-market".to_string()
+        "generic same-day market".to_string()
     } else {
         leader_top_assets
             .iter()
@@ -5150,61 +5162,114 @@ fn build_crypto_generic_day_market_summary(
             .collect::<Vec<_>>()
             .join("/")
     };
+    let leader_shape_label = if leader_range_count > leader_binary_count {
+        "range"
+    } else if leader_binary_count > leader_range_count {
+        "binary"
+    } else if leader_range_count > 0 || leader_binary_count > 0 {
+        "mixed"
+    } else {
+        "none"
+    };
     let leader_label = if leader_candidate_count == 0 {
-        "generic day-market 当前无明显候选样本".to_string()
+        "generic same-day market 当前无明显候选样本".to_string()
     } else if leader_spread_reject_count
         >= leader_candidate_count.saturating_sub(leader_viable_count)
     {
-        format!(
-            "当前主要因为 {} generic day-market spread 过宽而无单",
-            leader_asset_label
-        )
+        match leader_shape_label {
+            "range" => format!(
+                "当前主要因为 {} generic same-day range spread 过宽而无单",
+                leader_asset_label
+            ),
+            "binary" => format!(
+                "当前主要因为 {} generic same-day binary spread 过宽而无单",
+                leader_asset_label
+            ),
+            _ => format!(
+                "当前主要因为 {} generic same-day market spread 过宽而无单（range / binary 混合）",
+                leader_asset_label
+            ),
+        }
     } else {
         format!(
-            "generic day-market 近24h：候选 {}，被 spread 挡掉 {}，仍可交易 {}",
+            "generic same-day market 近24h：候选 {}，被 spread 挡掉 {}，仍可交易 {}",
             leader_candidate_count, leader_spread_reject_count, leader_viable_count
         )
     };
     let action_label = if leader_candidate_count == 0 {
-        "当前 generic day-market 样本很少，先继续观察，不建议全局放松".to_string()
+        "当前 generic same-day market 样本很少，先继续观察，不建议全局放松".to_string()
+    } else if leader_shape_label == "range" {
+        "当前主导样本是 generic same-day range；现有 spread relief 只覆盖 binary，不建议继续沿用同一旋钮放松".to_string()
+    } else if leader_shape_label == "mixed" {
+        "当前 generic same-day 样本是 range / binary 混合；现有 spread relief 只直接覆盖 binary，先继续观察形态占比变化".to_string()
     } else if leader_spread_reject_count > leader_viable_count {
         format!(
-            "如果要恢复新单，优先小步放松 {} generic day-market 的 spread，不建议全局放松",
+            "如果要恢复新单，优先小步放松 {} generic same-day market 的 spread，不建议全局放松",
             leader_asset_label
         )
     } else {
-        "generic day-market 当前并非完全被 spread 主导，先继续观察".to_string()
+        "generic same-day market 当前并非完全被 spread 主导，先继续观察".to_string()
     };
     let validation_label = if leader_candidate_count == 0 {
-        "generic day-market 验证：当前未见足够的新候选样本，先继续观察".to_string()
+        "generic same-day market 验证：当前未见足够的新候选样本，先继续观察".to_string()
+    } else if leader_shape_label == "range" && leader_viable_count == 0 {
+        format!(
+            "generic same-day market 验证：近24h 主导样本是 range，且仍几乎全部被 spread 挡掉；当前 binary-only spread relief 还接不到这部分（主资产：{}）",
+            leader_asset_label
+        )
+    } else if leader_shape_label == "range" {
+        format!(
+            "generic same-day market 验证：近24h 主导样本是 range；当前 binary-only spread relief 不足以解释这部分恢复情况（主资产：{}）",
+            leader_asset_label
+        )
+    } else if leader_shape_label == "mixed" {
+        format!(
+            "generic same-day market 验证：近24h 样本是 range / binary 混合；当前 binary-only spread relief 只能部分覆盖（主资产：{}）",
+            leader_asset_label
+        )
     } else if leader_viable_count == 0 {
         format!(
-            "generic day-market 验证：近24h 候选仍几乎全部被 spread 挡掉，尚未恢复成交条件（主资产：{}）",
+            "generic same-day market 验证：近24h 候选仍几乎全部被 spread 挡掉，尚未恢复成交条件（主资产：{}）",
             leader_asset_label
         )
     } else if leader_spread_reject_count > leader_viable_count {
         format!(
-            "generic day-market 验证：已有可交易候选，但 spread 仍是主导摩擦（主资产：{}）",
+            "generic same-day market 验证：已有可交易候选，但 spread 仍是主导摩擦（主资产：{}）",
             leader_asset_label
         )
     } else {
-        "generic day-market 验证：spread relief 后已出现可交易候选，下一步应观察是否伴随坏退出抬头"
+        "generic same-day market 验证：spread relief 后已出现可交易候选，下一步应观察是否伴随坏退出抬头"
             .to_string()
     };
     let final_action_label = if leader_candidate_count == 0 {
-        "当前 generic day-market 无活跃样本，保持观察，不继续追加放松".to_string()
+        "当前 generic same-day market 无活跃样本，保持观察，不继续追加放松".to_string()
+    } else if leader_shape_label == "range" && leader_viable_count == 0 {
+        format!(
+            "当前 generic same-day 主导样本是 range，且仍主要被 spread 挡住；现有 binary-only spread 放松不应被误当成这部分的下一步动作（主资产：{}）",
+            leader_asset_label
+        )
+    } else if leader_shape_label == "range" {
+        format!(
+            "当前 generic same-day 主导样本仍是 range；先继续观察或单独评估 range 路径，不继续追加 binary-only spread 放松（主资产：{}）",
+            leader_asset_label
+        )
+    } else if leader_shape_label == "mixed" {
+        format!(
+            "当前 generic same-day 样本仍是 range / binary 混合；先观察哪一类在主导恢复，不继续盲目追加统一 spread 放松（主资产：{}）",
+            leader_asset_label
+        )
     } else if leader_viable_count == 0 {
         format!(
-            "当前 generic day-market 仍主要被 spread 挡住；如果要恢复新单，优先只继续小步放松 {} generic 桶",
+            "当前 generic same-day market 仍主要被 spread 挡住；如果要恢复新单，优先只继续小步放松 {} generic 桶",
             leader_asset_label
         )
     } else if leader_spread_reject_count > leader_viable_count {
         format!(
-            "当前 generic day-market 已开始恢复可交易候选，但 spread 仍偏宽；先观察新成交是否伴随坏退出抬头（主资产：{}）",
+            "当前 generic same-day market 已开始恢复可交易候选，但 spread 仍偏宽；先观察新成交是否伴随坏退出抬头（主资产：{}）",
             leader_asset_label
         )
     } else {
-        "当前 generic day-market 已恢复可交易候选，优先观察成交后的坏退出与效率退出，不继续追加 spread 放松".to_string()
+        "当前 generic same-day market 已恢复可交易候选，优先观察成交后的坏退出与效率退出，不继续追加 spread 放松".to_string()
     };
 
     json!({

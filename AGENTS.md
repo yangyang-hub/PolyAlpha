@@ -93,6 +93,16 @@ This file records repository-specific working agreements, high-level project con
 - Why: Live crypto had stopped opening new orders not because of cooldowns or wallet exhaustion but because nearly all recent Bitcoin/XRP generic day-market candidates were failing `spread_too_wide`, so the next bounded optimization step was to loosen only that specific bucket and expose the blockage ratio directly instead of forcing operators to infer it from raw gate rejects.
 
 ### 2026-03-29
+- Area: `crates/pa-monitor/src/diagnostics.rs`, `crates/pa-monitor/src/api.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Removed the hard row-cap truncation from crypto candidate diagnostics so monitor windows now retain the full 72h time-based sample set, added a limited candidate-decision accessor for strategy hot-path consumers, split `generic same-day market` guidance so range-dominant samples no longer recommend binary-only spread relief, and renamed crypto gate reject/scale sample windows to explicit `last_8 / last_24` sample slices with matching UI copy.
+- Why: Candidate-window summaries could still be silently clipped by a raw row limit, `generic same-day` conclusions could tell operators to loosen a binary-only spread knob even when the live blockage was range-dominated, and `recent_24` labels looked like time windows when they were really just the latest 24 decision samples.
+
+### 2026-03-29
+- Area: `crates/pa-monitor/src/diagnostics.rs`, `crates/pa-monitor/src/api.rs`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Switched crypto candidate diagnostics retention from a tiny fixed-length queue to a 72h time-based window with a higher safety cap, narrowed the read-only generic market summary to an explicit `same-day generic` view, and made its `top_assets` ranking deduplicate spread-blocked markets by `condition_id` instead of counting raw repeated scans.
+- Why: The old 100-row candidate queue could silently truncate the supposed `1h/6h/24h` crypto windows under moderate scan volume, while the generic market summary mixed `same_day` with `next_day` despite only same-day spread relief being tuned and overstated top blocked assets by counting repeated decisions for the same market.
+
+### 2026-03-29
 - Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
 - Change: Extended the read-only `generic day-market` summary with backend-owned validation and final-action labels so `/crypto` now explicitly says whether generic day-market is still fully spread-blocked, has started to recover viable candidates, or should stay in watch mode without further spread loosening.
 - Why: After fixing the summary to include generic range candidates, the next operational gap was making the page answer the concrete question “are we still blocked by spread or have we actually restored tradeable generic flow?” without requiring operators to infer that from raw window rows.

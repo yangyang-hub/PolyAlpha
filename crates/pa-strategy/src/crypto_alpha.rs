@@ -21,7 +21,7 @@ use pa_core::types::{
 };
 use pa_market_data::event_calendar::EventCalendarService;
 use pa_monitor::diagnostics::{
-    CryptoCandidateDecision, CryptoExitDecision, recent_crypto_candidate_decisions,
+    CryptoCandidateDecision, CryptoExitDecision, recent_crypto_candidate_decisions_limited,
     recent_crypto_exit_decisions, record_crypto_candidate_decision, record_crypto_exit_decision,
 };
 
@@ -3163,10 +3163,7 @@ impl CryptoAlphaStrategy {
         let mut recency_weight = Decimal::ONE;
         let recency_decay = dec!(0.85);
 
-        for decision in recent_crypto_candidate_decisions()
-            .into_iter()
-            .take(lookback)
-        {
+        for decision in recent_crypto_candidate_decisions_limited(lookback).into_iter() {
             if decision.action != "gate_scale" {
                 recency_weight *= recency_decay;
                 continue;
@@ -6282,10 +6279,9 @@ impl Strategy for CryptoAlphaStrategy {
             let best_near_miss = self
                 .near_miss_edge_bps
                 .swap(0, std::sync::atomic::Ordering::Relaxed);
-            let recent_gate_rejects: Vec<_> = recent_crypto_candidate_decisions()
+            let recent_gate_rejects: Vec<_> = recent_crypto_candidate_decisions_limited(24)
                 .into_iter()
                 .filter(|decision| decision.action == "gate_reject")
-                .take(24)
                 .collect();
             let mut gate_reason_counts: HashMap<String, usize> = HashMap::new();
             let mut gate_asset_counts: HashMap<String, usize> = HashMap::new();

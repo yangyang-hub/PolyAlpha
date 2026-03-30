@@ -8,13 +8,13 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-const MAX_CRYPTO_DECISIONS: usize = 100;
 const MAX_CRYPTO_EXITS: usize = 100;
 const MAX_CRYPTO_PATCH_EXPORTS: usize = 100;
 const MAX_SMART_MONEY_DECISIONS: usize = 200;
 const MAX_SMART_MONEY_EXITS: usize = 100;
 const CRYPTO_EXIT_DEDUP_WINDOW_SECS: i64 = 5;
 const CRYPTO_CAPITAL_EFFICIENCY_EXIT_DEDUP_WINDOW_SECS: i64 = 300;
+const CRYPTO_CANDIDATE_DECISION_RETENTION_HOURS: i64 = 72;
 const WEATHER_REJECTION_RETENTION_MINUTES: i64 = 12 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,16 +173,34 @@ static SMART_MONEY_OPPORTUNITY_ATTRIBUTION: LazyLock<
 pub fn record_crypto_candidate_decision(entry: CryptoCandidateDecision) {
     let mut entries = CRYPTO_CANDIDATE_DECISIONS.lock().unwrap();
     entries.push_front(entry);
-    while entries.len() > MAX_CRYPTO_DECISIONS {
+    let retention_start = Utc::now() - Duration::hours(CRYPTO_CANDIDATE_DECISION_RETENTION_HOURS);
+    while entries
+        .back()
+        .is_some_and(|oldest| oldest.recorded_at < retention_start)
+    {
         entries.pop_back();
     }
 }
 
 pub fn recent_crypto_candidate_decisions() -> Vec<CryptoCandidateDecision> {
+    let retention_start = Utc::now() - Duration::hours(CRYPTO_CANDIDATE_DECISION_RETENTION_HOURS);
     CRYPTO_CANDIDATE_DECISIONS
         .lock()
         .unwrap()
         .iter()
+        .filter(|entry| entry.recorded_at >= retention_start)
+        .cloned()
+        .collect()
+}
+
+pub fn recent_crypto_candidate_decisions_limited(limit: usize) -> Vec<CryptoCandidateDecision> {
+    let retention_start = Utc::now() - Duration::hours(CRYPTO_CANDIDATE_DECISION_RETENTION_HOURS);
+    CRYPTO_CANDIDATE_DECISIONS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry.recorded_at >= retention_start)
+        .take(limit)
         .cloned()
         .collect()
 }
