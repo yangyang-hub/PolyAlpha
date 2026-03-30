@@ -593,6 +593,8 @@ export default function CryptoMarkets() {
     status?.crypto_generic_day_market_summary?.rows.map((row) => ({
       windowLabel: row.window_label,
       candidateCount: row.candidate_count,
+      rangeCount: row.range_count,
+      binaryCount: row.binary_count,
       spreadRejectCount: row.spread_reject_count,
       viableCount: row.viable_count,
       spreadRejectRatio: Number(row.spread_reject_ratio),
@@ -1710,7 +1712,7 @@ export default function CryptoMarkets() {
               <div>
                 <h2 className="card-title text-base">Generic day-market</h2>
                 <div className="text-xs opacity-60">
-                  只读展示 generic 二元 day-market 候选里，有多少被 spread 挡掉，方便判断为什么没有新单
+                  只读展示 generic day-market 候选里，有多少被 spread 挡掉，并区分 range / binary 混合情况
                 </div>
               </div>
             </div>
@@ -1724,12 +1726,23 @@ export default function CryptoMarkets() {
                 {status.crypto_generic_day_market_summary.action_label}
               </div>
             ) : null}
+            {status?.crypto_generic_day_market_summary?.validation_label ? (
+              <div className="mb-2 text-xs text-base-content/70">
+                {status.crypto_generic_day_market_summary.validation_label}
+              </div>
+            ) : null}
+            {status?.crypto_generic_day_market_summary?.final_action_label ? (
+              <div className="mb-3 text-xs text-info">
+                {status.crypto_generic_day_market_summary.final_action_label}
+              </div>
+            ) : null}
             <div className="overflow-x-auto">
               <table className="table table-sm">
                 <thead>
                   <tr>
                     <th>窗口</th>
                     <th>候选市场</th>
+                    <th>Range / Binary</th>
                     <th>被 spread 挡掉</th>
                     <th>仍可交易</th>
                     <th>spread 挡单比例</th>
@@ -1741,6 +1754,9 @@ export default function CryptoMarkets() {
                     <tr key={row.windowLabel}>
                       <td>{row.windowLabel}</td>
                       <td>{row.candidateCount}</td>
+                      <td>
+                        {row.rangeCount} / {row.binaryCount}
+                      </td>
                       <td>{row.spreadRejectCount}</td>
                       <td>{row.viableCount}</td>
                       <td className={row.spreadRejectRatio >= 0.5 ? "text-error" : "text-base-content/70"}>

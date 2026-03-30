@@ -5046,13 +5046,30 @@ fn build_crypto_generic_day_market_summary(
             .filter(|decision| {
                 decision.recorded_at >= window_start
                     && decision.selected_days_to_resolution <= 1
-                    && decision.selected_market_type == "binary"
                     && decision.event_subtype.as_deref().unwrap_or("generic") == "generic"
             })
             .collect::<Vec<_>>();
 
         let candidate_count = matching
             .iter()
+            .map(|decision| decision.selected_condition_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let range_count = matching
+            .iter()
+            .filter(|decision| {
+                normalized_market_shape_label(Some(decision.selected_market_type.as_str()))
+                    == "range"
+            })
+            .map(|decision| decision.selected_condition_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let binary_count = matching
+            .iter()
+            .filter(|decision| {
+                normalized_market_shape_label(Some(decision.selected_market_type.as_str()))
+                    == "directional"
+            })
             .map(|decision| decision.selected_condition_id)
             .collect::<std::collections::HashSet<_>>()
             .len();
@@ -5115,6 +5132,8 @@ fn build_crypto_generic_day_market_summary(
         rows.push(json!({
             "window_label": window_label,
             "candidate_count": candidate_count,
+            "range_count": range_count,
+            "binary_count": binary_count,
             "spread_reject_count": spread_reject_count,
             "viable_count": viable_count,
             "spread_reject_ratio": spread_reject_ratio,
@@ -5156,10 +5175,43 @@ fn build_crypto_generic_day_market_summary(
     } else {
         "generic day-market 当前并非完全被 spread 主导，先继续观察".to_string()
     };
+    let validation_label = if leader_candidate_count == 0 {
+        "generic day-market 验证：当前未见足够的新候选样本，先继续观察".to_string()
+    } else if leader_viable_count == 0 {
+        format!(
+            "generic day-market 验证：近24h 候选仍几乎全部被 spread 挡掉，尚未恢复成交条件（主资产：{}）",
+            leader_asset_label
+        )
+    } else if leader_spread_reject_count > leader_viable_count {
+        format!(
+            "generic day-market 验证：已有可交易候选，但 spread 仍是主导摩擦（主资产：{}）",
+            leader_asset_label
+        )
+    } else {
+        "generic day-market 验证：spread relief 后已出现可交易候选，下一步应观察是否伴随坏退出抬头"
+            .to_string()
+    };
+    let final_action_label = if leader_candidate_count == 0 {
+        "当前 generic day-market 无活跃样本，保持观察，不继续追加放松".to_string()
+    } else if leader_viable_count == 0 {
+        format!(
+            "当前 generic day-market 仍主要被 spread 挡住；如果要恢复新单，优先只继续小步放松 {} generic 桶",
+            leader_asset_label
+        )
+    } else if leader_spread_reject_count > leader_viable_count {
+        format!(
+            "当前 generic day-market 已开始恢复可交易候选，但 spread 仍偏宽；先观察新成交是否伴随坏退出抬头（主资产：{}）",
+            leader_asset_label
+        )
+    } else {
+        "当前 generic day-market 已恢复可交易候选，优先观察成交后的坏退出与效率退出，不继续追加 spread 放松".to_string()
+    };
 
     json!({
         "leader_label": leader_label,
         "action_label": action_label,
+        "validation_label": validation_label,
+        "final_action_label": final_action_label,
         "row_count": rows.len(),
         "rows": rows,
     })

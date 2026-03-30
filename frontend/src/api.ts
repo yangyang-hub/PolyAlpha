@@ -85,10 +85,14 @@ export interface StatusResponse {
   crypto_generic_day_market_summary?: {
     leader_label: string;
     action_label: string;
+    validation_label: string;
+    final_action_label: string;
     row_count: number;
     rows: {
       window_label: string;
       candidate_count: number;
+      range_count: number;
+      binary_count: number;
       spread_reject_count: number;
       viable_count: number;
       spread_reject_ratio: string;

@@ -93,6 +93,16 @@ This file records repository-specific working agreements, high-level project con
 - Why: Live crypto had stopped opening new orders not because of cooldowns or wallet exhaustion but because nearly all recent Bitcoin/XRP generic day-market candidates were failing `spread_too_wide`, so the next bounded optimization step was to loosen only that specific bucket and expose the blockage ratio directly instead of forcing operators to infer it from raw gate rejects.
 
 ### 2026-03-29
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Extended the read-only `generic day-market` summary with backend-owned validation and final-action labels so `/crypto` now explicitly says whether generic day-market is still fully spread-blocked, has started to recover viable candidates, or should stay in watch mode without further spread loosening.
+- Why: After fixing the summary to include generic range candidates, the next operational gap was making the page answer the concrete question “are we still blocked by spread or have we actually restored tradeable generic flow?” without requiring operators to infer that from raw window rows.
+
+### 2026-03-29
+- Area: `crates/pa-monitor/src/api.rs`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`
+- Change: Fixed the read-only `generic day-market` summary to include all generic day-market candidates instead of only binary ones, and added a visible `range / binary` mix column so the `/crypto` page reflects when live same-day generic flow is actually dominated by generic range markets.
+- Why: Live status was showing `spread_too_wide` pressure from generic same-day range candidates while the new summary still reported “no obvious generic day-market samples” because it silently filtered out non-binary markets, which made the no-new-orders explanation inaccurate.
+
+### 2026-03-29
 - Area: `crates/pa-monitor/src/api.rs`
 - Change: Tightened the read-only `ETH same-day range` summary so its automation/observe/rearm labels now rely only on ETH-specific live samples and ETH range cooldowns instead of piggybacking on broader `same_day major range` patch counts, and stopped treating pure profit-only efficiency exits as active automation pressure.
 - Why: The ETH-focused summary could still be contaminated by unrelated BTC/major-range patch history and overstate automation pressure when only healthy profit efficiency exits remained, which made the watch-mode labels less trustworthy.
