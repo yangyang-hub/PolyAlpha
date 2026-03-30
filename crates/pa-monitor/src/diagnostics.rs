@@ -9,12 +9,15 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 const MAX_CRYPTO_EXITS: usize = 100;
+const MAX_CRYPTO_CANDIDATE_DECISIONS: usize = 20_000;
 const MAX_CRYPTO_PATCH_EXPORTS: usize = 100;
 const MAX_SMART_MONEY_DECISIONS: usize = 200;
 const MAX_SMART_MONEY_EXITS: usize = 100;
 const CRYPTO_EXIT_DEDUP_WINDOW_SECS: i64 = 5;
 const CRYPTO_CAPITAL_EFFICIENCY_EXIT_DEDUP_WINDOW_SECS: i64 = 300;
 const CRYPTO_CANDIDATE_DECISION_RETENTION_HOURS: i64 = 72;
+const CRYPTO_CANDIDATE_QUESTION_MAX_CHARS: usize = 160;
+const CRYPTO_CANDIDATE_TEXT_MAX_CHARS: usize = 96;
 const WEATHER_REJECTION_RETENTION_MINUTES: i64 = 12 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +174,7 @@ static SMART_MONEY_OPPORTUNITY_ATTRIBUTION: LazyLock<
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub fn record_crypto_candidate_decision(entry: CryptoCandidateDecision) {
+    let entry = compact_crypto_candidate_decision(entry);
     let mut entries = CRYPTO_CANDIDATE_DECISIONS.lock().unwrap();
     entries.push_front(entry);
     let retention_start = Utc::now() - Duration::hours(CRYPTO_CANDIDATE_DECISION_RETENTION_HOURS);
@@ -178,6 +182,9 @@ pub fn record_crypto_candidate_decision(entry: CryptoCandidateDecision) {
         .back()
         .is_some_and(|oldest| oldest.recorded_at < retention_start)
     {
+        entries.pop_back();
+    }
+    while entries.len() > MAX_CRYPTO_CANDIDATE_DECISIONS {
         entries.pop_back();
     }
 }
@@ -207,6 +214,32 @@ pub fn recent_crypto_candidate_decisions_limited(limit: usize) -> Vec<CryptoCand
 
 pub fn clear_crypto_candidate_decisions() {
     CRYPTO_CANDIDATE_DECISIONS.lock().unwrap().clear();
+}
+
+fn compact_crypto_candidate_decision(mut entry: CryptoCandidateDecision) -> CryptoCandidateDecision {
+    truncate_string(&mut entry.selected_question, CRYPTO_CANDIDATE_QUESTION_MAX_CHARS);
+    truncate_optional_string(
+        &mut entry.replaced_question,
+        CRYPTO_CANDIDATE_QUESTION_MAX_CHARS,
+    );
+    truncate_optional_string(&mut entry.event_context_source, CRYPTO_CANDIDATE_TEXT_MAX_CHARS);
+    truncate_optional_string(&mut entry.event_title, CRYPTO_CANDIDATE_QUESTION_MAX_CHARS);
+    truncate_optional_string(&mut entry.event_category, CRYPTO_CANDIDATE_TEXT_MAX_CHARS);
+    truncate_optional_string(&mut entry.event_subtype, CRYPTO_CANDIDATE_TEXT_MAX_CHARS);
+    entry
+}
+
+fn truncate_optional_string(value: &mut Option<String>, max_chars: usize) {
+    if let Some(inner) = value {
+        truncate_string(inner, max_chars);
+    }
+}
+
+fn truncate_string(value: &mut String, max_chars: usize) {
+    if value.chars().count() <= max_chars {
+        return;
+    }
+    *value = value.chars().take(max_chars).collect();
 }
 
 pub fn record_crypto_exit_decision(entry: CryptoExitDecision) {

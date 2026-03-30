@@ -3200,7 +3200,7 @@ async fn get_positions(
 /// GET /api/crypto/decisions — recent crypto same-asset candidate decisions.
 async fn get_crypto_candidate_decisions() -> Json<Value> {
     Json(json!(
-        crate::diagnostics::recent_crypto_candidate_decisions()
+        crate::diagnostics::recent_crypto_candidate_decisions_limited(1000)
     ))
 }
 
