@@ -17,6 +17,7 @@ use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
+use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use pa_core::config::{DatabaseConfig, WeatherConfig};
@@ -429,8 +430,20 @@ pub fn spawn_weather_forecast_snapshot_refresh(
             &weather_config.met_office_obs_api_key,
         );
         let mut interval = tokio::time::interval(Duration::from_secs(1800));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut first_run = true;
 
         loop {
+            if !first_run {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = interval.tick() => {}
+                }
+            } else {
+                // Run once immediately on startup, then defer to the 30-minute interval.
+                first_run = false;
+            }
+
             let mut written = 0u32;
             for location in WEATHER_LOCATIONS
                 .iter()
@@ -486,11 +499,6 @@ pub fn spawn_weather_forecast_snapshot_refresh(
 
             if written > 0 {
                 tracing::info!(rows = written, "Weather forecast snapshots archived");
-            }
-
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                _ = interval.tick() => {}
             }
         }
     });

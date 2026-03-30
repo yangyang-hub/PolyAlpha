@@ -83,6 +83,11 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-30
+- Area: `src/app/tasks.rs`
+- Change: Fixed the weather forecast snapshot archive scheduler so it runs exactly once at startup and then waits for the configured 30-minute interval, instead of immediately consuming the first `tokio::time::interval` tick and running a second archive pass a few seconds later.
+- Why: Production startup logs showed `Weather forecast snapshots archived` firing twice within about five seconds, which meant the archive task was needlessly duplicating DB writes and startup load even though the configured cadence is one pass per 30 minutes.
+
+### 2026-03-30
 - Area: `crates/pa-monitor/src/diagnostics.rs`, `crates/pa-monitor/src/api.rs`
 - Change: Re-bounded in-process crypto candidate diagnostics by adding a `20_000`-entry hard cap alongside the existing `72h` retention window, compacting large per-decision text fields before storing them, and limiting `/api/crypto/decisions` to the newest 1,000 records instead of dumping the entire retained set.
 - Why: After moving candidate diagnostics to pure time-based retention, high-frequency crypto scanning could accumulate a very large 72h queue of heavy string-bearing decision records, driving memory growth and large JSON responses even when the strategy itself held no positions.
