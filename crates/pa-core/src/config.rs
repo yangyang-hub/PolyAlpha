@@ -277,7 +277,13 @@ fn default_noaa_user_agent() -> String {
     "PolyAlpha/1.0".to_string()
 }
 fn default_target_cities() -> Vec<String> {
-    vec![]
+    vec![
+        "Atlanta".to_string(),
+        "Miami".to_string(),
+        "New York".to_string(),
+        "Dallas".to_string(),
+        "Seattle".to_string(),
+    ]
 }
 
 impl Default for WeatherConfig {
@@ -723,6 +729,12 @@ pub struct CryptoAlphaConfig {
     /// Additional max-spread multiplier for same-day alt markets.
     #[serde(default = "default_crypto_same_day_alt_max_spread_multiplier")]
     pub same_day_alt_max_spread_multiplier: Decimal,
+    /// Additional max-spread multiplier for same-day major generic binary markets.
+    #[serde(default = "default_crypto_same_day_major_generic_max_spread_multiplier")]
+    pub same_day_major_generic_max_spread_multiplier: Decimal,
+    /// Additional max-spread multiplier for same-day alt generic binary markets.
+    #[serde(default = "default_crypto_same_day_alt_generic_max_spread_multiplier")]
+    pub same_day_alt_generic_max_spread_multiplier: Decimal,
     /// Additional max-spread multiplier for same-day alt range/NegRisk markets.
     #[serde(default = "default_crypto_same_day_alt_range_max_spread_multiplier")]
     pub same_day_alt_range_max_spread_multiplier: Decimal,
@@ -1151,6 +1163,12 @@ fn default_crypto_same_day_max_spread_multiplier() -> Decimal {
 fn default_crypto_same_day_alt_max_spread_multiplier() -> Decimal {
     Decimal::new(85, 2)
 } // 0.85
+fn default_crypto_same_day_major_generic_max_spread_multiplier() -> Decimal {
+    Decimal::new(105, 2)
+} // 1.05
+fn default_crypto_same_day_alt_generic_max_spread_multiplier() -> Decimal {
+    Decimal::new(110, 2)
+} // 1.10
 fn default_crypto_same_day_alt_range_max_spread_multiplier() -> Decimal {
     Decimal::new(110, 2)
 } // 1.10
@@ -1439,6 +1457,10 @@ impl Default for CryptoAlphaConfig {
             medium_horizon_min_edge_multiplier: default_crypto_medium_horizon_min_edge_multiplier(),
             same_day_max_spread_multiplier: default_crypto_same_day_max_spread_multiplier(),
             same_day_alt_max_spread_multiplier: default_crypto_same_day_alt_max_spread_multiplier(),
+            same_day_major_generic_max_spread_multiplier:
+                default_crypto_same_day_major_generic_max_spread_multiplier(),
+            same_day_alt_generic_max_spread_multiplier:
+                default_crypto_same_day_alt_generic_max_spread_multiplier(),
             same_day_alt_range_max_spread_multiplier:
                 default_crypto_same_day_alt_range_max_spread_multiplier(),
             same_day_range_max_spread_multiplier:

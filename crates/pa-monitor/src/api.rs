@@ -1116,6 +1116,8 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         .take(24)
         .cloned()
         .collect();
+    let crypto_generic_day_market_summary =
+        build_crypto_generic_day_market_summary(&recent_candidate_decisions);
     let mut gate_reason_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     let mut gate_asset_counts: std::collections::HashMap<String, usize> =
@@ -3002,6 +3004,7 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
         "crypto_bucket_window_summary": crypto_bucket_window_summary,
         "crypto_subtype_window_summary": crypto_subtype_window_summary,
         "crypto_asset_long_window_summary": crypto_asset_long_window_summary,
+        "crypto_generic_day_market_summary": crypto_generic_day_market_summary,
         "crypto_same_day_major_range_summary": crypto_same_day_major_range_summary,
         "crypto_eth_same_day_range_window_summary": crypto_eth_same_day_range_window_summary,
         "smart_money_signal_summary": {
@@ -5016,6 +5019,147 @@ fn build_eth_same_day_range_window_summary(
         "short_window_reactivation_label": short_window_reactivation_label,
         "auto_patch_rearm_label": auto_patch_rearm_label,
         "spot_refresh_recommendation_label": spot_refresh_recommendation_label,
+        "row_count": rows.len(),
+        "rows": rows,
+    })
+}
+
+fn build_crypto_generic_day_market_summary(
+    candidate_decisions: &[crate::diagnostics::CryptoCandidateDecision],
+) -> Value {
+    let now = Utc::now();
+    let windows = [
+        ("1h", chrono::Duration::hours(1)),
+        ("6h", chrono::Duration::hours(6)),
+        ("24h", chrono::Duration::hours(24)),
+    ];
+    let mut rows = Vec::new();
+    let mut leader_candidate_count = 0usize;
+    let mut leader_spread_reject_count = 0usize;
+    let mut leader_viable_count = 0usize;
+    let mut leader_top_assets: Vec<(String, usize)> = Vec::new();
+
+    for (window_label, window_duration) in windows {
+        let window_start = now - window_duration;
+        let matching = candidate_decisions
+            .iter()
+            .filter(|decision| {
+                decision.recorded_at >= window_start
+                    && decision.selected_days_to_resolution <= 1
+                    && decision.selected_market_type == "binary"
+                    && decision.event_subtype.as_deref().unwrap_or("generic") == "generic"
+            })
+            .collect::<Vec<_>>();
+
+        let candidate_count = matching
+            .iter()
+            .map(|decision| decision.selected_condition_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let spread_reject_count = matching
+            .iter()
+            .filter(|decision| {
+                decision.action == "gate_reject" && decision.reason == "spread_too_wide"
+            })
+            .map(|decision| decision.selected_condition_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let viable_count = matching
+            .iter()
+            .filter(|decision| decision.action != "gate_reject")
+            .map(|decision| decision.selected_condition_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let mut spread_asset_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for decision in matching.iter().filter(|decision| {
+            decision.action == "gate_reject" && decision.reason == "spread_too_wide"
+        }) {
+            *spread_asset_counts
+                .entry(decision.asset.clone())
+                .or_insert(0) += 1;
+        }
+        let mut top_assets = spread_asset_counts
+            .iter()
+            .map(|(label, count)| json!({ "label": label, "count": count }))
+            .collect::<Vec<_>>();
+        top_assets.sort_by(|a, b| {
+            let count_a = a.get("count").and_then(Value::as_u64).unwrap_or(0);
+            let count_b = b.get("count").and_then(Value::as_u64).unwrap_or(0);
+            let label_a = a.get("label").and_then(Value::as_str).unwrap_or("");
+            let label_b = b.get("label").and_then(Value::as_str).unwrap_or("");
+            count_b.cmp(&count_a).then_with(|| label_a.cmp(label_b))
+        });
+        let spread_reject_ratio = if candidate_count == 0 {
+            Decimal::ZERO
+        } else {
+            Decimal::from(spread_reject_count as u64) / Decimal::from(candidate_count as u64)
+        };
+
+        if window_label == "24h" {
+            leader_candidate_count = candidate_count;
+            leader_spread_reject_count = spread_reject_count;
+            leader_viable_count = viable_count;
+            leader_top_assets = top_assets
+                .iter()
+                .filter_map(|value: &Value| {
+                    Some((
+                        value.get("label")?.as_str()?.to_string(),
+                        value.get("count")?.as_u64()? as usize,
+                    ))
+                })
+                .take(2)
+                .collect();
+        }
+
+        rows.push(json!({
+            "window_label": window_label,
+            "candidate_count": candidate_count,
+            "spread_reject_count": spread_reject_count,
+            "viable_count": viable_count,
+            "spread_reject_ratio": spread_reject_ratio,
+            "top_assets": top_assets,
+        }));
+    }
+
+    let leader_asset_label = if leader_top_assets.is_empty() {
+        "generic day-market".to_string()
+    } else {
+        leader_top_assets
+            .iter()
+            .map(|(asset, _)| asset.clone())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    let leader_label = if leader_candidate_count == 0 {
+        "generic day-market 当前无明显候选样本".to_string()
+    } else if leader_spread_reject_count
+        >= leader_candidate_count.saturating_sub(leader_viable_count)
+    {
+        format!(
+            "当前主要因为 {} generic day-market spread 过宽而无单",
+            leader_asset_label
+        )
+    } else {
+        format!(
+            "generic day-market 近24h：候选 {}，被 spread 挡掉 {}，仍可交易 {}",
+            leader_candidate_count, leader_spread_reject_count, leader_viable_count
+        )
+    };
+    let action_label = if leader_candidate_count == 0 {
+        "当前 generic day-market 样本很少，先继续观察，不建议全局放松".to_string()
+    } else if leader_spread_reject_count > leader_viable_count {
+        format!(
+            "如果要恢复新单，优先小步放松 {} generic day-market 的 spread，不建议全局放松",
+            leader_asset_label
+        )
+    } else {
+        "generic day-market 当前并非完全被 spread 主导，先继续观察".to_string()
+    };
+
+    json!({
+        "leader_label": leader_label,
+        "action_label": action_label,
         "row_count": rows.len(),
         "rows": rows,
     })

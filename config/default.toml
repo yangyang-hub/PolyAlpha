@@ -80,7 +80,7 @@ noaa_user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, li
 kma_api_key = ""                     # Optional: required for Seoul/KMA forecast access
 met_office_api_key = ""              # Optional: required for London/Met Office forecast access
 met_office_obs_api_key = ""          # Optional: required for London/Met Office observations access
-target_cities = []
+target_cities = ["Atlanta", "Miami", "New York", "Dallas", "Seattle"]
 
 [weather.forecast_error]
 temperature_sigma_f = 3.0
@@ -182,6 +182,8 @@ short_horizon_min_edge_multiplier = 1.50
 medium_horizon_min_edge_multiplier = 1.20
 same_day_max_spread_multiplier = 0.55
 same_day_alt_max_spread_multiplier = 0.85
+same_day_major_generic_max_spread_multiplier = 1.05
+same_day_alt_generic_max_spread_multiplier = 1.10
 same_day_alt_range_max_spread_multiplier = 1.10
 same_day_range_max_spread_multiplier = 0.85
 same_day_major_range_max_spread_multiplier = 0.90

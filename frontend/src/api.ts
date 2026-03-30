@@ -82,6 +82,19 @@ export interface StatusResponse {
       top_subtype: { label: string; count: number } | null;
     }[];
   };
+  crypto_generic_day_market_summary?: {
+    leader_label: string;
+    action_label: string;
+    row_count: number;
+    rows: {
+      window_label: string;
+      candidate_count: number;
+      spread_reject_count: number;
+      viable_count: number;
+      spread_reject_ratio: string;
+      top_assets: { label: string; count: number }[];
+    }[];
+  };
   crypto_gate_scale_summary?: {
     recent_count: number;
     top_reason: { label: string; count: number } | null;

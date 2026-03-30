@@ -627,7 +627,7 @@ capital_efficiency_threshold = 0.98
 kma_api_key = ""
 met_office_api_key = ""
 met_office_obs_api_key = ""
-target_cities = []
+target_cities = ["Atlanta", "Miami", "New York", "Dallas", "Seattle"]
 
 [weather.forecast_error]
 temperature_sigma_f = 3.0
@@ -874,6 +874,8 @@ same_day_major_range_min_edge_multiplier = 1.10
 short_horizon_min_edge_multiplier = 1.50
 same_day_max_spread_multiplier = 0.55
 same_day_alt_max_spread_multiplier = 0.85
+same_day_major_generic_max_spread_multiplier = 1.05
+same_day_alt_generic_max_spread_multiplier = 1.10
 same_day_alt_range_max_spread_multiplier = 1.10
 same_day_range_max_spread_multiplier = 0.85
 same_day_major_range_max_spread_multiplier = 0.90

@@ -589,6 +589,15 @@ export default function CryptoMarkets() {
     topGateAssetEntry,
     topGateSubtypeEntry,
   );
+  const genericDayMarketRows =
+    status?.crypto_generic_day_market_summary?.rows.map((row) => ({
+      windowLabel: row.window_label,
+      candidateCount: row.candidate_count,
+      spreadRejectCount: row.spread_reject_count,
+      viableCount: row.viable_count,
+      spreadRejectRatio: Number(row.spread_reject_ratio),
+      topAssets: row.top_assets.map((entry) => `${entry.label} ${entry.count}`).join(" / "),
+    })) ?? [];
   const gateScaleReasonBreakdown =
     status?.crypto_gate_scale_summary?.reason_counts?.length
       ? status.crypto_gate_scale_summary.reason_counts.map(
@@ -1685,6 +1694,59 @@ export default function CryptoMarkets() {
                       <td className={row.openPnlBid >= 0 ? "text-success" : "text-error"}>
                         ${row.openPnlBid.toFixed(2)}
                       </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!!genericDayMarketRows.length && (
+        <div className="card bg-base-200 shadow-sm">
+          <div className="card-body p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h2 className="card-title text-base">Generic day-market</h2>
+                <div className="text-xs opacity-60">
+                  只读展示 generic 二元 day-market 候选里，有多少被 spread 挡掉，方便判断为什么没有新单
+                </div>
+              </div>
+            </div>
+            {status?.crypto_generic_day_market_summary?.leader_label ? (
+              <div className="mb-2 text-xs text-base-content/70">
+                {status.crypto_generic_day_market_summary.leader_label}
+              </div>
+            ) : null}
+            {status?.crypto_generic_day_market_summary?.action_label ? (
+              <div className="mb-3 text-xs text-warning">
+                {status.crypto_generic_day_market_summary.action_label}
+              </div>
+            ) : null}
+            <div className="overflow-x-auto">
+              <table className="table table-sm">
+                <thead>
+                  <tr>
+                    <th>窗口</th>
+                    <th>候选市场</th>
+                    <th>被 spread 挡掉</th>
+                    <th>仍可交易</th>
+                    <th>spread 挡单比例</th>
+                    <th>主被拒资产</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {genericDayMarketRows.map((row) => (
+                    <tr key={row.windowLabel}>
+                      <td>{row.windowLabel}</td>
+                      <td>{row.candidateCount}</td>
+                      <td>{row.spreadRejectCount}</td>
+                      <td>{row.viableCount}</td>
+                      <td className={row.spreadRejectRatio >= 0.5 ? "text-error" : "text-base-content/70"}>
+                        {(row.spreadRejectRatio * 100).toFixed(0)}%
+                      </td>
+                      <td>{row.topAssets || "-"}</td>
                     </tr>
                   ))}
                 </tbody>

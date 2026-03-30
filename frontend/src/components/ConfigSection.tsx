@@ -169,6 +169,8 @@ const FIELD_HINTS: Record<string, Record<string, string>> = {
     medium_horizon_min_edge_multiplier: "中期期限最小 edge 乘数",
     same_day_max_spread_multiplier: "当日期限最大价差乘数",
     same_day_alt_max_spread_multiplier: "当日期限山寨币额外最大价差乘数",
+    same_day_major_generic_max_spread_multiplier: "当日期限主流币 generic 二元盘额外最大价差乘数",
+    same_day_alt_generic_max_spread_multiplier: "当日期限山寨币 generic 二元盘额外最大价差乘数",
     same_day_alt_range_max_spread_multiplier: "当日期限山寨币区间盘额外最大价差乘数",
     same_day_range_max_spread_multiplier: "当日期限区间盘额外最大价差乘数",
     same_day_major_range_max_spread_multiplier: "当日期限主流币区间盘额外最大价差乘数",
@@ -650,7 +652,7 @@ function FieldDisplay({
           <div className="mt-2 text-xs opacity-60">
             {selected.length === 0
               ? "当前为留空模式：允许所有当前可交易的天气城市。"
-              : `当前选中 ${selected.length} 个城市。`}
+              : `当前选中 ${selected.length} 个城市。默认建议先只跑高质量 NOAA 城市。`}
           </div>
           <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
             {options.map((city) => {

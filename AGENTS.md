@@ -82,6 +82,16 @@ This file records repository-specific working agreements, high-level project con
 
 ## Change Log
 
+### 2026-03-30
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `README.md`, `frontend/src/components/ConfigSection.tsx`
+- Change: Changed the default weather `target_cities` from empty/all-trade-enabled to the preferred NOAA set (`Atlanta`, `Miami`, `New York`, `Dallas`, `Seattle`) and updated operator-facing config copy to reflect that default posture.
+- Why: Live weather remained healthy but produced no new trades because spread/price blockers were dominated by a broad city universe, so the next bounded optimization step is to focus default scanning on the highest-confidence NOAA cities before loosening more thresholds.
+
+### 2026-03-29
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `crates/pa-monitor/src/api.rs`, `config/default.toml`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`, `frontend/src/components/ConfigSection.tsx`, `README.md`
+- Change: Added narrow same-day generic spread relief for major and alt binary crypto markets, and added a read-only `generic day-market` summary on `/crypto` that reports recent `1h/6h/24h` candidate counts, spread-blocked counts/ratios, top blocked assets, and a direct “why there are no new orders” action label.
+- Why: Live crypto had stopped opening new orders not because of cooldowns or wallet exhaustion but because nearly all recent Bitcoin/XRP generic day-market candidates were failing `spread_too_wide`, so the next bounded optimization step was to loosen only that specific bucket and expose the blockage ratio directly instead of forcing operators to infer it from raw gate rejects.
+
 ### 2026-03-29
 - Area: `crates/pa-monitor/src/api.rs`
 - Change: Tightened the read-only `ETH same-day range` summary so its automation/observe/rearm labels now rely only on ETH-specific live samples and ETH range cooldowns instead of piggybacking on broader `same_day major range` patch counts, and stopped treating pure profit-only efficiency exits as active automation pressure.

@@ -1118,45 +1118,52 @@ impl CryptoAlphaStrategy {
         let mut min_edge_bps = self.config.min_edge_bps;
         let mut max_spread_bps = self.config.max_spread_bps;
 
-        let (horizon_edge_multiplier, horizon_spread_multiplier) =
-            if self.is_same_day_resolution(days_to_resolution) {
-                let mut edge_multiplier = self.config.same_day_min_edge_multiplier;
-                let mut spread_multiplier = self.config.same_day_max_spread_multiplier;
+        let (horizon_edge_multiplier, horizon_spread_multiplier) = if self
+            .is_same_day_resolution(days_to_resolution)
+        {
+            let mut edge_multiplier = self.config.same_day_min_edge_multiplier;
+            let mut spread_multiplier = self.config.same_day_max_spread_multiplier;
+            if Self::is_alt_asset(asset) {
+                edge_multiplier *= self.config.same_day_alt_min_edge_multiplier;
+                spread_multiplier *= self.config.same_day_alt_max_spread_multiplier;
+            }
+            if self.is_same_day_range_market(days_to_resolution, market_type) {
+                edge_multiplier *= self.config.same_day_range_min_edge_multiplier;
+                spread_multiplier *= self.config.same_day_range_max_spread_multiplier;
                 if Self::is_alt_asset(asset) {
-                    edge_multiplier *= self.config.same_day_alt_min_edge_multiplier;
-                    spread_multiplier *= self.config.same_day_alt_max_spread_multiplier;
+                    spread_multiplier *= self.config.same_day_alt_range_max_spread_multiplier;
+                } else if Self::is_major_asset(asset) {
+                    edge_multiplier *= self.config.same_day_major_range_min_edge_multiplier;
+                    spread_multiplier *= self.config.same_day_major_range_max_spread_multiplier;
                 }
-                if self.is_same_day_range_market(days_to_resolution, market_type) {
-                    edge_multiplier *= self.config.same_day_range_min_edge_multiplier;
-                    spread_multiplier *= self.config.same_day_range_max_spread_multiplier;
-                    if Self::is_alt_asset(asset) {
-                        spread_multiplier *= self.config.same_day_alt_range_max_spread_multiplier;
-                    } else if Self::is_major_asset(asset) {
-                        edge_multiplier *= self.config.same_day_major_range_min_edge_multiplier;
-                        spread_multiplier *= self.config.same_day_major_range_max_spread_multiplier;
-                    }
+            } else if matches!(market_type, CryptoMarketType::Binary) {
+                if Self::is_alt_asset(asset) {
+                    spread_multiplier *= self.config.same_day_alt_generic_max_spread_multiplier;
+                } else if Self::is_major_asset(asset) {
+                    spread_multiplier *= self.config.same_day_major_generic_max_spread_multiplier;
                 }
-                (edge_multiplier, spread_multiplier)
-            } else if self.is_short_horizon_resolution(days_to_resolution) {
-                let mut spread_multiplier = self.config.short_horizon_max_spread_multiplier;
-                if self.is_next_day_resolution(days_to_resolution)
-                    && Self::is_alt_asset(asset)
-                    && matches!(market_type, CryptoMarketType::Range)
-                {
-                    spread_multiplier *= self.config.next_day_alt_range_max_spread_multiplier;
-                }
-                (
-                    self.config.short_horizon_min_edge_multiplier,
-                    spread_multiplier,
-                )
-            } else if days_to_resolution <= self.config.medium_horizon_max_days {
-                (
-                    self.config.medium_horizon_min_edge_multiplier,
-                    self.config.medium_horizon_max_spread_multiplier,
-                )
-            } else {
-                (Decimal::ONE, Decimal::ONE)
-            };
+            }
+            (edge_multiplier, spread_multiplier)
+        } else if self.is_short_horizon_resolution(days_to_resolution) {
+            let mut spread_multiplier = self.config.short_horizon_max_spread_multiplier;
+            if self.is_next_day_resolution(days_to_resolution)
+                && Self::is_alt_asset(asset)
+                && matches!(market_type, CryptoMarketType::Range)
+            {
+                spread_multiplier *= self.config.next_day_alt_range_max_spread_multiplier;
+            }
+            (
+                self.config.short_horizon_min_edge_multiplier,
+                spread_multiplier,
+            )
+        } else if days_to_resolution <= self.config.medium_horizon_max_days {
+            (
+                self.config.medium_horizon_min_edge_multiplier,
+                self.config.medium_horizon_max_spread_multiplier,
+            )
+        } else {
+            (Decimal::ONE, Decimal::ONE)
+        };
 
         min_edge_bps = (Decimal::from(min_edge_bps) * horizon_edge_multiplier)
             .ceil()
@@ -6938,6 +6945,8 @@ mod tests {
             medium_horizon_min_edge_multiplier: dec!(1.20),
             same_day_max_spread_multiplier: dec!(0.65),
             same_day_alt_max_spread_multiplier: dec!(0.85),
+            same_day_major_generic_max_spread_multiplier: dec!(1.05),
+            same_day_alt_generic_max_spread_multiplier: dec!(1.10),
             same_day_alt_range_max_spread_multiplier: dec!(1.10),
             same_day_range_max_spread_multiplier: dec!(0.85),
             same_day_major_range_max_spread_multiplier: dec!(0.90),
@@ -7128,7 +7137,7 @@ mod tests {
             .await;
 
         assert_eq!(edge, 1000);
-        assert_eq!(spread, 750);
+        assert_eq!(spread, 787);
         assert_eq!(
             strategy.effective_horizon_size_multiplier(
                 &CRYPTO_ASSETS[0],
@@ -8524,6 +8533,8 @@ mod tests {
             medium_horizon_min_edge_multiplier: dec!(1.20),
             same_day_max_spread_multiplier: dec!(0.65),
             same_day_alt_max_spread_multiplier: dec!(0.85),
+            same_day_major_generic_max_spread_multiplier: dec!(1.05),
+            same_day_alt_generic_max_spread_multiplier: dec!(1.10),
             same_day_alt_range_max_spread_multiplier: dec!(1.10),
             same_day_range_max_spread_multiplier: dec!(0.85),
             same_day_major_range_max_spread_multiplier: dec!(0.90),
@@ -9271,6 +9282,8 @@ mod tests {
             medium_horizon_min_edge_multiplier: dec!(1.20),
             same_day_max_spread_multiplier: dec!(0.65),
             same_day_alt_max_spread_multiplier: dec!(0.85),
+            same_day_major_generic_max_spread_multiplier: dec!(1.05),
+            same_day_alt_generic_max_spread_multiplier: dec!(1.10),
             same_day_alt_range_max_spread_multiplier: dec!(1.10),
             same_day_range_max_spread_multiplier: dec!(0.85),
             same_day_major_range_max_spread_multiplier: dec!(0.90),
