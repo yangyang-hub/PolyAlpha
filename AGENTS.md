@@ -83,6 +83,11 @@ This file records repository-specific working agreements, high-level project con
 ## Change Log
 
 ### 2026-03-30
+- Area: `crates/pa-core/src/config.rs`, `crates/pa-monitor/src/api.rs`, `config/default.toml`, `README.md`
+- Change: Raised the dedicated same-day generic range spread multipliers another small step, tightened the ETH same-day range defaults by lowering its reversal-buffer multiplier and raising its hold-edge multiplier, added a narrow `next_day + major + range + generic` sizing override for `min_order_or_budget` pressure, and changed monitor cooldown buckets to score against the full retained crypto exit set instead of only the latest 24 exit samples.
+- Why: Live crypto still had almost no new fills because same-day generic range candidates were overwhelmingly blocked on spread, ETH same-day range churn still pointed to stricter post-entry handling, major/range candidates had started failing on minimum-order budget friction, and the `/crypto` page could still show ETH exit pressure without any active cooldown because the cooldown summary was truncating its own exit input too aggressively.
+
+### 2026-03-30
 - Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `config/default.toml`, `frontend/src/components/ConfigSection.tsx`, `README.md`
 - Change: Added dedicated same-day generic range spread multipliers for major and alt crypto markets, raised the existing same-day generic binary spread multipliers slightly, and wired the runtime entry-threshold logic so same-day generic range markets get their own narrow spread relief instead of sharing only the binary-specific path.
 - Why: Live crypto remained idle because nearly all recent same-day generic candidates were being rejected on spread, and status data showed the blocked flow was not limited to binary markets; the next bounded recovery step is to loosen spread only for the current same-day generic buckets rather than globally or via horizon changes.

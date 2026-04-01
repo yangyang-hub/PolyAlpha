@@ -1147,8 +1147,9 @@ impl CryptoAlphaStrategy {
                         spread_multiplier *=
                             self.config.same_day_alt_generic_range_max_spread_multiplier;
                     } else if Self::is_major_asset(asset) {
-                        spread_multiplier *=
-                            self.config.same_day_major_generic_range_max_spread_multiplier;
+                        spread_multiplier *= self
+                            .config
+                            .same_day_major_generic_range_max_spread_multiplier;
                     }
                 }
             } else if matches!(market_type, CryptoMarketType::Binary) {

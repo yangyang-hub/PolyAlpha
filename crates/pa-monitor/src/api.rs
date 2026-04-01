@@ -1284,10 +1284,7 @@ async fn get_status(State(state): State<Arc<ApiState>>) -> Json<Value> {
     let gate_scale_asset_counts_view = sorted_count_entries(&gate_scale_asset_counts);
     let gate_scale_subtype_counts_view = sorted_count_entries(&gate_scale_subtype_counts);
 
-    let recent_exits: Vec<_> = crate::diagnostics::recent_crypto_exit_decisions()
-        .into_iter()
-        .take(24)
-        .collect();
+    let recent_exits = crate::diagnostics::recent_crypto_exit_decisions();
     let crypto_cooldown_buckets = {
         let mut entries = active_cooldown_entries(
             &recent_exits,

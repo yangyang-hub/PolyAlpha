@@ -876,8 +876,8 @@ same_day_max_spread_multiplier = 0.55
 same_day_alt_max_spread_multiplier = 0.85
 same_day_major_generic_max_spread_multiplier = 1.08
 same_day_alt_generic_max_spread_multiplier = 1.15
-same_day_major_generic_range_max_spread_multiplier = 1.05
-same_day_alt_generic_range_max_spread_multiplier = 1.10
+same_day_major_generic_range_max_spread_multiplier = 1.08
+same_day_alt_generic_range_max_spread_multiplier = 1.15
 same_day_alt_range_max_spread_multiplier = 1.10
 same_day_range_max_spread_multiplier = 0.85
 same_day_major_range_max_spread_multiplier = 0.90
@@ -885,7 +885,7 @@ next_day_alt_range_max_spread_multiplier = 1.10
 same_day_alt_capital_efficiency_multiplier = 0.98
 same_day_major_range_capital_efficiency_multiplier = 0.97
 same_day_eth_range_capital_efficiency_multiplier = 0.93
-same_day_eth_range_exit_buffer_multiplier = 1.10
+same_day_eth_range_exit_buffer_multiplier = 1.05
 same_day_exit_buffer_multiplier = 0.30
 same_day_alt_exit_buffer_multiplier = 0.90
 same_day_range_exit_buffer_multiplier = 0.85
@@ -893,7 +893,7 @@ same_day_hold_edge_multiplier = 1.90
 same_day_alt_hold_edge_multiplier = 1.10
 same_day_range_hold_edge_multiplier = 1.10
 same_day_major_range_hold_edge_multiplier = 1.10
-same_day_eth_range_hold_edge_multiplier = 1.10
+same_day_eth_range_hold_edge_multiplier = 1.15
 
 ### Smart Money Replay CLI
 

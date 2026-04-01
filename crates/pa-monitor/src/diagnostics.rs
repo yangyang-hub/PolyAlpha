@@ -216,13 +216,21 @@ pub fn clear_crypto_candidate_decisions() {
     CRYPTO_CANDIDATE_DECISIONS.lock().unwrap().clear();
 }
 
-fn compact_crypto_candidate_decision(mut entry: CryptoCandidateDecision) -> CryptoCandidateDecision {
-    truncate_string(&mut entry.selected_question, CRYPTO_CANDIDATE_QUESTION_MAX_CHARS);
+fn compact_crypto_candidate_decision(
+    mut entry: CryptoCandidateDecision,
+) -> CryptoCandidateDecision {
+    truncate_string(
+        &mut entry.selected_question,
+        CRYPTO_CANDIDATE_QUESTION_MAX_CHARS,
+    );
     truncate_optional_string(
         &mut entry.replaced_question,
         CRYPTO_CANDIDATE_QUESTION_MAX_CHARS,
     );
-    truncate_optional_string(&mut entry.event_context_source, CRYPTO_CANDIDATE_TEXT_MAX_CHARS);
+    truncate_optional_string(
+        &mut entry.event_context_source,
+        CRYPTO_CANDIDATE_TEXT_MAX_CHARS,
+    );
     truncate_optional_string(&mut entry.event_title, CRYPTO_CANDIDATE_QUESTION_MAX_CHARS);
     truncate_optional_string(&mut entry.event_category, CRYPTO_CANDIDATE_TEXT_MAX_CHARS);
     truncate_optional_string(&mut entry.event_subtype, CRYPTO_CANDIDATE_TEXT_MAX_CHARS);

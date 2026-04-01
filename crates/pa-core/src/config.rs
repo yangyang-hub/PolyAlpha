@@ -1176,11 +1176,11 @@ fn default_crypto_same_day_alt_generic_max_spread_multiplier() -> Decimal {
     Decimal::new(115, 2)
 } // 1.15
 fn default_crypto_same_day_major_generic_range_max_spread_multiplier() -> Decimal {
-    Decimal::new(105, 2)
-} // 1.05
+    Decimal::new(108, 2)
+} // 1.08
 fn default_crypto_same_day_alt_generic_range_max_spread_multiplier() -> Decimal {
-    Decimal::new(110, 2)
-} // 1.10
+    Decimal::new(115, 2)
+} // 1.15
 fn default_crypto_same_day_alt_range_max_spread_multiplier() -> Decimal {
     Decimal::new(110, 2)
 } // 1.10
@@ -1212,8 +1212,8 @@ fn default_crypto_same_day_eth_range_capital_efficiency_multiplier() -> Decimal 
     Decimal::new(93, 2)
 } // 0.93
 fn default_crypto_same_day_eth_range_exit_buffer_multiplier() -> Decimal {
-    Decimal::new(110, 2)
-} // 1.10
+    Decimal::new(105, 2)
+} // 1.05
 fn default_crypto_short_horizon_capital_efficiency_threshold() -> Decimal {
     Decimal::new(92, 2)
 } // 0.92
@@ -1251,8 +1251,8 @@ fn default_crypto_same_day_major_range_hold_edge_multiplier() -> Decimal {
     Decimal::new(110, 2)
 } // 1.10
 fn default_crypto_same_day_eth_range_hold_edge_multiplier() -> Decimal {
-    Decimal::new(110, 2)
-} // 1.10
+    Decimal::new(115, 2)
+} // 1.15
 fn default_crypto_short_horizon_hold_edge_multiplier() -> Decimal {
     Decimal::new(15, 1)
 } // 1.5
