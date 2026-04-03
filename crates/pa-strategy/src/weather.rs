@@ -2495,6 +2495,13 @@ impl WeatherAlphaStrategy {
         )
     }
 
+    fn uses_high_pressure_preferred_city_overlay(location: &str) -> bool {
+        matches!(
+            location.to_ascii_lowercase().as_str(),
+            "atlanta" | "miami" | "new york" | "nyc"
+        ) && Self::uses_preferred_city_overlay(location)
+    }
+
     fn uses_conservative_city_overlay(location: &str) -> bool {
         location.eq_ignore_ascii_case("Chicago")
             || location.eq_ignore_ascii_case("London")
@@ -2556,6 +2563,8 @@ impl WeatherAlphaStrategy {
     fn effective_max_entry_price(&self, location: &str) -> Decimal {
         if Self::uses_conservative_city_overlay(location) {
             self.config.max_entry_price.min(dec!(0.30))
+        } else if Self::uses_high_pressure_preferred_city_overlay(location) {
+            self.config.max_entry_price.max(dec!(0.48))
         } else if Self::uses_preferred_city_overlay(location) {
             self.config.max_entry_price.max(dec!(0.45))
         } else {
@@ -2577,7 +2586,9 @@ impl WeatherAlphaStrategy {
     }
 
     fn effective_max_spread_bps(&self, location: &str) -> u32 {
-        if Self::uses_preferred_city_overlay(location) {
+        if Self::uses_high_pressure_preferred_city_overlay(location) {
+            self.config.max_spread_bps.saturating_add(900)
+        } else if Self::uses_preferred_city_overlay(location) {
             self.config.max_spread_bps.saturating_add(700)
         } else {
             self.config.max_spread_bps
@@ -7195,6 +7206,11 @@ mod tests {
         ));
         assert!(WeatherAlphaStrategy::uses_preferred_city_overlay("Atlanta"));
         assert!(WeatherAlphaStrategy::uses_preferred_city_overlay("Miami"));
+        assert!(WeatherAlphaStrategy::uses_high_pressure_preferred_city_overlay("Atlanta"));
+        assert!(WeatherAlphaStrategy::uses_high_pressure_preferred_city_overlay("Miami"));
+        assert!(WeatherAlphaStrategy::uses_high_pressure_preferred_city_overlay("New York"));
+        assert!(!WeatherAlphaStrategy::uses_high_pressure_preferred_city_overlay("Dallas"));
+        assert!(!WeatherAlphaStrategy::uses_high_pressure_preferred_city_overlay("Seattle"));
         assert!(!WeatherAlphaStrategy::uses_preferred_city_overlay(
             "Chicago"
         ));
@@ -7214,6 +7230,14 @@ mod tests {
         );
         assert_eq!(
             strategy.effective_max_spread_bps("Miami"),
+            strategy.config.max_spread_bps + 900
+        );
+        assert_eq!(
+            strategy.effective_max_spread_bps("New York"),
+            strategy.config.max_spread_bps + 900
+        );
+        assert_eq!(
+            strategy.effective_max_spread_bps("Dallas"),
             strategy.config.max_spread_bps + 700
         );
         assert_eq!(
@@ -7240,7 +7264,9 @@ mod tests {
             },
         );
 
-        assert_eq!(strategy.effective_max_entry_price("Miami"), dec!(0.45));
+        assert_eq!(strategy.effective_max_entry_price("Miami"), dec!(0.48));
+        assert_eq!(strategy.effective_max_entry_price("New York"), dec!(0.48));
+        assert_eq!(strategy.effective_max_entry_price("Dallas"), dec!(0.45));
         assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(4.60));
 
         assert_eq!(strategy.effective_max_entry_price("Chicago"), dec!(0.30));
@@ -7296,7 +7322,7 @@ mod tests {
         );
         assert_eq!(
             strategy.effective_max_entry_price_for_resolution("Miami", Some(30)),
-            dec!(0.45)
+            dec!(0.48)
         );
         assert_eq!(
             strategy.effective_max_position_usdc_for_resolution("Miami", Some(30)),

@@ -1188,8 +1188,8 @@ fn default_crypto_same_day_range_max_spread_multiplier() -> Decimal {
     Decimal::new(85, 2)
 } // 0.85
 fn default_crypto_same_day_major_range_max_spread_multiplier() -> Decimal {
-    Decimal::new(90, 2)
-} // 0.90
+    Decimal::new(95, 2)
+} // 0.95
 fn default_crypto_short_horizon_max_spread_multiplier() -> Decimal {
     Decimal::new(75, 2)
 } // 0.75
