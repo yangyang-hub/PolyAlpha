@@ -82,6 +82,11 @@ This file records repository-specific working agreements, high-level project con
 
 ## Change Log
 
+### 2026-04-07
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `README.md`
+- Change: Loosened next-day crypto range entry more aggressively by raising `short_horizon_max_spread_multiplier` from `0.75` to `0.82`, raising `next_day_alt_range_max_spread_multiplier` from `1.10` to `1.20`, increasing the existing `next_day + major + range + generic` spread override from `1.08` to `1.15`, and adding a matching `next_day + alt + range + generic` spread override at `1.15`.
+- Why: Live `/api/status` on April 7 still showed zero crypto trades with `next_day range` candidates, led by XRP and Ethereum ladders, almost entirely blocked on `spread_too_wide`; the user explicitly asked to loosen more, so the next bounded step is a stronger but still scope-limited expansion of next-day range spread tolerance rather than broader risk loosening.
+
 ### 2026-04-03
 - Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `README.md`
 - Change: Raised the default same-day major-range spread multiplier from `0.90` to `0.95` and extended the existing `next_day + major + range + generic` calibration override with `max_spread_multiplier = 1.08` while keeping its tighter `size_multiplier = 0.88`.
@@ -131,6 +136,16 @@ This file records repository-specific working agreements, high-level project con
 - Area: `crates/pa-strategy/src/weather.rs`
 - Change: Added a narrower high-pressure preferred-city overlay for `New York`, `Miami`, and `Atlanta`, raising their weather spread budget from `+700bps` to `+900bps` and their preferred entry-price ceiling from `0.45` to `0.48`, while leaving `Dallas` and `Seattle` on the prior preferred-city settings.
 - Why: Live weather blocker summaries had shifted from a broad-city problem to a concentrated `spread_too_wide` and `price_above_max_entry` problem led by `New York`, `Miami`, and `Atlanta`, so the next bounded optimization step is to relax only that trio instead of widening all preferred cities equally.
+
+### 2026-04-07
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Split the preferred-city weather overlay again so `New York` now gets a stricter primary-pressure relaxation (`+1100bps` spread budget, `0.50` preferred entry ceiling) while `Miami` and `Atlanta` stay on the secondary high-pressure settings (`+900bps`, `0.48`), with `Dallas` and `Seattle` unchanged.
+- Why: The latest live blocker summaries showed `New York` clearly leading both spread and price friction even after the previous preferred-city widening, so the next bounded optimization step is to push only that one city harder rather than loosening the whole preferred set again.
+
+### 2026-04-07
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Loosened the weather city tiers again so `New York` now uses a `+1400bps` spread overlay and `0.53` preferred entry ceiling, `Miami`/`Atlanta` move to `+1100bps` and `0.50`, and `Dallas`/`Seattle` rise to `+850bps` and `0.47`.
+- Why: Live weather still had zero detected opportunities while blocker summaries remained dominated by spread and price across the preferred NOAA set, so the next experiment is a more aggressive but still city-tiered relaxation before touching edge thresholds.
 
 ### 2026-03-29
 - Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `crates/pa-monitor/src/api.rs`, `config/default.toml`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`, `frontend/src/components/ConfigSection.tsx`, `README.md`

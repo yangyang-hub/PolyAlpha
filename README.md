@@ -881,7 +881,7 @@ same_day_alt_generic_range_max_spread_multiplier = 1.15
 same_day_alt_range_max_spread_multiplier = 1.10
 same_day_range_max_spread_multiplier = 0.85
 same_day_major_range_max_spread_multiplier = 0.95
-next_day_alt_range_max_spread_multiplier = 1.10
+next_day_alt_range_max_spread_multiplier = 1.20
 same_day_alt_capital_efficiency_multiplier = 0.98
 same_day_major_range_capital_efficiency_multiplier = 0.97
 same_day_eth_range_capital_efficiency_multiplier = 0.93
@@ -955,8 +955,8 @@ such as `stale_follow`, `profit_protect`, `drawdown`, and `capital_efficiency`.
 buys/sells, ending cash, realized PnL, and open-position count after each snapshot.
 medium_horizon_min_edge_multiplier = 1.20
 same_day_max_spread_multiplier = 0.55
-short_horizon_max_spread_multiplier = 0.75
-next_day_alt_range_max_spread_multiplier = 1.10
+short_horizon_max_spread_multiplier = 0.82
+next_day_alt_range_max_spread_multiplier = 1.20
 medium_horizon_max_spread_multiplier = 0.90
 same_day_capital_efficiency_threshold = 0.90
 short_horizon_capital_efficiency_threshold = 0.92
@@ -1186,6 +1186,23 @@ edge_decay_cooldown_multiplier = 0.92
 capital_efficiency_multiplier = 0.98
 model_reversal_buffer_multiplier = 0.92
 profit_retention_multiplier = 1.05
+
+[[crypto_alpha.calibration_overrides]]
+asset = "*"
+asset_class = "major"
+resolution_bucket = "next_day"
+market_type = "range"
+event_subtype = "generic"
+max_spread_multiplier = 1.15
+size_multiplier = 0.88
+
+[[crypto_alpha.calibration_overrides]]
+asset = "*"
+asset_class = "alt"
+resolution_bucket = "next_day"
+market_type = "range"
+event_subtype = "generic"
+max_spread_multiplier = 1.15
 slippage_multiplier = 0.93
 size_retention_multiplier = 1.06
 
