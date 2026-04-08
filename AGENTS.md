@@ -82,6 +82,11 @@ This file records repository-specific working agreements, high-level project con
 
 ## Change Log
 
+### 2026-04-08
+- Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `README.md`
+- Change: Raised the default `same_day_major_range_max_spread_multiplier` from `0.95` to `1.05`.
+- Why: Live `/api/status` on April 8 still showed zero crypto trades, and the dominant fresh blocker had rotated back to same-day `major / range` ladders, led by Ethereum same-day range markets, being rejected on `spread_too_wide`; the next bounded optimization step is therefore another narrow spread relaxation for that exact bucket rather than broader risk or post-entry changes.
+
 ### 2026-04-07
 - Area: `crates/pa-core/src/config.rs`, `config/default.toml`, `README.md`
 - Change: Loosened next-day crypto range entry more aggressively by raising `short_horizon_max_spread_multiplier` from `0.75` to `0.82`, raising `next_day_alt_range_max_spread_multiplier` from `1.10` to `1.20`, increasing the existing `next_day + major + range + generic` spread override from `1.08` to `1.15`, and adding a matching `next_day + alt + range + generic` spread override at `1.15`.
@@ -146,6 +151,11 @@ This file records repository-specific working agreements, high-level project con
 - Area: `crates/pa-strategy/src/weather.rs`
 - Change: Loosened the weather city tiers again so `New York` now uses a `+1400bps` spread overlay and `0.53` preferred entry ceiling, `Miami`/`Atlanta` move to `+1100bps` and `0.50`, and `Dallas`/`Seattle` rise to `+850bps` and `0.47`.
 - Why: Live weather still had zero detected opportunities while blocker summaries remained dominated by spread and price across the preferred NOAA set, so the next experiment is a more aggressive but still city-tiered relaxation before touching edge thresholds.
+
+### 2026-04-08
+- Area: `crates/pa-strategy/src/weather.rs`
+- Change: Widened the preferred NOAA city tiers again: `New York` now gets `+1700bps` spread relief and a `0.58` entry ceiling, `Miami`/`Atlanta` move to `+1300bps` and `0.53`, and `Dallas`/`Seattle` move to `+1000bps` and `0.50`.
+- Why: Even after the prior tiered relaxations, live weather still had zero detected opportunities and remained overwhelmingly blocked by `spread_too_wide` and `price_above_max_entry`, so the next bounded step is a stronger city-tier relaxation before considering global edge changes.
 
 ### 2026-03-29
 - Area: `crates/pa-core/src/config.rs`, `crates/pa-strategy/src/crypto_alpha.rs`, `crates/pa-monitor/src/api.rs`, `config/default.toml`, `frontend/src/api.ts`, `frontend/src/pages/CryptoMarkets.tsx`, `frontend/src/components/ConfigSection.tsx`, `README.md`

@@ -2569,11 +2569,11 @@ impl WeatherAlphaStrategy {
         if Self::uses_conservative_city_overlay(location) {
             self.config.max_entry_price.min(dec!(0.30))
         } else if Self::uses_primary_pressure_preferred_city_overlay(location) {
-            self.config.max_entry_price.max(dec!(0.53))
+            self.config.max_entry_price.max(dec!(0.58))
         } else if Self::uses_high_pressure_preferred_city_overlay(location) {
-            self.config.max_entry_price.max(dec!(0.50))
+            self.config.max_entry_price.max(dec!(0.53))
         } else if Self::uses_preferred_city_overlay(location) {
-            self.config.max_entry_price.max(dec!(0.47))
+            self.config.max_entry_price.max(dec!(0.50))
         } else {
             self.config.max_entry_price
         }
@@ -2594,11 +2594,11 @@ impl WeatherAlphaStrategy {
 
     fn effective_max_spread_bps(&self, location: &str) -> u32 {
         if Self::uses_primary_pressure_preferred_city_overlay(location) {
-            self.config.max_spread_bps.saturating_add(1400)
+            self.config.max_spread_bps.saturating_add(1700)
         } else if Self::uses_high_pressure_preferred_city_overlay(location) {
-            self.config.max_spread_bps.saturating_add(1100)
+            self.config.max_spread_bps.saturating_add(1300)
         } else if Self::uses_preferred_city_overlay(location) {
-            self.config.max_spread_bps.saturating_add(850)
+            self.config.max_spread_bps.saturating_add(1000)
         } else {
             self.config.max_spread_bps
         }
@@ -7242,15 +7242,15 @@ mod tests {
         );
         assert_eq!(
             strategy.effective_max_spread_bps("New York"),
-            strategy.config.max_spread_bps + 1400
+            strategy.config.max_spread_bps + 1700
         );
         assert_eq!(
             strategy.effective_max_spread_bps("Miami"),
-            strategy.config.max_spread_bps + 1100
+            strategy.config.max_spread_bps + 1300
         );
         assert_eq!(
             strategy.effective_max_spread_bps("Dallas"),
-            strategy.config.max_spread_bps + 850
+            strategy.config.max_spread_bps + 1000
         );
         assert_eq!(
             strategy.effective_max_spread_bps("Chicago"),
@@ -7276,9 +7276,9 @@ mod tests {
             },
         );
 
-        assert_eq!(strategy.effective_max_entry_price("Miami"), dec!(0.50));
-        assert_eq!(strategy.effective_max_entry_price("New York"), dec!(0.53));
-        assert_eq!(strategy.effective_max_entry_price("Dallas"), dec!(0.47));
+        assert_eq!(strategy.effective_max_entry_price("Miami"), dec!(0.53));
+        assert_eq!(strategy.effective_max_entry_price("New York"), dec!(0.58));
+        assert_eq!(strategy.effective_max_entry_price("Dallas"), dec!(0.50));
         assert_eq!(strategy.effective_max_position_usdc("Miami"), dec!(4.60));
 
         assert_eq!(strategy.effective_max_entry_price("Chicago"), dec!(0.30));
@@ -7334,11 +7334,11 @@ mod tests {
         );
         assert_eq!(
             strategy.effective_max_entry_price_for_resolution("Miami", Some(30)),
-            dec!(0.50)
+            dec!(0.53)
         );
         assert_eq!(
             strategy.effective_max_entry_price_for_resolution("New York", Some(30)),
-            dec!(0.53)
+            dec!(0.58)
         );
         assert_eq!(
             strategy.effective_max_position_usdc_for_resolution("Miami", Some(30)),
